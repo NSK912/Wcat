@@ -54,6 +54,17 @@ export default function App() {
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const [ffmpegLoaded, setFfmpegLoaded] = useState<boolean>(false);
 
+  // Prevent right click context menu globally
+  useEffect(() => {
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+    document.addEventListener('contextmenu', handleContextMenu);
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, []);
+
   // Generate video preview thumbnails dynamically based on video duration
   useEffect(() => {
     if (!videoUrl || !duration) {
