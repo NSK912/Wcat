@@ -240,10 +240,10 @@ export const Timeline: React.FC<TimelineProps> = ({
             style={{ left: `${progressPercent}%` }}
           >
             <img 
-              src="/wcat-seek.png" 
+              src={`${import.meta.env.BASE_URL}wcat-seek.png`} 
               onError={(e) => {
                 // Fallback to SVG if needed
-                (e.target as HTMLImageElement).src = '/wcat-seek.svg';
+                (e.target as HTMLImageElement).src = `${import.meta.env.BASE_URL}wcat-seek.svg`;
               }}
               alt="Seek handle" 
               className="h-9 w-auto max-w-none object-contain select-none drop-shadow-md transition-transform duration-75 hover:scale-110"

@@ -131,8 +131,9 @@ export default function App() {
       });
 
       setProcessingMessage('Initializing local FFmpeg core (WASM)...');
-      const coreURL = await toBlobURL('/ffmpeg-core.js', 'text/javascript');
-      const wasmURL = await toBlobURL('/ffmpeg-core.wasm', 'application/wasm');
+      const baseURL = import.meta.env.BASE_URL;
+      const coreURL = await toBlobURL(`${baseURL}ffmpeg-core.js`, 'text/javascript');
+      const wasmURL = await toBlobURL(`${baseURL}ffmpeg-core.wasm`, 'application/wasm');
       await ffmpeg.load({
         coreURL,
         wasmURL,
