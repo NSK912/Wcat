@@ -158,7 +158,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               <span>Donate</span>
             </a>
           </div>
-          <div className="text-slate-500 text-xs font-medium font-mono">ver 3.5.0.0</div>
+          <div className="text-slate-500 text-xs font-medium font-mono">
+            <span className="font-bold mr-2">NSK App</span>
+            ver 3.5.0.0
+          </div>
         </div>
       ) : (
         <div className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}>
