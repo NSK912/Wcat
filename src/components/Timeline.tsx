@@ -1,6 +1,8 @@
 import React from 'react';
 import { Play, Pause, Scissors, Upload, Sparkles, RefreshCw, Download, Plus, LayoutGrid } from 'lucide-react';
 import { formatTime } from '../utils/sampleVideos';
+import wcatSeekPng from '../../assets/Wcat seek.png';
+import wcatSeekSvg from '../../public/wcat-seek.svg';
 
 interface TimelineProps {
   currentTime: number;
@@ -240,10 +242,10 @@ export const Timeline: React.FC<TimelineProps> = ({
             style={{ left: `${progressPercent}%` }}
           >
             <img 
-              src={`${import.meta.env.BASE_URL}wcat-seek.png`} 
+              src={wcatSeekPng} 
               onError={(e) => {
                 // Fallback to SVG if needed
-                (e.target as HTMLImageElement).src = `${import.meta.env.BASE_URL}wcat-seek.svg`;
+                (e.target as HTMLImageElement).src = wcatSeekSvg;
               }}
               alt="Seek handle" 
               className="h-9 w-auto max-w-none object-contain select-none drop-shadow-md transition-transform duration-75 hover:scale-110"

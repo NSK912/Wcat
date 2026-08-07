@@ -4,8 +4,8 @@
   "version": "3.5.0.0",
   "type": "module",
   "scripts": {
-    "dev": "mkdir -p public && cp node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js public/ && cp node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm public/ && (cp \"assets/Wcat seek.png\" public/wcat-seek.png 2>/dev/null || true) && vite --port=3000 --host=0.0.0.0",
-    "build": "mkdir -p public && cp node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js public/ && cp node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm public/ && (cp \"assets/Wcat seek.png\" public/wcat-seek.png 2>/dev/null || true) && vite build",
+    "dev": "vite --port=3000 --host=0.0.0.0",
+    "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

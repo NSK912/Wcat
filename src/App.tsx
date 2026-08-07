@@ -130,10 +130,21 @@ export default function App() {
         setProcessingProgress(Math.max(0, Math.min(1, progress)));
       });
 
-      setProcessingMessage('Initializing local FFmpeg core (WASM)...');
-      const baseURL = import.meta.env.BASE_URL;
-      const coreURL = await toBlobURL(`${baseURL}ffmpeg-core.js`, 'text/javascript');
-      const wasmURL = await toBlobURL(`${baseURL}ffmpeg-core.wasm`, 'application/wasm');
+      let coreURL, wasmURL;
+      
+      try {
+        setProcessingMessage('Initializing FFmpeg core (from UNPKG)...');
+        // Use UNPKG as primary for GitHub Pages compatibility
+        coreURL = await toBlobURL('https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js', 'text/javascript');
+        wasmURL = await toBlobURL('https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm', 'application/wasm');
+      } catch (e) {
+        console.warn('Failed to load from UNPKG, falling back to local files', e);
+        setProcessingMessage('Initializing local FFmpeg core...');
+        const baseURL = import.meta.env.BASE_URL;
+        coreURL = await toBlobURL(`${baseURL}ffmpeg-core.js`, 'text/javascript');
+        wasmURL = await toBlobURL(`${baseURL}ffmpeg-core.wasm`, 'application/wasm');
+      }
+
       await ffmpeg.load({
         coreURL,
         wasmURL,
