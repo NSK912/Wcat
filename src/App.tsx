@@ -8,6 +8,9 @@ import { Timeline } from './components/Timeline';
 import { ProcessingModal } from './components/ProcessingModal';
 import { SampleModal } from './components/SampleModal';
 
+import ffmpegCoreUrl from '@ffmpeg/core?url';
+import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
+
 const DEFAULT_SETTINGS: EditSettings = {
   startTime: 0,
   endTime: 10,
@@ -130,20 +133,9 @@ export default function App() {
         setProcessingProgress(Math.max(0, Math.min(1, progress)));
       });
 
-      let coreURL, wasmURL;
-      
-      try {
-        setProcessingMessage('Initializing FFmpeg core (from UNPKG)...');
-        // Use UNPKG as primary for GitHub Pages compatibility
-        coreURL = await toBlobURL('https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js', 'text/javascript');
-        wasmURL = await toBlobURL('https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm', 'application/wasm');
-      } catch (e) {
-        console.warn('Failed to load from UNPKG, falling back to local files', e);
-        setProcessingMessage('Initializing local FFmpeg core...');
-        const baseURL = import.meta.env.BASE_URL;
-        coreURL = await toBlobURL(`${baseURL}ffmpeg-core.js`, 'text/javascript');
-        wasmURL = await toBlobURL(`${baseURL}ffmpeg-core.wasm`, 'application/wasm');
-      }
+      setProcessingMessage('Initializing local FFmpeg core...');
+      const coreURL = await toBlobURL(ffmpegCoreUrl, 'text/javascript');
+      const wasmURL = await toBlobURL(ffmpegWasmUrl, 'application/wasm');
 
       await ffmpeg.load({
         coreURL,
