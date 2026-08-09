@@ -228,7 +228,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           <video
             ref={videoRef}
             src={videoUrl}
-            className="hidden"
+            className="absolute opacity-0 w-px h-px pointer-events-none -z-10"
             onTimeUpdate={() => {
               if (videoRef.current) {
                 onTimeUpdate(videoRef.current.currentTime);
