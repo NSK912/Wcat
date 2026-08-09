@@ -217,18 +217,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       ) : (
         <div className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}>
+          {/* Main output canvas */}
           <canvas
             ref={canvasRef}
-            className="max-h-full max-w-full object-contain transition-all duration-200"
+            className="max-h-full max-w-full object-contain transition-all duration-200 z-10"
             style={{
               filter: getCssFilter(),
               transform: getTransform(),
             }}
           />
+
+          {/* Hidden video element for decoding, sized properly so mobile Edge/Safari don't throttle it */}
           <video
             ref={videoRef}
             src={videoUrl}
-            className="absolute opacity-0 w-px h-px pointer-events-none -z-10"
+            className="absolute top-0 left-0 w-full h-full object-contain pointer-events-none opacity-[0.01] z-0"
+            playsInline
+            muted={settings.muteAudio}
             onTimeUpdate={() => {
               if (videoRef.current) {
                 onTimeUpdate(videoRef.current.currentTime);
@@ -249,7 +254,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               }
             }}
             onEnded={() => onTogglePlay()}
-            playsInline
           />
 
           {/* Live Watermark Overlay */}
