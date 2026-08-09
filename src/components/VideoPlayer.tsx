@@ -24,6 +24,58 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onSeek,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // requestVideoFrameCallback for stable Canvas rendering
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+
+    let callbackId: number;
+
+    const renderFrame = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        }
+      }
+      if (isPlaying && ('requestVideoFrameCallback' in video)) {
+        // @ts-ignore
+        callbackId = video.requestVideoFrameCallback(renderFrame);
+      } else if (isPlaying) {
+        callbackId = requestAnimationFrame(renderFrame);
+      }
+    };
+
+    if (isPlaying) {
+      if ('requestVideoFrameCallback' in video) {
+        // @ts-ignore
+        callbackId = video.requestVideoFrameCallback(renderFrame);
+      } else {
+        callbackId = requestAnimationFrame(renderFrame);
+      }
+    } else {
+      // Draw at least once when paused/seeked
+      renderFrame();
+    }
+
+    return () => {
+      if (callbackId) {
+        if ('cancelVideoFrameCallback' in video) {
+          // @ts-ignore
+          video.cancelVideoFrameCallback(callbackId);
+        } else {
+          cancelAnimationFrame(callbackId);
+        }
+      }
+    };
+  }, [isPlaying, currentTime]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -165,14 +217,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       ) : (
         <div className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}>
-          <video
-            ref={videoRef}
-            src={videoUrl}
+          <canvas
+            ref={canvasRef}
             className="max-h-full max-w-full object-contain transition-all duration-200"
             style={{
               filter: getCssFilter(),
               transform: getTransform(),
             }}
+          />
+          <video
+            ref={videoRef}
+            src={videoUrl}
+            className="hidden"
             onTimeUpdate={() => {
               if (videoRef.current) {
                 onTimeUpdate(videoRef.current.currentTime);
@@ -181,6 +237,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             onLoadedMetadata={(e) => {
               const dur = (e.target as HTMLVideoElement).duration;
               onDurationLoaded(dur);
+              
+              // Initial frame draw
+              if (videoRef.current && canvasRef.current) {
+                const video = videoRef.current;
+                const canvas = canvasRef.current;
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                if (ctx) ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+              }
             }}
             onEnded={() => onTogglePlay()}
             playsInline
