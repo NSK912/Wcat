@@ -46,6 +46,7 @@ export default function App() {
   const [isSampleModalOpen, setIsSampleModalOpen] = useState<boolean>(false);
   const [isProcessingModalOpen, setIsProcessingModalOpen] = useState<boolean>(false);
   const [processingProgress, setProcessingProgress] = useState<number>(0);
+  const [isProcessingComplete, setIsProcessingComplete] = useState<boolean>(false);
   const [processingMessage, setProcessingMessage] = useState<string>('');
   const [processingLogs, setProcessingLogs] = useState<string[]>([]);
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
@@ -294,7 +295,18 @@ export default function App() {
           return; // Abort export cleanly if user cancels folder/file picker
         }
         console.warn('showSaveFilePicker error/fallback:', err);
+        
+        // --- NEW: Handle Preview/Iframe restrictions explicitly ---
+        alert('⚠️ ระบบไม่สามารถเปิดหน้าต่าง "เลือกที่บันทึกไฟล์ล่วงหน้า" ได้\n\nสาเหตุหลัก: คุณกำลังใช้งานแอปนี้ผ่านหน้าต่าง Preview ของ AI Studio (ซึ่งถูกบล็อกความปลอดภัยการเข้าถึงไฟล์) หรือเบราว์เซอร์ไม่รองรับ\n\n💡 วิธีแก้เพื่อถนอม SSD: ให้คลิกปุ่ม "Open in New Tab" ที่มุมขวาบนของหน้าจอ AI Studio เพื่อเปิดแอปในแท็บใหม่ ฟีเจอร์นี้ถึงจะทำงานได้ครับ');
+        
+        const proceed = window.confirm('คุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
+        if (!proceed) {
+           return;
+        }
       }
+    } else {
+       const proceed = window.confirm('⚠️ เบราว์เซอร์ของคุณไม่รองรับฟีเจอร์ "เลือกที่บันทึกไฟล์ล่วงหน้า"\n\nคุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
+       if (!proceed) return;
     }
 
     const targetFilename = fileHandle ? fileHandle.name : defaultOutputName;
@@ -302,7 +314,13 @@ export default function App() {
 
     setIsProcessingModalOpen(true);
     setProcessingProgress(0);
+    setIsProcessingComplete(false);
     setProcessingLogs([]);
+    
+    // Revoke previous blob url if exists to free memory/cache
+    if (outputUrl) {
+      URL.revokeObjectURL(outputUrl);
+    }
     setOutputUrl(null);
     setProcessingMessage('Preparing files for FFmpeg...');
 
@@ -319,14 +337,15 @@ export default function App() {
       }
 
       if (selectedFiles.length > 1) {
-        setProcessingMessage('Writing input files for merge...');
+        setProcessingMessage('Mounting input files for merge...');
+        
+        await ffmpeg.createDir('/work');
+        await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
+
         let listContent = '';
         for (let i = 0; i < selectedFiles.length; i++) {
-          const fileData = await fetchFile(selectedFiles[i]);
-          const ext = selectedFiles[i].name.split('.').pop() || 'mp4';
-          const filename = `input${i}.${ext}`;
-          await ffmpeg.writeFile(filename, fileData);
-          listContent += `file ${filename}\n`;
+          const filename = `/work/${selectedFiles[i].name}`;
+          listContent += `file '${filename}'\n`;
         }
 
         await ffmpeg.writeFile('list.txt', listContent);
@@ -334,11 +353,19 @@ export default function App() {
         setProcessingMessage('Merging videos without re-encoding (-c copy)...');
         const outName = 'output.mp4';
 
-        await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', outName]);
+        const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', outName]);
+        if (ret !== 0) {
+          await ffmpeg.unmount('/work');
+          throw new Error('FFmpeg merge failed with exit code ' + ret);
+        }
 
         setProcessingMessage('Reading merged output file...');
         const data = await ffmpeg.readFile(outName);
         const blob = new Blob([data], { type: 'video/mp4' });
+        
+        // Delete from MEMFS to free memory
+        await ffmpeg.deleteFile(outName);
+        await ffmpeg.unmount('/work');
 
         if (fileHandle) {
           setProcessingMessage(`Writing output to selected location (${fileHandle.name})...`);
@@ -346,19 +373,33 @@ export default function App() {
           await writable.write(blob);
           await writable.close();
           setProcessingMessage(`Saved directly to selected folder: ${fileHandle.name}`);
+          setProcessingProgress(1.0);
+          setIsProcessingComplete(true);
+          // Do not create ObjectURL to prevent SSD caching wear
         } else {
           setProcessingMessage('Merge completed successfully without re-encoding!');
+          const url = URL.createObjectURL(blob);
+          setOutputUrl(url);
+          setProcessingProgress(1.0);
+          setIsProcessingComplete(true);
         }
-
-        const url = URL.createObjectURL(blob);
-        setOutputUrl(url);
-        setProcessingProgress(1.0);
       } else {
         setProcessingMessage('Reading input video...');
-        const inputData = await fetchFile(videoUrl);
+        
+        let inputFilename = '';
         const inputExt = videoName.split('.').pop() || 'mp4';
-        const inputFilename = `input.${inputExt}`;
-        await ffmpeg.writeFile(inputFilename, inputData);
+        const isLocalFile = selectedFiles.length > 0;
+        
+        if (isLocalFile) {
+          setProcessingMessage('Mounting local file...');
+          await ffmpeg.createDir('/work');
+          await ffmpeg.mount('WORKERFS', { files: [selectedFiles[0]] }, '/work');
+          inputFilename = `/work/${selectedFiles[0].name}`;
+        } else {
+          const inputData = await fetchFile(videoUrl);
+          inputFilename = `input.${inputExt}`;
+          await ffmpeg.writeFile(inputFilename, inputData);
+        }
 
         // Build FFmpeg arguments for fast lossless copy cut (-c copy)
         const args: string[] = [];
@@ -373,7 +414,7 @@ export default function App() {
 
         const trimDuration = endTime - startTime;
         if (trimDuration > 0 && trimDuration < duration) {
-          args.push('-to', endTime.toString());
+          args.push('-t', trimDuration.toString());
         }
 
         args.push('-c', 'copy');
@@ -383,11 +424,25 @@ export default function App() {
         setProcessingMessage(`Running FFmpeg fast copy-cut command...`);
         console.log('FFmpeg args:', args);
 
-        await ffmpeg.exec(args);
+        const ret = await ffmpeg.exec(args);
+        
+        if (isLocalFile) {
+          await ffmpeg.unmount('/work');
+        }
+        
+        if (ret !== 0) {
+          throw new Error('FFmpeg command failed with exit code ' + ret);
+        }
 
         setProcessingMessage('Reading output file...');
         const data = await ffmpeg.readFile(outName);
         const blob = new Blob([data], { type: `video/${inputExt}` });
+        
+        // Free MEMFS memory
+        await ffmpeg.deleteFile(outName);
+        if (!isLocalFile) {
+          await ffmpeg.deleteFile(inputFilename);
+        }
 
         if (fileHandle) {
           setProcessingMessage(`Writing output to selected location (${fileHandle.name})...`);
@@ -395,17 +450,20 @@ export default function App() {
           await writable.write(blob);
           await writable.close();
           setProcessingMessage(`Saved directly to selected folder: ${fileHandle.name}`);
+          setProcessingProgress(1.0);
+          setIsProcessingComplete(true);
         } else {
           setProcessingMessage('Copy-cut completed successfully!');
+          const url = URL.createObjectURL(blob);
+          setOutputUrl(url);
+          setProcessingProgress(1.0);
+          setIsProcessingComplete(true);
         }
-
-        const url = URL.createObjectURL(blob);
-        setOutputUrl(url);
-        setProcessingProgress(1.0);
       }
     } catch (err: any) {
       console.error('FFmpeg processing error:', err);
       setProcessingMessage(`Error: ${err.message || 'Processing failed'}`);
+      setIsProcessingComplete(true); // Allow closing modal on error
     }
   };
 
@@ -497,6 +555,7 @@ export default function App() {
         progress={processingProgress}
         message={processingMessage}
         logs={processingLogs}
+        isDone={isProcessingComplete}
         outputUrl={outputUrl}
         outputFilename={outputFilename}
         onClose={() => setIsProcessingModalOpen(false)}

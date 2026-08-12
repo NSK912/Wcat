@@ -50,6 +50,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Compute CSS filter string for live preview
   const getCssFilter = () => {
+    if (settings.brightness === 1.0 && settings.contrast === 1.0 && settings.filter === 'none') {
+      return undefined;
+    }
     let f = `brightness(${settings.brightness}) contrast(${settings.contrast})`;
     switch (settings.filter) {
       case 'grayscale':
@@ -75,6 +78,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Compute transform
   const getTransform = () => {
+    if (!settings.rotation && !settings.flipH && !settings.flipV) {
+      return undefined;
+    }
     const transforms = [];
     if (settings.rotation) transforms.push(`rotate(${settings.rotation}deg)`);
     if (settings.flipH) transforms.push('scaleX(-1)');
@@ -173,18 +179,25 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               filter: getCssFilter(),
               transform: getTransform(),
             }}
-            playsInline
-            muted={settings.muteAudio}
             onTimeUpdate={() => {
               if (videoRef.current) {
                 onTimeUpdate(videoRef.current.currentTime);
               }
             }}
             onLoadedMetadata={(e) => {
-              const dur = (e.target as HTMLVideoElement).duration;
+              const video = e.target as HTMLVideoElement;
+              const dur = video.duration;
               onDurationLoaded(dur);
+              // Force mobile browsers to render the first frame
+              if (video.currentTime === 0) {
+                video.currentTime = 0.001;
+              }
             }}
             onEnded={() => onTogglePlay()}
+            playsInline
+            preload="auto"
+            crossOrigin="anonymous"
+            muted={settings.muteAudio}
           />
 
           {/* Live Watermark Overlay */}
@@ -203,7 +216,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
           {/* Floating play/pause overlay button on click */}
           <div
-            onClick={onTogglePlay}
+            onClick={() => {
+              if (videoRef.current) {
+                if (isPlaying) {
+                  videoRef.current.pause();
+                } else {
+                  videoRef.current.play().catch(console.error);
+                }
+              }
+              onTogglePlay();
+            }}
             className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group ${
               isPlaying ? 'opacity-0 hover:opacity-100 bg-black/20' : 'opacity-100 bg-black/30'
             }`}

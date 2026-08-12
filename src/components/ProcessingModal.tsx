@@ -6,6 +6,7 @@ interface ProcessingModalProps {
   progress: number;
   message: string;
   logs: string[];
+  isDone: boolean;
   outputUrl: string | null;
   outputFilename: string;
   onClose: () => void;
@@ -17,6 +18,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
   progress,
   message,
   logs,
+  isDone,
   outputUrl,
   outputFilename,
   onClose,
@@ -58,18 +60,20 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
 
         {/* Actions / Progress Button */}
         <div className="pt-1">
-          {outputUrl ? (
+          {isDone ? (
             <div className="flex space-x-3">
-              <button
-                onClick={onDownload}
-                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-emerald-600/20 flex items-center justify-center space-x-2 transition"
-              >
-                <Download className="w-4 h-4" />
-                <span>Download {outputFilename}</span>
-              </button>
+              {outputUrl && (
+                <button
+                  onClick={onDownload}
+                  className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-emerald-600/20 flex items-center justify-center space-x-2 transition"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download {outputFilename}</span>
+                </button>
+              )}
               <button
                 onClick={onClose}
-                className="px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center"
+                className={`px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center ${!outputUrl ? 'w-full py-3' : ''}`}
               >
                 <X className="w-4 h-4 mr-1" />
                 <span>Close</span>
