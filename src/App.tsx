@@ -272,9 +272,9 @@ export default function App() {
     // 1. Prompt user to choose destination folder & file name before starting export/remux
     let fileHandle: any = null;
     const defaultOutputName = selectedFiles.length > 1 
-      ? 'merged_output.mp4' 
-      : `trimmed_${videoName || 'video.mp4'}`;
-    const outputExt = defaultOutputName.split('.').pop() || 'mp4';
+      ? 'merged_output.ts' 
+      : `trimmed_${videoName ? videoName.split('.')[0] : 'video'}.ts`;
+    const outputExt = defaultOutputName.split('.').pop() || 'ts';
 
     if ('showSaveFilePicker' in window) {
       try {
@@ -284,7 +284,7 @@ export default function App() {
             {
               description: 'Video File',
               accept: {
-                [`video/${outputExt}`]: [`.${outputExt}`],
+                'video/mp2t': ['.ts'],
               },
             },
           ],
@@ -337,51 +337,82 @@ export default function App() {
       }
 
       if (selectedFiles.length > 1) {
-        setProcessingMessage('Mounting input files for merge...');
-        
-        await ffmpeg.createDir('/work');
-        await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
-
-        let listContent = '';
-        for (let i = 0; i < selectedFiles.length; i++) {
-          const filename = `/work/${selectedFiles[i].name}`;
-          listContent += `file '${filename}'\n`;
-        }
-
-        await ffmpeg.writeFile('list.txt', listContent);
-
-        setProcessingMessage('Merging videos without re-encoding (-c copy)...');
-        const outName = 'output.mp4';
-
-        const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', outName]);
-        if (ret !== 0) {
-          await ffmpeg.unmount('/work');
-          throw new Error('FFmpeg merge failed with exit code ' + ret);
-        }
-
-        setProcessingMessage('Reading merged output file...');
-        const data = await ffmpeg.readFile(outName);
-        const blob = new Blob([data], { type: 'video/mp4' });
-        
-        // Delete from MEMFS to free memory
-        await ffmpeg.deleteFile(outName);
-        await ffmpeg.unmount('/work');
-
-        if (fileHandle) {
-          setProcessingMessage(`Writing output to selected location (${fileHandle.name})...`);
+        if (fileHandle && fileHandle.name.endsWith('.ts')) {
+          setProcessingMessage('เปิดท่อส่งข้อมูลลง SSD (Streaming Mode)...');
           const writable = await fileHandle.createWritable();
-          await writable.write(blob);
+          
+          for (let i = 0; i < selectedFiles.length; i++) {
+              const file = selectedFiles[i];
+              setProcessingMessage(`กำลังต่อไฟล์ ${i+1}/${selectedFiles.length} (${file.name})...`);
+              
+              const dirName = `/work${i}`;
+              await ffmpeg.createDir(dirName);
+              await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
+              const inputFilename = `${dirName}/${file.name}`;
+              const outName = `chunk${i}.ts`;
+              
+              const ret = await ffmpeg.exec(['-i', inputFilename, '-c', 'copy', '-f', 'mpegts', outName]);
+              if (ret !== 0) throw new Error('FFmpeg error converting ' + file.name);
+              
+              const data = await ffmpeg.readFile(outName);
+              await writable.write(data);
+              
+              await ffmpeg.deleteFile(outName);
+              await ffmpeg.unmount(dirName);
+              
+              setProcessingProgress((i + 1) / selectedFiles.length);
+          }
           await writable.close();
-          setProcessingMessage(`Saved directly to selected folder: ${fileHandle.name}`);
+          setProcessingMessage(`รวมไฟล์สำเร็จ (RAM ปลอดภัย): ${fileHandle.name}`);
           setProcessingProgress(1.0);
           setIsProcessingComplete(true);
-          // Do not create ObjectURL to prevent SSD caching wear
         } else {
-          setProcessingMessage('Merge completed successfully without re-encoding!');
-          const url = URL.createObjectURL(blob);
-          setOutputUrl(url);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
+          setProcessingMessage('Mounting input files for merge...');
+          
+          await ffmpeg.createDir('/work');
+          await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
+
+          let listContent = '';
+          for (let i = 0; i < selectedFiles.length; i++) {
+            const filename = `/work/${selectedFiles[i].name}`;
+            listContent += `file '${filename}'\n`;
+          }
+
+          await ffmpeg.writeFile('list.txt', listContent);
+
+          setProcessingMessage('Merging videos without re-encoding (-c copy)...');
+          const outName = 'output.ts';
+
+          const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-f', 'mpegts', outName]);
+          if (ret !== 0) {
+            await ffmpeg.unmount('/work');
+            throw new Error('FFmpeg merge failed with exit code ' + ret);
+          }
+
+          setProcessingMessage('Reading merged output file...');
+          const data = await ffmpeg.readFile(outName);
+          const blob = new Blob([data], { type: 'video/mp2t' });
+          
+          // Delete from MEMFS to free memory
+          await ffmpeg.deleteFile(outName);
+          await ffmpeg.unmount('/work');
+
+          if (fileHandle) {
+            setProcessingMessage(`Writing output to selected location (${fileHandle.name})...`);
+            const writable = await fileHandle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            setProcessingMessage(`Saved directly to selected folder: ${fileHandle.name}`);
+            setProcessingProgress(1.0);
+            setIsProcessingComplete(true);
+            // Do not create ObjectURL to prevent SSD caching wear
+          } else {
+            setProcessingMessage('Merge completed successfully without re-encoding!');
+            const url = URL.createObjectURL(blob);
+            setOutputUrl(url);
+            setProcessingProgress(1.0);
+            setIsProcessingComplete(true);
+          }
         }
       } else {
         setProcessingMessage('Reading input video...');
@@ -401,11 +432,55 @@ export default function App() {
           await ffmpeg.writeFile(inputFilename, inputData);
         }
 
-        // Build FFmpeg arguments for fast lossless copy cut (-c copy)
-        const args: string[] = [];
+        if (fileHandle && fileHandle.name.endsWith('.ts')) {
+          const CHUNK_DURATION = 60; // 60s per chunk
+          let currentStart = settings.startTime;
+          const finalEndTime = (settings.endTime > 0 && settings.endTime < duration) ? settings.endTime : duration;
+          const outName = 'chunk.ts';
+          
+          setProcessingMessage('เปิดท่อส่งข้อมูลลง SSD (Streaming Mode)...');
+          const writable = await fileHandle.createWritable();
+          
+          while (currentStart < finalEndTime) {
+              const chunkEnd = Math.min(currentStart + CHUNK_DURATION, finalEndTime);
+              const chunkDuration = chunkEnd - currentStart;
+              
+              setProcessingMessage(`กำลังเขียนข้อมูลช่วง ${Math.round(currentStart)}s ถึง ${Math.round(chunkEnd)}s (ประหยัด RAM)...`);
+              
+              const args = [
+                  '-ss', currentStart.toString(),
+                  '-i', inputFilename,
+                  '-t', chunkDuration.toString(),
+                  '-c', 'copy',
+                  '-f', 'mpegts',
+                  outName
+              ];
+              
+              const ret = await ffmpeg.exec(args);
+              if (ret !== 0) throw new Error('FFmpeg error at chunk ' + currentStart);
+              
+              const data = await ffmpeg.readFile(outName);
+              await writable.write(data);
+              
+              // 🔥 หัวใจสำคัญ: ลบไฟล์ออกจาก RAM ทันที!
+              await ffmpeg.deleteFile(outName);
+              
+              currentStart = chunkEnd;
+              setProcessingProgress((currentStart - settings.startTime) / (finalEndTime - settings.startTime));
+          }
+          
+          await writable.close();
+          if (isLocalFile) await ffmpeg.unmount('/work');
+          
+          setProcessingMessage(`บันทึกไฟล์สำเร็จ (RAM ปลอดภัย): ${fileHandle.name}`);
+          setProcessingProgress(1.0);
+          setIsProcessingComplete(true);
+        } else {
+          // Build FFmpeg arguments for fast lossless copy cut (-c copy)
+          const args: string[] = [];
 
-        const startTime = settings.startTime;
-        const endTime = settings.endTime;
+          const startTime = settings.startTime;
+          const endTime = settings.endTime;
 
         if (startTime > 0) {
           args.push('-ss', startTime.toString());
@@ -460,6 +535,7 @@ export default function App() {
           setIsProcessingComplete(true);
         }
       }
+    }
     } catch (err: any) {
       console.error('FFmpeg processing error:', err);
       setProcessingMessage(`Error: ${err.message || 'Processing failed'}`);
