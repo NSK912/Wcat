@@ -172,7 +172,50 @@ export async function readMkvDurationMs(file: File): Promise<number> {
 }
 
 /**
- * Fallback: Scans last 16MB of file for the highest Cluster Timecode
+ * Extracts maximum relative frame timecode (in ms) from SimpleBlocks/Blocks inside a cluster buffer
+ */
+function getClusterMaxRelativeTimecode(inspectBuf: Uint8Array): number {
+  let maxRel = 0;
+  try {
+    let pos = 4;
+    const clusterSize = parseVint(inspectBuf, pos);
+    if (!clusterSize) return 2000; // default 2 seconds safety assumption
+    pos += clusterSize.length;
+
+    while (pos < inspectBuf.length - 8) {
+      if (inspectBuf[pos] === 0xE7) { // Timecode ID
+        const tcSize = parseVint(inspectBuf, pos + 1);
+        if (tcSize) {
+          pos += 1 + tcSize.length + tcSize.value;
+          continue;
+        }
+      }
+
+      if (inspectBuf[pos] === 0xA3) { // SimpleBlock
+        const sizeVint = parseVint(inspectBuf, pos + 1);
+        if (!sizeVint) break;
+        const dataPos = pos + 1 + sizeVint.length;
+        const trackVint = parseVint(inspectBuf, dataPos);
+        if (!trackVint) break;
+        const tcPos = dataPos + trackVint.length;
+        if (tcPos + 1 < inspectBuf.length) {
+          let relTc = (inspectBuf[tcPos] << 8) | inspectBuf[tcPos + 1];
+          if (relTc & 0x8000) relTc -= 0x10000; // 16-bit signed int
+          if (relTc > maxRel) maxRel = relTc;
+        }
+        pos += 1 + sizeVint.length + sizeVint.value;
+      } else {
+        pos++;
+      }
+    }
+  } catch {
+    return 2000;
+  }
+  return Math.max(maxRel, 1000); // At least 1000ms if frames present
+}
+
+/**
+ * Fallback: Scans last 16MB of file for the highest Frame Timecode
  */
 async function scanLastClusterTimecodeMs(file: File): Promise<number> {
   try {
@@ -180,7 +223,7 @@ async function scanLastClusterTimecodeMs(file: File): Promise<number> {
     const scanOffset = file.size - scanSize;
     const buf = await readSlice(file, scanOffset, scanSize);
 
-    let maxTc = 0;
+    let maxFrameTc = 0;
     for (let i = buf.length - 8; i >= 0; i--) {
       // Cluster ID: 0x1F 0x43 0xB6 0x75
       if (buf[i] === 0x1F && buf[i + 1] === 0x43 && buf[i + 2] === 0xB6 && buf[i + 3] === 0x75) {
@@ -191,21 +234,23 @@ async function scanLastClusterTimecodeMs(file: File): Promise<number> {
           if (buf[pos] === 0xE7) { // Timecode ID
             const tcSize = parseVint(buf, pos + 1);
             if (tcSize && pos + 1 + tcSize.length + tcSize.value <= buf.length) {
-              let tc = 0;
+              let clusterTc = 0;
               const valStart = pos + 1 + tcSize.length;
               for (let k = 0; k < tcSize.value; k++) {
-                tc = (tc * 256) + buf[valStart + k];
+                clusterTc = (clusterTc * 256) + buf[valStart + k];
               }
-              if (tc > maxTc) maxTc = tc;
+              const relTc = getClusterMaxRelativeTimecode(buf.subarray(i));
+              const frameTc = clusterTc + relTc;
+              if (frameTc > maxFrameTc) maxFrameTc = frameTc;
             }
             break;
           }
           pos++;
         }
-        if (maxTc > 0) break;
+        if (maxFrameTc > 0) break;
       }
     }
-    return maxTc > 0 ? (maxTc + 33) : 0;
+    return maxFrameTc > 0 ? (maxFrameTc + 33) : 0;
   } catch {
     return 0;
   }
@@ -1062,7 +1107,7 @@ export async function processNativeConcatStream(
       if (clusterStartOffset < 0 || clusterStartOffset >= file.size) continue;
 
       let offset = clusterStartOffset;
-      let fileMaxTc = 0;
+      let fileMaxFrameTc = 0;
       let isFirstClusterInFile = true;
 
       while (offset < file.size - 8) {
@@ -1083,7 +1128,8 @@ export async function processNativeConcatStream(
           const patchedResult = patchClusterHeader(inspectBuf, timeOffsetMs);
 
           if (patchedResult) {
-            fileMaxTc = Math.max(fileMaxTc, patchedResult.origTimecodeMs);
+            const relTc = getClusterMaxRelativeTimecode(inspectBuf);
+            fileMaxFrameTc = Math.max(fileMaxFrameTc, patchedResult.origTimecodeMs + relTc);
 
             // Record CuePoint for Clusters containing Keyframes
             const clusterPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
@@ -1200,12 +1246,11 @@ export async function processNativeConcatStream(
       }
 
       const fileKnownDurMs = fileDurationsMs[fIdx] || 0;
-      // Precision timestamp offset calculation:
-      // Use exact file metadata duration if available, otherwise fall back to max cluster timecode + 33ms (1 frame duration)
-      // Never add an artificial 1000ms gap, which creates timestamp holes and causes HTML5 player stalls!
-      const minClusterDurMs = fileMaxTc > 0 ? (fileMaxTc + 33) : 0;
-      const effectiveFileDurMs = Math.max(fileKnownDurMs, minClusterDurMs);
-      timeOffsetMs += effectiveFileDurMs;
+      // Precision frame-accurate duration for file fIdx:
+      // Uses max frame timecode inside clusters + 33ms (1 frame @ 30fps) to ensure seamless continuity without gaps or negative jumps
+      const maxFrameDurationMs = fileMaxFrameTc > 0 ? (fileMaxFrameTc + 33) : 0;
+      const actualFileDurMs = Math.max(fileKnownDurMs, maxFrameDurationMs);
+      timeOffsetMs += actualFileDurMs;
     }
 
     // 4. Build Cues and SeekHead Elements
