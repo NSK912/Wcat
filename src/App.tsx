@@ -3,10 +3,13 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { EditSettings, ActiveTab, SampleVideo } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
+import { Navbar } from './components/Navbar';
 import { VideoPlayer } from './components/VideoPlayer';
 import { Timeline } from './components/Timeline';
 import { ProcessingModal } from './components/ProcessingModal';
 import { SampleModal } from './components/SampleModal';
+import { RamMonitorModal } from './components/RamMonitorModal';
+import { getMemoryUsage, formatBytes, ProcessingRamLog } from './utils/ramTracker';
 
 import ffmpegCoreUrl from '@ffmpeg/core?url';
 import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
@@ -86,6 +89,9 @@ export default function App() {
   // Modals
   const [isSampleModalOpen, setIsSampleModalOpen] = useState<boolean>(false);
   const [isProcessingModalOpen, setIsProcessingModalOpen] = useState<boolean>(false);
+  const [isRamMonitorOpen, setIsRamMonitorOpen] = useState<boolean>(false);
+  const [ramLogs, setRamLogs] = useState<ProcessingRamLog[]>([]);
+
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [isProcessingComplete, setIsProcessingComplete] = useState<boolean>(false);
   const [processingMessage, setProcessingMessage] = useState<string>('');
@@ -375,6 +381,13 @@ export default function App() {
     setProcessingProgress(0);
     setIsProcessingComplete(false);
     setProcessingLogs([]);
+
+    // Record RAM metrics for RAM Diagnostic Log
+    const exportStartTimestamp = Date.now();
+    const startTimeStr = new Date().toLocaleTimeString('th-TH');
+    const initMem = getMemoryUsage();
+    const startRamMB = parseFloat((initMem.usedJSHeapSize / (1024 * 1024)).toFixed(1));
+    let sessionPeakRamMB = startRamMB;
     
     // Revoke previous blob url if exists to free memory/cache
     if (outputUrl) {
@@ -427,6 +440,15 @@ export default function App() {
 
         let isPolling = false;
         const pollInterval = setInterval(async () => {
+          // Monitor live memory peak during polling
+          const curMem = getMemoryUsage();
+          if (curMem.supported) {
+            const curUsedMB = curMem.usedJSHeapSize / (1024 * 1024);
+            if (curUsedMB > sessionPeakRamMB) {
+              sessionPeakRamMB = curUsedMB;
+            }
+          }
+
           if (isPolling) return;
           isPolling = true;
           try {
@@ -693,6 +715,27 @@ export default function App() {
       try {
         await ffmpegRef.current?.unmount('/work');
       } catch {}
+
+      const finalMem = getMemoryUsage();
+      const finalRamMB = parseFloat((finalMem.usedJSHeapSize / (1024 * 1024)).toFixed(1));
+      const fileSizeTotal = selectedFiles.length > 0
+        ? formatBytes(selectedFiles.reduce((sum, f) => sum + f.size, 0))
+        : 'Sample Video';
+      const durationSec = Math.max(1, Math.round((Date.now() - exportStartTimestamp) / 1000));
+
+      const logEntry: ProcessingRamLog = {
+        id: `log_${Date.now()}`,
+        taskName: selectedFiles.length > 1 ? `รวมวิดีโอ (${selectedFiles.length} ไฟล์)` : 'ตัดวิดีโอ',
+        fileSizeStr: fileSizeTotal,
+        startTime: startTimeStr,
+        durationSec,
+        startRamMB,
+        peakRamMB: parseFloat(sessionPeakRamMB.toFixed(1)),
+        finalRamMB,
+        status: 'completed',
+        notes: 'สตรีมแบบประหยัดแรม (Low-RAM Pipeline) บันทึกสำเร็จ',
+      };
+      setRamLogs((prev) => [logEntry, ...prev]);
     }
   };
 
@@ -714,6 +757,18 @@ export default function App() {
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-600/20 rounded-full blur-[120px]"></div>
       </div>
 
+      {/* Top Navigation Bar with Live RAM Badge */}
+      <Navbar
+        videoName={videoName}
+        onUploadClick={() => singleFileInputRef.current?.click()}
+        onSampleClick={() => setIsSampleModalOpen(true)}
+        onReset={handleReset}
+        onExportClick={handleExport}
+        isLoaded={!!videoUrl}
+        isProcessing={isProcessingModalOpen && !isProcessingComplete}
+        onOpenRamMonitor={() => setIsRamMonitorOpen(true)}
+      />
+
       {/* Hidden file input for Single File selection (1 file at a time) */}
       <input
         type="file"
@@ -732,10 +787,6 @@ export default function App() {
         multiple
         className="hidden"
       />
-
-
-
-
 
       {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden relative z-10">
@@ -774,8 +825,6 @@ export default function App() {
             isProcessing={false}
           />
         </div>
-
-
       </div>
 
       {/* Processing Modal */}
@@ -796,6 +845,14 @@ export default function App() {
         isOpen={isSampleModalOpen}
         onClose={() => setIsSampleModalOpen(false)}
         onSelectSample={handleSelectSample}
+      />
+
+      {/* RAM Monitor & Diagnostic Modal */}
+      <RamMonitorModal
+        isOpen={isRamMonitorOpen}
+        onClose={() => setIsRamMonitorOpen(false)}
+        logs={ramLogs}
+        onClearLogs={() => setRamLogs([])}
       />
     </div>
   );

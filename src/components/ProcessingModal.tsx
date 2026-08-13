@@ -1,5 +1,6 @@
-import React from 'react';
-import { Loader2, Download, AlertCircle, X, FileDown } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Loader2, Download, AlertCircle, X, FileDown, Cpu, Activity } from 'lucide-react';
+import { getMemoryUsage } from '../utils/ramTracker';
 
 interface ProcessingModalProps {
   isOpen: boolean;
@@ -24,6 +25,29 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
   onClose,
   onDownload,
 }) => {
+  const [currentRamMB, setCurrentRamMB] = useState<number>(0);
+  const [peakRamMB, setPeakRamMB] = useState<number>(0);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setPeakRamMB(0);
+      return;
+    }
+
+    const checkRam = () => {
+      const mem = getMemoryUsage();
+      if (mem.supported) {
+        const usedMB = mem.usedJSHeapSize / (1024 * 1024);
+        setCurrentRamMB(usedMB);
+        setPeakRamMB((prev) => Math.max(prev, usedMB));
+      }
+    };
+
+    checkRam();
+    const interval = setInterval(checkRam, 500);
+    return () => clearInterval(interval);
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const isError = message.toLowerCase().includes('error') || message.toLowerCase().includes('failed');
@@ -35,6 +59,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
       ` FFmpeg Process & Error Log`,
       ` Date & Time: ${timestamp}`,
       ` Status / Message: ${message}`,
+      ` RAM Usage: Current ${currentRamMB.toFixed(1)} MB | Peak ${peakRamMB.toFixed(1)} MB`,
       `========================================`,
       ``,
       `--- Detailed Logs (${logs.length} lines) ---`,
@@ -58,6 +83,26 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
       <div className="bg-slate-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl w-full max-w-lg p-5 shadow-2xl flex flex-col space-y-4 animate-in fade-in zoom-in duration-200">
         
+        {/* Real-time RAM Status Bar Header */}
+        <div className="bg-slate-950/80 border border-indigo-500/20 rounded-xl p-3 flex items-center justify-between text-xs font-mono">
+          <div className="flex items-center space-x-2 text-indigo-300">
+            <Cpu className="w-4 h-4 text-indigo-400" />
+            <span className="font-sans font-semibold text-slate-200">RAM Status:</span>
+          </div>
+          <div className="flex items-center space-x-3">
+            <span className="text-emerald-400 font-bold">
+              RAM: {currentRamMB > 0 ? `${currentRamMB.toFixed(1)} MB` : 'N/A'}
+            </span>
+            <span className="text-slate-500">|</span>
+            <span className="text-amber-300">
+              Peak: {peakRamMB > 0 ? `${peakRamMB.toFixed(1)} MB` : 'N/A'}
+            </span>
+            <span className="text-[10px] bg-emerald-500/20 text-emerald-300 font-sans px-2 py-0.5 rounded-full border border-emerald-500/30">
+              Low-RAM Mode
+            </span>
+          </div>
+        </div>
+
         {/* Terminal log box */}
         <div className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-56 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
           {logs.length === 0 ? (
@@ -141,4 +186,5 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
     </div>
   );
 };
+
 
