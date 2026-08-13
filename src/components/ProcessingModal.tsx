@@ -1,5 +1,5 @@
 import React from 'react';
-import { Loader2, Download, AlertCircle, X } from 'lucide-react';
+import { Loader2, Download, AlertCircle, X, FileDown, Terminal } from 'lucide-react';
 
 interface ProcessingModalProps {
   isOpen: boolean;
@@ -28,10 +28,54 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
 
   const isError = message.toLowerCase().includes('error') || message.toLowerCase().includes('failed');
 
+  const handleSaveLog = () => {
+    const timestamp = new Date().toLocaleString('th-TH');
+    const logHeader = [
+      `========================================`,
+      ` FFmpeg Process & Error Log`,
+      ` Date & Time: ${timestamp}`,
+      ` Status / Message: ${message}`,
+      `========================================`,
+      ``,
+      `--- Detailed Logs (${logs.length} lines) ---`,
+      ``
+    ].join('\n');
+
+    const fullContent = logHeader + (logs.length > 0 ? logs.join('\n') : 'No detailed logs recorded.');
+    
+    const blob = new Blob([fullContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = isError ? `error_log_${Date.now()}.txt` : `ffmpeg_log_${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
       <div className="bg-slate-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl w-full max-w-lg p-5 shadow-2xl flex flex-col space-y-4 animate-in fade-in zoom-in duration-200">
         
+        {/* Modal Header Bar */}
+        <div className="flex items-center justify-between pb-1 border-b border-white/10">
+          <div className="flex items-center space-x-2">
+            <Terminal className="w-4 h-4 text-indigo-400" />
+            <h3 className="text-sm font-semibold text-slate-200">
+              {isError ? 'เกิดข้อผิดพลาดในการประมวลผล' : 'สถานะการประมวลผล'}
+            </h3>
+          </div>
+          <button
+            onClick={handleSaveLog}
+            className="flex items-center space-x-1 px-2.5 py-1 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-indigo-500/30 rounded-lg transition"
+            title="บันทึก Log เป็นไฟล์ .txt"
+          >
+            <FileDown className="w-3.5 h-3.5" />
+            <span>เซฟ Log (.txt)</span>
+          </button>
+        </div>
+
         {/* Terminal log box (includes Error & Status reporting) */}
         <div className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-48 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
           {message && (
@@ -61,7 +105,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
         {/* Actions / Progress Button */}
         <div className="pt-1">
           {isDone ? (
-            <div className="flex space-x-3">
+            <div className="flex space-x-2">
               {outputUrl && (
                 <button
                   onClick={onDownload}
@@ -71,9 +115,20 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
                   <span>Download {outputFilename}</span>
                 </button>
               )}
+
+              {isError && (
+                <button
+                  onClick={handleSaveLog}
+                  className="flex-1 bg-rose-600 hover:bg-rose-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-rose-600/20 flex items-center justify-center space-x-2 transition"
+                >
+                  <FileDown className="w-4 h-4" />
+                  <span>เซฟ Error Log (.txt)</span>
+                </button>
+              )}
+
               <button
                 onClick={onClose}
-                className={`px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center ${!outputUrl ? 'w-full py-3' : ''}`}
+                className={`px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center ${!outputUrl && !isError ? 'w-full py-3' : ''}`}
               >
                 <X className="w-4 h-4 mr-1" />
                 <span>Close</span>

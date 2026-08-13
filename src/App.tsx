@@ -190,7 +190,7 @@ export default function App() {
       ffmpegRef.current = ffmpeg;
 
       ffmpeg.on('log', ({ message }) => {
-        setProcessingLogs((prev) => [...prev.slice(-50), message]);
+        setProcessingLogs((prev) => [...prev.slice(-200), message]);
       });
 
       ffmpeg.on('progress', ({ progress }) => {
