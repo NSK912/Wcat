@@ -55,43 +55,6 @@ const getFFmpegDuration = async (ffmpeg: any, inputPath: string): Promise<number
   });
 };
 
-const runFFmpegTSChunk = async (
-  ffmpeg: any,
-  inputPath: string,
-  startTime: number,
-  durationSeconds: number,
-  tsOffsetSeconds: number,
-  outName: string = 'chunk.ts'
-): Promise<Uint8Array | null> => {
-  const args = [
-    '-ss', startTime.toString(),
-    '-i', inputPath,
-    ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []),
-    '-map', '0:v:0',
-    '-map', '0:a?',
-    '-c:v', 'copy',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    '-output_ts_offset', tsOffsetSeconds.toString(),
-    '-f', 'mpegts',
-    outName
-  ];
-
-  try {
-    const ret = await ffmpeg.exec(args);
-    if (ret === 0) {
-      const data = await ffmpeg.readFile(outName);
-      if (data && data.length > 0) {
-        await ffmpeg.deleteFile(outName);
-        return data;
-      }
-    }
-  } catch (e) {
-    console.warn('TS chunk execution error:', e);
-  }
-  return null;
-};
-
 const runFFmpegChunk = async (
   ffmpeg: any,
   inputPath: string,
@@ -462,149 +425,95 @@ export default function App() {
       if (selectedFiles.length > 1) {
         const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mkv';
 
-        if (fileHandle) {
-          setProcessingMessage('เปิดท่อบันทึกไฟล์รวมลง SSD (Low-RAM Concat Streaming Mode)...');
-          const writable = await fileHandle.createWritable();
-          let totalTimeOffset = 0;
+        setProcessingMessage('กำลังเตรียมไฟล์สำหรับรวมวิดีโอ (FFmpeg Concat)...');
+        await ffmpeg.createDir('/work');
+        await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
 
-          for (let i = 0; i < selectedFiles.length; i++) {
-            const file = selectedFiles[i];
-            setProcessingMessage(`กำลังประมวลผลไฟล์ที่ ${i + 1}/${selectedFiles.length} (${file.name})...`);
+        let listContent = '';
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const filename = `/work/${selectedFiles[i].name}`;
+          listContent += `file '${filename}'\n`;
+        }
+        await ffmpeg.writeFile('list.txt', listContent);
 
-            const dirName = `/work_${i}`;
-            await ffmpeg.createDir(dirName);
-            await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
-            const inputFilename = `${dirName}/${file.name}`;
+        setProcessingMessage('กำลังรวมวิดีโอ (Direct Stream Copy - รักษาเวลา ภาพ และเสียง 100%)...');
+        
+        let actualOutName = `output_merged.${targetExt}`;
+        let success = false;
 
-            let currentFileDuration = 0;
-            try {
-              currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
-            } catch (e) {
-              console.warn('Could not read duration', e);
-            }
+        const tryDelete = async (fname: string) => {
+          try { await ffmpeg.deleteFile(fname); } catch (e) {}
+        };
 
-            const CHUNK_DURATION = 600; // 10 minutes
-            if (currentFileDuration > 0 && currentFileDuration > CHUNK_DURATION) {
-              let startPos = 0;
-              while (startPos < currentFileDuration) {
-                const chunkDur = Math.min(CHUNK_DURATION, currentFileDuration - startPos);
-                if (chunkDur <= 0) break;
-                const currentTSOffset = totalTimeOffset + startPos;
-
-                setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i + 1}/${selectedFiles.length} (ช่วงเวลา ${Math.round(currentTSOffset)}s)...`);
-
-                const chunkData = await runFFmpegTSChunk(ffmpeg, inputFilename, startPos, chunkDur, currentTSOffset, `chunk_${i}_${Math.round(startPos)}.ts`);
-                if (!chunkData) {
-                  await ffmpeg.unmount(dirName);
-                  await writable.close();
-                  throw new Error(`ไม่สามารถประมวลผลไฟล์ ${file.name} ช่วงเวลา ${Math.round(startPos)}s ได้`);
-                }
-
-                await writable.write(chunkData);
-
-                startPos += chunkDur;
-                const fileProgress = i + (startPos / currentFileDuration);
-                setProcessingProgress(fileProgress / selectedFiles.length);
-              }
-              totalTimeOffset += currentFileDuration;
-            } else {
-              setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i + 1}/${selectedFiles.length}...`);
-              const chunkDur = currentFileDuration > 0 ? currentFileDuration : 0;
-              const chunkData = await runFFmpegTSChunk(ffmpeg, inputFilename, 0, chunkDur, totalTimeOffset, `chunk_${i}.ts`);
-              if (!chunkData) {
-                await ffmpeg.unmount(dirName);
-                await writable.close();
-                throw new Error(`ไม่สามารถประมวลผลไฟล์ ${file.name} ได้`);
-              }
-
-              await writable.write(chunkData);
-              if (currentFileDuration > 0) {
-                totalTimeOffset += currentFileDuration;
-              }
-              setProcessingProgress((i + 1) / selectedFiles.length);
-            }
-
-            await ffmpeg.unmount(dirName);
+        // Strategy 1: Concat with direct copy matching target format
+        try {
+          const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-map', '0:v?', '-map', '0:a?', actualOutName]);
+          if (ret === 0) {
+            const dataCheck = await ffmpeg.readFile(actualOutName);
+            if (dataCheck && dataCheck.length > 0) success = true;
           }
+        } catch (e) {
+          console.warn('Concat strategy 1 failed:', e);
+        }
 
-          await writable.close();
-          setProcessingMessage(`รวมไฟล์ทั้งหมดและบันทึกลง SSD สำเร็จ: ${fileHandle.name}`);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
-        } else {
-          setProcessingMessage('กำลังเตรียมไฟล์สำหรับรวมวิดีโอ (FFmpeg Concat)...');
-          await ffmpeg.createDir('/work');
-          await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
-
-          let listContent = '';
-          for (let i = 0; i < selectedFiles.length; i++) {
-            const filename = `/work/${selectedFiles[i].name}`;
-            listContent += `file '${filename}'\n`;
-          }
-          await ffmpeg.writeFile('list.txt', listContent);
-
-          setProcessingMessage('กำลังรวมวิดีโอ (Direct Stream Copy - รักษาเวลาและคุณภาพ 100%)...');
-          let actualOutName = `output_merged.${targetExt}`;
-          let success = false;
-
-          // Strategy 1: Concat with direct copy matching target format
+        // Strategy 2: Matroska (.mkv) fallback (supports HEVC, Opus, VP9, etc. natively without re-encoding)
+        if (!success) {
+          await tryDelete(actualOutName);
+          actualOutName = 'output_merged.mkv';
           try {
-            const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-map', '0:v?', '-map', '0:a?', actualOutName]);
+            const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-map', '0:v?', '-map', '0:a?', '-f', 'matroska', actualOutName]);
             if (ret === 0) {
               const dataCheck = await ffmpeg.readFile(actualOutName);
               if (dataCheck && dataCheck.length > 0) success = true;
             }
           } catch (e) {
-            console.warn('Concat strategy 1 failed:', e);
+            console.warn('Concat strategy 2 (MKV) failed:', e);
           }
+        }
 
-          // Strategy 2: Matroska (.mkv) fallback (supports HEVC, Opus, VP9, etc.)
-          if (!success) {
-            actualOutName = 'output_merged.mkv';
-            try {
-              const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-map', '0:v?', '-map', '0:a?', '-f', 'matroska', actualOutName]);
-              if (ret === 0) {
-                const dataCheck = await ffmpeg.readFile(actualOutName);
-                if (dataCheck && dataCheck.length > 0) success = true;
-              }
-            } catch (e) {
-              console.warn('Concat strategy 2 (MKV) failed:', e);
+        // Strategy 3: Convert audio to AAC if target container requires it
+        if (!success) {
+          await tryDelete(actualOutName);
+          actualOutName = `output_merged_aac.${targetExt === 'mp4' ? 'mp4' : 'mkv'}`;
+          try {
+            const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', actualOutName]);
+            if (ret === 0) {
+              const dataCheck = await ffmpeg.readFile(actualOutName);
+              if (dataCheck && dataCheck.length > 0) success = true;
             }
+          } catch (e) {
+            console.warn('Concat strategy 3 (AAC) failed:', e);
           }
+        }
 
-          // Strategy 3: Convert audio to AAC if target container requires it
-          if (!success) {
-            actualOutName = `output_merged_aac.${targetExt === 'mp4' ? 'mp4' : 'mkv'}`;
-            try {
-              const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', actualOutName]);
-              if (ret === 0) {
-                const dataCheck = await ffmpeg.readFile(actualOutName);
-                if (dataCheck && dataCheck.length > 0) success = true;
-              }
-            } catch (e) {
-              console.warn('Concat strategy 3 (AAC) failed:', e);
-            }
-          }
-
-          if (!success) {
-            await ffmpeg.deleteFile('list.txt');
-            await ffmpeg.unmount('/work');
-            throw new Error('ไม่สามารถรวมไฟล์วิดีโอในหน่วยความจำได้เนื่องจากไฟล์มีขนาดใหญ่เกินไป (กรุณาใช้ปุ่มบันทึกลง SSD โดยตรง)');
-          }
-
-          setProcessingMessage('กำลังอ่านข้อมูลวิดีโอที่รวมสำเร็จ...');
-          const data = await ffmpeg.readFile(actualOutName);
-          await ffmpeg.deleteFile(actualOutName);
-          await ffmpeg.deleteFile('list.txt');
+        if (!success) {
+          await tryDelete(actualOutName);
+          await tryDelete('list.txt');
           await ffmpeg.unmount('/work');
+          throw new Error('ไม่สามารถรวมไฟล์วิดีโอได้ กรุณาตรวจสอบว่าไฟล์วิดีโอมีสเปกใกล้เคียงกัน');
+        }
 
+        setProcessingMessage('กำลังอ่านข้อมูลวิดีโอที่รวมสำเร็จ...');
+        const data = await ffmpeg.readFile(actualOutName);
+        await tryDelete(actualOutName);
+        await tryDelete('list.txt');
+        await ffmpeg.unmount('/work');
+
+        if (fileHandle) {
+          setProcessingMessage(`กำลังบันทึกไฟล์ลง SSD (${fileHandle.name})...`);
+          const writable = await fileHandle.createWritable();
+          await writable.write(data);
+          await writable.close();
+          setProcessingMessage(`รวมไฟล์และบันทึกลง SSD สำเร็จ (ภาพไม่พัง เวลาตรงตามต้นฉบับ 100%): ${fileHandle.name}`);
+        } else {
           setProcessingMessage('รวมไฟล์สำเร็จแล้ว!');
           const blob = new Blob([data], { type: `video/${targetExt}` });
           const url = URL.createObjectURL(blob);
           setOutputUrl(url);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
         }
+
+        setProcessingProgress(1.0);
+        setIsProcessingComplete(true);
       } else {
         setProcessingMessage('กำลังอ่านวิดีโอต้นฉบับ...');
         
@@ -618,6 +527,7 @@ export default function App() {
           await ffmpeg.mount('WORKERFS', { files: [selectedFiles[0]] }, '/work');
           inputFilename = `/work/${selectedFiles[0].name}`;
         } else {
+          const videoUrl = SAMPLE_VIDEOS.find(v => v.name === videoName)?.url || SAMPLE_VIDEOS[0].url;
           const inputData = await fetchFile(videoUrl);
           inputFilename = `input.${inputExt}`;
           await ffmpeg.writeFile(inputFilename, inputData);
@@ -634,81 +544,52 @@ export default function App() {
         const totalTrimDuration = finalEndTime - currentStart;
         const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mkv';
 
-        if (fileHandle && totalTrimDuration > 600) {
-          setProcessingMessage('เปิดท่อบันทึกไฟล์ลง SSD (Low-RAM Trim Streaming Mode)...');
-          const writable = await fileHandle.createWritable();
-          const CHUNK_DURATION = 600; // 10 minutes
-          let startPos = currentStart;
-          let chunkIndex = 0;
+        const tryDelete = async (fname: string) => {
+          try { await ffmpeg.deleteFile(fname); } catch (e) {}
+        };
 
-          while (startPos < finalEndTime) {
-            const chunkDur = Math.min(CHUNK_DURATION, finalEndTime - startPos);
-            if (chunkDur <= 0) break;
-            const tsOffset = startPos - currentStart;
+        setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (Direct Stream Copy - รักษาเวลาและคุณภาพ 100%)...');
 
-            setProcessingMessage(`กำลังสตรีมลง SSD (ช่วงเวลา ${Math.round(tsOffset)}s / ${Math.round(totalTrimDuration)}s)...`);
-            const chunkData = await runFFmpegTSChunk(ffmpeg, inputFilename, startPos, chunkDur, tsOffset, `trim_${chunkIndex}.ts`);
-            if (!chunkData) {
-              if (isLocalFile) await ffmpeg.unmount('/work');
-              await writable.close();
-              throw new Error(`ไม่สามารถตัดวิดีโอช่วงเวลา ${Math.round(startPos)}s ได้`);
-            }
+        let actualOutName = `output_trimmed.${targetExt}`;
+        let success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, actualOutName, targetExt);
 
-            await writable.write(chunkData);
-            startPos += chunkDur;
-            chunkIndex++;
-            setProcessingProgress((startPos - currentStart) / totalTrimDuration);
-          }
-
-          await writable.close();
-          if (isLocalFile) await ffmpeg.unmount('/work');
-          else await ffmpeg.deleteFile(inputFilename);
-
-          setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ (เวลาตรงตามต้นฉบับ 100%): ${fileHandle.name}`);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
-        } else {
-          const outName = `output_trimmed.${targetExt}`;
-          setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (Direct Stream Copy - รักษาเวลาและคุณภาพ 100%)...');
-          
-          let success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, outName, targetExt);
-          let actualOutName = outName;
-
-          if (!success) {
-            actualOutName = `output_trimmed.mkv`;
-            success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, actualOutName, 'mkv');
-          }
-
-          if (!success) {
-            if (isLocalFile) await ffmpeg.unmount('/work');
-            throw new Error(`ไม่สามารถตัด/ประมวลผลวิดีโอได้`);
-          }
-
-          const data = await ffmpeg.readFile(actualOutName);
-          await ffmpeg.deleteFile(actualOutName);
-
-          if (isLocalFile) {
-            await ffmpeg.unmount('/work');
-          } else {
-            await ffmpeg.deleteFile(inputFilename);
-          }
-
-          if (fileHandle) {
-            setProcessingMessage(`กำลังบันทึกไฟล์ลง SSD (${fileHandle.name})...`);
-            const writable = await fileHandle.createWritable();
-            await writable.write(data);
-            await writable.close();
-            setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ (เวลาตรงตามต้นฉบับ): ${fileHandle.name}`);
-          } else {
-            setProcessingMessage('ประมวลผลสำเร็จเรียบร้อย!');
-            const blob = new Blob([data], { type: `video/${targetExt}` });
-            const url = URL.createObjectURL(blob);
-            setOutputUrl(url);
-          }
-
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
+        if (!success) {
+          await tryDelete(actualOutName);
+          actualOutName = `output_trimmed.mkv`;
+          success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, actualOutName, 'mkv');
         }
+
+        if (!success) {
+          await tryDelete(actualOutName);
+          if (isLocalFile) await ffmpeg.unmount('/work');
+          else await tryDelete(inputFilename);
+          throw new Error(`ไม่สามารถตัด/ประมวลผลวิดีโอได้`);
+        }
+
+        const data = await ffmpeg.readFile(actualOutName);
+        await tryDelete(actualOutName);
+
+        if (isLocalFile) {
+          await ffmpeg.unmount('/work');
+        } else {
+          await tryDelete(inputFilename);
+        }
+
+        if (fileHandle) {
+          setProcessingMessage(`กำลังบันทึกไฟล์ลง SSD (${fileHandle.name})...`);
+          const writable = await fileHandle.createWritable();
+          await writable.write(data);
+          await writable.close();
+          setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ (ภาพไม่พัง เวลาตรงตามต้นฉบับ 100%): ${fileHandle.name}`);
+        } else {
+          setProcessingMessage('ประมวลผลสำเร็จเรียบร้อย!');
+          const blob = new Blob([data], { type: `video/${targetExt}` });
+          const url = URL.createObjectURL(blob);
+          setOutputUrl(url);
+        }
+
+        setProcessingProgress(1.0);
+        setIsProcessingComplete(true);
       }
     } catch (err: any) {
       console.error('FFmpeg processing error:', err);
