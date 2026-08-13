@@ -1025,6 +1025,23 @@ export async function processNativeConcatStream(
 
         const chapOff = findElemOffsetInBuf(patchedHeaderBuf, [0x10, 0x43, 0xA7, 0x70], segmentDataStartOffset);
         if (chapOff >= 0) chaptersPosInSegment = chapOff - segmentDataStartOffset;
+
+        // Populate initial SeekHead element right at step 1
+        const initSeekEntries: { id: number[]; pos: number }[] = [];
+        if (infoPosInSegment >= 0) initSeekEntries.push({ id: [0x15, 0x49, 0xA9, 0x66], pos: infoPosInSegment });
+        if (tracksPosInSegment >= 0) initSeekEntries.push({ id: [0x16, 0x54, 0xAE, 0x6B], pos: tracksPosInSegment });
+        if (tagsPosInSegment >= 0) initSeekEntries.push({ id: [0x12, 0x54, 0xC3, 0x67], pos: tagsPosInSegment });
+        if (chaptersPosInSegment >= 0) initSeekEntries.push({ id: [0x10, 0x43, 0xA7, 0x70], pos: chaptersPosInSegment });
+        initSeekEntries.push({ id: [0x1C, 0x53, 0xBB, 0x6B], pos: 0 }); // Cues placeholder
+
+        const initSeekHead = buildSeekHeadElement(initSeekEntries);
+        if (initSeekHead.length <= seekHeadLen) {
+          const paddedInit = new Uint8Array(seekHeadLen);
+          paddedInit.set(initSeekHead, 0);
+          const rem = seekHeadLen - initSeekHead.length;
+          if (rem > 0) paddedInit.set(buildVoidPadding(rem), initSeekHead.length);
+          patchedHeaderBuf.set(paddedInit, segmentDataStartOffset);
+        }
       }
 
       await writeChunkZeroCopy(new Blob([patchedHeaderBuf]), writable);
@@ -1049,7 +1066,7 @@ export async function processNativeConcatStream(
       let isFirstClusterInFile = true;
 
       while (offset < file.size - 8) {
-        const inspectLen = Math.min(128, file.size - offset);
+        const inspectLen = Math.min(2048, file.size - offset);
         const inspectBuf = await readSlice(file, offset, inspectLen);
 
         // Check if Cluster ID: 0x1F 0x43 0xB6 0x75
