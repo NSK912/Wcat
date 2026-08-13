@@ -407,7 +407,6 @@ export default function App() {
           inputFile,
           currentStart,
           finalEndTime,
-          currentFileDuration,
           writable,
           (prog) => {
             setProcessingProgress(prog.percentage / 100);
