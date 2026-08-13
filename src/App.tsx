@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { EditSettings, ActiveTab, SampleVideo } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
-import { processNativeConcatStream, processNativeTrimStream, processNativeRemuxStream } from './utils/VEngine';
+import { processNativeConcatStream, processNativeTrimStream, processNativeRemuxStream } from './utils/WEngine';
 import { VideoPlayer } from './components/VideoPlayer';
 import { Timeline } from './components/Timeline';
 import { ProcessingModal } from './components/ProcessingModal';
