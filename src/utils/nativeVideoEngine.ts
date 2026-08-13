@@ -391,52 +391,82 @@ function formatMkvDurationTagByLength(durationMs: number, targetLen: number): st
 }
 
 /**
- * Patches DURATION tags inside Matroska Tags element (0x1254C367)
- * So media players like VLC read the full combined duration in Media Info / Metadata
+ * Helper to check if a byte is ASCII digit '0'-'9'
  */
-function patchTagsDuration(headerBuf: Uint8Array, totalDurationMs: number): Uint8Array {
+function isDigitByte(b: number): boolean {
+  return b >= 0x30 && b <= 0x39;
+}
+
+/**
+ * Scans headerBuf for any timecode pattern XX:XX:XX or XX:XX:XX.ffffff...
+ * and replaces them with formatted totalDurationMs string of exact matching length.
+ */
+function patchAllTimecodeStringsInHeader(headerBuf: Uint8Array, totalDurationMs: number): Uint8Array {
   const buf = new Uint8Array(headerBuf);
 
-  let pos = 0;
-  while (pos < buf.length - 12) {
-    // Check for "DURATION" or "duration" ASCII
-    let isDurationMatch = false;
+  for (let i = 0; i <= buf.length - 8; i++) {
+    // Check pattern: Digit Digit Colon Digit Digit Colon Digit Digit (e.g. "00:26:30")
     if (
-      (buf[pos] === 0x44 || buf[pos] === 0x64) && // D or d
-      (buf[pos + 1] === 0x55 || buf[pos + 1] === 0x75) && // U or u
-      (buf[pos + 2] === 0x52 || buf[pos + 2] === 0x72) && // R or r
-      (buf[pos + 3] === 0x41 || buf[pos + 3] === 0x61) && // A or a
-      (buf[pos + 4] === 0x54 || buf[pos + 4] === 0x74) && // T or t
-      (buf[pos + 5] === 0x49 || buf[pos + 5] === 0x69) && // I or i
-      (buf[pos + 6] === 0x4F || buf[pos + 6] === 0x6F) && // O or o
-      (buf[pos + 7] === 0x4E || buf[pos + 7] === 0x6E)    // N or n
+      isDigitByte(buf[i]) && isDigitByte(buf[i + 1]) &&
+      buf[i + 2] === 0x3A && // ':'
+      isDigitByte(buf[i + 3]) && isDigitByte(buf[i + 4]) &&
+      buf[i + 5] === 0x3A && // ':'
+      isDigitByte(buf[i + 6]) && isDigitByte(buf[i + 7])
     ) {
-      isDurationMatch = true;
-    }
-
-    if (isDurationMatch) {
-      // Scan forward within 64 bytes for TagString ID (0x44 0x87)
-      for (let sPos = pos; sPos < Math.min(buf.length - 4, pos + 64); sPos++) {
-        if (buf[sPos] === 0x44 && buf[sPos + 1] === 0x87) {
-          const sizeVint = parseVint(buf, sPos + 2);
-          if (sizeVint && sizeVint.value > 0) {
-            const strValOffset = sPos + 2 + sizeVint.length;
-            const strValLen = sizeVint.value;
-            if (strValOffset + strValLen <= buf.length) {
-              const formattedTag = formatMkvDurationTagByLength(totalDurationMs, strValLen);
-              const encoder = new TextEncoder();
-              const tagBytes = encoder.encode(formattedTag);
-              buf.set(tagBytes, strValOffset);
-            }
-          }
-          break;
+      // Check if followed by dot '.' and fraction digits
+      let totalLen = 8;
+      if (i + 8 < buf.length && buf[i + 8] === 0x2E) { // '.'
+        totalLen = 9;
+        while (i + totalLen < buf.length && isDigitByte(buf[i + totalLen])) {
+          totalLen++;
         }
       }
+
+      // We found a duration/timecode string of length `totalLen` starting at index `i`
+      const formattedStr = formatMkvDurationTagByLength(totalDurationMs, totalLen);
+      const encoder = new TextEncoder();
+      const strBytes = encoder.encode(formattedStr);
+      buf.set(strBytes, i);
+
+      // Skip past this timecode string
+      i += totalLen - 1;
     }
-    pos++;
   }
 
   return buf;
+}
+
+/**
+ * Builds a valid Matroska Tags element (0x1254C367) containing a DURATION tag
+ */
+function buildTagsElement(durationMs: number): Uint8Array {
+  const durationStr = formatMkvDurationTagByLength(durationMs, 18); // e.g. "00:53:01.334000000"
+  const encoder = new TextEncoder();
+
+  // TagName: 0x45 0xA3, VINT len 1 (8), "DURATION"
+  const tagNameBytes = encoder.encode("DURATION");
+  const tagNameVint = encodeVint(8, 1);
+  const tagNameElem = new Uint8Array([0x45, 0xA3, ...tagNameVint, ...tagNameBytes]);
+
+  // TagString: 0x44 0x87, VINT len 1 (18), "00:53:01.334000000"
+  const tagStrBytes = encoder.encode(durationStr);
+  const tagStrVint = encodeVint(18, 1);
+  const tagStrElem = new Uint8Array([0x44, 0x87, ...tagStrVint, ...tagStrBytes]);
+
+  // SimpleTag: 0x63 0xC8, VINT len 1
+  const simpleTagPayloadLen = tagNameElem.length + tagStrElem.length;
+  const simpleTagVint = encodeVint(simpleTagPayloadLen, 1);
+  const simpleTagElem = new Uint8Array([0x63, 0xC8, ...simpleTagVint, ...tagNameElem, ...tagStrElem]);
+
+  // Tag: 0x73 0x73, VINT len 1
+  const tagPayloadLen = simpleTagElem.length;
+  const tagVint = encodeVint(tagPayloadLen, 1);
+  const tagElem = new Uint8Array([0x73, 0x73, ...tagVint, ...simpleTagElem]);
+
+  // Tags: 0x12 0x54 0xC3 0x67, VINT len 1
+  const tagsPayloadLen = tagElem.length;
+  const tagsVint = encodeVint(tagsPayloadLen, 1);
+  return new Uint8Array([0x12, 0x54, 0xC3, 0x67, ...tagsVint, ...tagElem]);
 }
 
 /**
@@ -953,7 +983,7 @@ export async function processNativeConcatStream(
       let patchedHeaderBuf = patchSegmentHeader(origHeaderBuf);
       if (totalDurationMs > 0) {
         patchedHeaderBuf = patchSegmentInfo(patchedHeaderBuf, totalDurationMs);
-        patchedHeaderBuf = patchTagsDuration(patchedHeaderBuf, totalDurationMs);
+        patchedHeaderBuf = patchAllTimecodeStringsInHeader(patchedHeaderBuf, totalDurationMs);
       }
       patchedHeaderBuf = neutralizeEbmlElementsInHeader(patchedHeaderBuf);
 
@@ -1164,15 +1194,25 @@ export async function processNativeConcatStream(
 
       const cuesElem = buildCuesElement(cuePoints, videoTrackNum);
 
+      let newTagsElem: Uint8Array | null = null;
+      let effectiveTagsPosInSegment = tagsPosInSegment;
+
+      if (tagsPosInSegment < 0 && totalDurationMs > 0) {
+        newTagsElem = buildTagsElement(totalDurationMs);
+        effectiveTagsPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
+      }
+
       // Build complete SeekHead pointing to Info, Tracks, Tags, Chapters, and Cues
       const seekEntries: { id: number[]; pos: number }[] = [];
       if (infoPosInSegment >= 0) seekEntries.push({ id: [0x15, 0x49, 0xA9, 0x66], pos: infoPosInSegment });
       if (tracksPosInSegment >= 0) seekEntries.push({ id: [0x16, 0x54, 0xAE, 0x6B], pos: tracksPosInSegment });
-      if (tagsPosInSegment >= 0) seekEntries.push({ id: [0x12, 0x54, 0xC3, 0x67], pos: tagsPosInSegment });
+      if (effectiveTagsPosInSegment >= 0) seekEntries.push({ id: [0x12, 0x54, 0xC3, 0x67], pos: effectiveTagsPosInSegment });
       if (chaptersPosInSegment >= 0) seekEntries.push({ id: [0x10, 0x43, 0xA7, 0x70], pos: chaptersPosInSegment });
 
       // Calculate initial position before writing SeekHead
-      const initialCuesPos = Math.max(0, totalBytesWritten - segmentDataStartOffset);
+      const initialTagsOffset = Math.max(0, totalBytesWritten - segmentDataStartOffset);
+      const tagsLen = newTagsElem ? newTagsElem.length : 0;
+      const initialCuesPos = initialTagsOffset + tagsLen;
 
       // First pass: estimate seekHeadElem size
       let candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: initialCuesPos }];
@@ -1185,9 +1225,15 @@ export async function processNativeConcatStream(
       candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: realCuesPos }];
       seekHeadElem = buildSeekHeadElement(candidateSeekEntries);
 
-      // Write Tail SeekHead + Cues Element at end of file
-      await writeChunkZeroCopy(new Blob([seekHeadElem, cuesElem]), writable);
-      totalBytesWritten += (seekHeadElem.length + cuesElem.length);
+      // Write Tail Elements: newTagsElem (if created), SeekHead, Cues
+      const tailChunks: Uint8Array[] = [];
+      if (newTagsElem) tailChunks.push(newTagsElem);
+      tailChunks.push(seekHeadElem);
+      tailChunks.push(cuesElem);
+
+      const tailBlob = new Blob(tailChunks);
+      await writeChunkZeroCopy(tailBlob, writable);
+      totalBytesWritten += tailBlob.size;
 
       // 5. In-place Header Patching if stream supports seek()
       if ('seek' in writable && typeof (writable as any).seek === 'function') {
