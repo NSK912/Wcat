@@ -625,6 +625,77 @@ export function buildCuesElement(cuePoints: { timeMs: number; pos: number }[], t
 }
 
 /**
+ * Build a Matroska SeekHead element (0x114D9B74) pointing to Cues (0x1C53BB6B)
+ */
+export function buildSeekHeadElement(seeks: { id: number[]; pos: number }[]): Uint8Array {
+  const seekBuffers: Uint8Array[] = [];
+
+  for (const s of seeks) {
+    const idPayload = new Uint8Array(s.id);
+    const seekIdElem = buildElement([0x53, 0xAB], idPayload);
+
+    const posBytes = encodeEbmlUint(s.pos);
+    const seekPosElem = buildElement([0x53, 0xAC], posBytes);
+
+    const seekPayload = new Uint8Array(seekIdElem.length + seekPosElem.length);
+    seekPayload.set(seekIdElem, 0);
+    seekPayload.set(seekPosElem, seekIdElem.length);
+    const seekElem = buildElement([0x4D, 0xBB], seekPayload);
+
+    seekBuffers.push(seekElem);
+  }
+
+  const totalPayloadLen = seekBuffers.reduce((sum, b) => sum + b.length, 0);
+  const seekHeadPayload = new Uint8Array(totalPayloadLen);
+  let offset = 0;
+  for (const buf of seekBuffers) {
+    seekHeadPayload.set(buf, offset);
+    offset += buf.length;
+  }
+
+  return buildElement([0x11, 0x4D, 0x9B, 0x74], seekHeadPayload);
+}
+
+/**
+ * Checks if a Cluster payload contains a Video Keyframe (SimpleBlock with bit 0x80 set or BlockGroup)
+ */
+function clusterHasKeyframe(inspectBuf: Uint8Array): boolean {
+  let pos = 4;
+  const clusterSize = parseVint(inspectBuf, pos);
+  if (!clusterSize) return true;
+  pos += clusterSize.length;
+
+  while (pos < inspectBuf.length - 8) {
+    if (inspectBuf[pos] === 0xE7) { // Timecode ID
+      const tcSize = parseVint(inspectBuf, pos + 1);
+      if (tcSize) {
+        pos += 1 + tcSize.length + tcSize.value;
+        continue;
+      }
+    }
+
+    if (inspectBuf[pos] === 0xA3) { // SimpleBlock
+      const sizeVint = parseVint(inspectBuf, pos + 1);
+      if (!sizeVint) break;
+      const dataPos = pos + 1 + sizeVint.length;
+      const trackVint = parseVint(inspectBuf, dataPos);
+      if (!trackVint) break;
+      const flagsPos = dataPos + trackVint.length + 2; // skip 2 bytes timecode
+      if (flagsPos < inspectBuf.length) {
+        const flags = inspectBuf[flagsPos];
+        // Bit 7 (0x80) is Keyframe flag in Matroska SimpleBlock
+        return (flags & 0x80) !== 0;
+      }
+      break;
+    } else if (inspectBuf[pos] === 0xA0) { // BlockGroup (Keyframe)
+      return true;
+    }
+    pos++;
+  }
+  return true; // Fallback
+}
+
+/**
  * Pure JS Zero-Copy Stream Concatenator for MKV / WebM / MP4 / TS
  */
 export async function processNativeConcatStream(
@@ -659,6 +730,9 @@ export async function processNativeConcatStream(
     // 2. Prepare File #1 Header
     const { headerLength, firstClusterOffset } = await findEbmlClustersOffset(files[0]);
     let segmentDataStartOffset = 0;
+    let seekHeadFileOffset = -1;
+    let seekHeadLen = 0;
+    let segmentSizeFileOffset = -1;
 
     if (headerLength > 0) {
       const origHeaderBlob = files[0].slice(0, headerLength);
@@ -670,14 +744,27 @@ export async function processNativeConcatStream(
       }
       patchedHeaderBuf = neutralizeEbmlElementsInHeader(patchedHeaderBuf);
 
-      // Find where Segment Data payload starts (after Segment ID + Size VINT)
+      // Locate Segment ID (0x18538067)
       for (let p = 0; p < patchedHeaderBuf.length - 8; p++) {
         if (patchedHeaderBuf[p] === 0x18 && patchedHeaderBuf[p + 1] === 0x53 && patchedHeaderBuf[p + 2] === 0x80 && patchedHeaderBuf[p + 3] === 0x67) {
           const vint = parseVint(patchedHeaderBuf, p + 4);
           if (vint) {
+            segmentSizeFileOffset = p + 4;
             segmentDataStartOffset = p + 4 + vint.length;
           }
           break;
+        }
+      }
+
+      // Find first Void element in header to place initial SeekHead placeholder
+      for (let p = segmentDataStartOffset; p < patchedHeaderBuf.length - 16; p++) {
+        if (patchedHeaderBuf[p] === 0xEC) { // Void ID
+          const vSize = parseVint(patchedHeaderBuf, p + 1);
+          if (vSize && vSize.value >= 32) {
+            seekHeadFileOffset = p;
+            seekHeadLen = 1 + vSize.length + vSize.value;
+            break;
+          }
         }
       }
 
@@ -687,6 +774,7 @@ export async function processNativeConcatStream(
 
     let timeOffsetMs = 0;
     const cuePoints: { timeMs: number; pos: number }[] = [];
+    let lastCueTimeMs = -1000;
 
     // 3. Process Clusters sequentially from File #1, #2, #3, #4, #5
     for (let fIdx = 0; fIdx < files.length; fIdx++) {
@@ -720,12 +808,17 @@ export async function processNativeConcatStream(
           if (patchedResult) {
             fileMaxTc = Math.max(fileMaxTc, patchedResult.origTimecodeMs);
 
-            // Record CuePoint for seeking index table
+            // Record CuePoint ONLY for Clusters that contain Video Keyframes
             const clusterPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
-            cuePoints.push({
-              timeMs: patchedResult.newTimecodeMs,
-              pos: clusterPosInSegment,
-            });
+            const isKeyframe = clusterHasKeyframe(inspectBuf);
+
+            if (isKeyframe && (patchedResult.newTimecodeMs - lastCueTimeMs >= 250 || fIdx > 0 && cuePoints.length === 0)) {
+              cuePoints.push({
+                timeMs: patchedResult.newTimecodeMs,
+                pos: clusterPosInSegment,
+              });
+              lastCueTimeMs = patchedResult.newTimecodeMs;
+            }
 
             await writeChunkZeroCopy(new Blob([patchedResult.patchedBuf]), writable);
             totalBytesWritten += patchedResult.patchedHeaderLen;
@@ -833,21 +926,63 @@ export async function processNativeConcatStream(
       timeOffsetMs += effectiveFileDurMs;
     }
 
-    // 4. Append Cues index element at the end of the file for instant, accurate seeking
+    // 4. Build Cues and SeekHead Elements
     if (cuePoints.length > 0) {
       if (onProgress) {
         onProgress({
           processedBytes: totalBytesWritten,
           totalBytes: totalInputSize,
-          percentage: 99.9,
+          percentage: 99.8,
           speedMBs: 0,
-          statusText: 'กำลังสร้างดรรชนีสแกนเวลา (Cues Index) เพื่อให้กรอ/ลากเวลาวิดีโอได้ลื่นไหล...',
+          statusText: 'กำลังสร้างดรรชนีกรอเวลา (Cues Index) เพื่อรองรับการลากวิดีโอทุกช่วงอย่างลื่นไหล...',
         });
       }
 
+      const cuesPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
       const cuesElem = buildCuesElement(cuePoints);
-      await writeChunkZeroCopy(new Blob([cuesElem]), writable);
-      totalBytesWritten += cuesElem.length;
+
+      // Build SeekHead pointing to Cues position
+      const seekHeadElem = buildSeekHeadElement([
+        { id: [0x1C, 0x53, 0xBB, 0x6B], pos: cuesPosInSegment }
+      ]);
+
+      // Write Tail SeekHead + Cues Element at end of file
+      await writeChunkZeroCopy(new Blob([seekHeadElem, cuesElem]), writable);
+      totalBytesWritten += seekHeadElem.length + cuesElem.length;
+
+      // 5. In-place Header Patching if stream supports seek()
+      if ('seek' in writable && typeof (writable as any).seek === 'function') {
+        const seekableStream = writable as FileSystemWritableFileStream;
+        try {
+          // Patch Segment payload length in header
+          if (segmentSizeFileOffset >= 0) {
+            const finalSegmentPayloadSize = totalBytesWritten - segmentDataStartOffset;
+            const sizeVint8 = encodeVint(finalSegmentPayloadSize, 8);
+            await seekableStream.seek(segmentSizeFileOffset);
+            await seekableStream.write(sizeVint8);
+          }
+
+          // Patch SeekHead in header placeholder if available
+          if (seekHeadFileOffset >= 0 && seekHeadElem.length <= seekHeadLen) {
+            const paddedSeekHead = new Uint8Array(seekHeadLen);
+            paddedSeekHead.set(seekHeadElem, 0);
+            // Pad remaining space with Void (0xEC)
+            const remaining = seekHeadLen - seekHeadElem.length;
+            if (remaining > 0) {
+              paddedSeekHead[seekHeadElem.length] = 0xEC;
+              const voidVint = encodeVint(remaining - 1 - 1, 1);
+              paddedSeekHead.set(voidVint, seekHeadElem.length + 1);
+            }
+            await seekableStream.seek(seekHeadFileOffset);
+            await seekableStream.write(paddedSeekHead);
+          }
+
+          // Return cursor to end of file
+          await seekableStream.seek(totalBytesWritten);
+        } catch (err) {
+          console.warn('In-place header patch seek warning:', err);
+        }
+      }
     }
   } else {
     // Direct Zero-Copy Stream Concatenator (For TS / MP4 / Generic formats)
