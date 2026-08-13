@@ -57,48 +57,6 @@ async function readSlice(file: File, start: number, length: number): Promise<Uin
 }
 
 /**
- * Fallback: Estimates file duration by scanning the last 2MB for the highest Cluster Timecode
- */
-async function estimateFileDurationMs(file: File): Promise<number> {
-  const htmlDur = await getFileDurationMs(file);
-  if (htmlDur > 0) return htmlDur;
-
-  try {
-    const scanSize = Math.min(2 * 1024 * 1024, file.size);
-    const scanOffset = file.size - scanSize;
-    const buf = await readSlice(file, scanOffset, scanSize);
-
-    let maxTc = 0;
-    for (let i = 0; i < buf.length - 8; i++) {
-      // Cluster ID: 0x1F 0x43 0xB6 0x75
-      if (buf[i] === 0x1F && buf[i + 1] === 0x43 && buf[i + 2] === 0xB6 && buf[i + 3] === 0x75) {
-        const sizeVint = parseVint(buf, i + 4);
-        if (!sizeVint) continue;
-        let pos = i + 4 + sizeVint.length;
-        while (pos < buf.length - 3 && pos < i + 128) {
-          if (buf[pos] === 0xE7) { // Timecode ID
-            const tcSize = parseVint(buf, pos + 1);
-            if (tcSize && pos + 1 + tcSize.length + tcSize.value <= buf.length) {
-              let tc = 0;
-              const valStart = pos + 1 + tcSize.length;
-              for (let k = 0; k < tcSize.value; k++) {
-                tc = (tc * 256) + buf[valStart + k];
-              }
-              if (tc > maxTc) maxTc = tc;
-            }
-            break;
-          }
-          pos++;
-        }
-      }
-    }
-    return maxTc > 0 ? (maxTc + 1000) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/**
  * Parse EBML Variable-Size Integer (VINT)
  */
 function parseVint(buf: Uint8Array, offset: number): { value: number; length: number } | null {
@@ -144,6 +102,147 @@ function encodeVint(value: number, length: number): Uint8Array {
 }
 
 /**
+ * Reads MKV / WebM Segment Info Duration directly from EBML Header in milliseconds
+ */
+export async function readMkvDurationMs(file: File): Promise<number> {
+  try {
+    const scanLen = Math.min(2 * 1024 * 1024, file.size);
+    const buf = await readSlice(file, 0, scanLen);
+    let pos = 0;
+
+    while (pos < buf.length - 8) {
+      // Segment Info ID: 0x15 0x49 0xA9 0x66
+      if (buf[pos] === 0x15 && buf[pos + 1] === 0x49 && buf[pos + 2] === 0xA9 && buf[pos + 3] === 0x66) {
+        const infoSizeVint = parseVint(buf, pos + 4);
+        if (!infoSizeVint) break;
+
+        const infoContentStart = pos + 4 + infoSizeVint.length;
+        const infoContentEnd = infoSizeVint.value > 0 ? Math.min(buf.length, infoContentStart + infoSizeVint.value) : buf.length;
+
+        let timecodeScale = 1000000; // Default 1ms
+        let durVal: number | null = null;
+
+        let iPos = infoContentStart;
+        while (iPos < infoContentEnd - 3) {
+          // TimecodeScale ID: 0x2A 0xD7 0xB1
+          if (buf[iPos] === 0x2A && buf[iPos + 1] === 0xD7 && buf[iPos + 2] === 0xB1) {
+            const tcScaleSize = parseVint(buf, iPos + 3);
+            if (tcScaleSize && tcScaleSize.value > 0) {
+              let scaleVal = 0;
+              const valStart = iPos + 3 + tcScaleSize.length;
+              for (let k = 0; k < tcScaleSize.value; k++) {
+                scaleVal = (scaleVal * 256) + buf[valStart + k];
+              }
+              if (scaleVal > 0) timecodeScale = scaleVal;
+              iPos = valStart + tcScaleSize.value;
+              continue;
+            }
+          }
+
+          // Duration ID: 0x44 0x89
+          if (buf[iPos] === 0x44 && buf[iPos + 1] === 0x89) {
+            const durSizeVint = parseVint(buf, iPos + 2);
+            if (durSizeVint && (durSizeVint.value === 4 || durSizeVint.value === 8)) {
+              const valStart = iPos + 2 + durSizeVint.length;
+              const view = new DataView(buf.buffer, buf.byteOffset + valStart, durSizeVint.value);
+              if (durSizeVint.value === 4) {
+                durVal = view.getFloat32(0, false);
+              } else if (durSizeVint.value === 8) {
+                durVal = view.getFloat64(0, false);
+              }
+              break;
+            }
+          }
+
+          iPos++;
+        }
+
+        if (durVal !== null && durVal > 0) {
+          const durMs = Math.floor(durVal * (timecodeScale / 1000000));
+          if (durMs > 0) return durMs;
+        }
+      }
+      pos++;
+    }
+  } catch {
+    // Ignore and fallback
+  }
+
+  return await scanLastClusterTimecodeMs(file);
+}
+
+/**
+ * Fallback: Scans last 16MB of file for the highest Cluster Timecode
+ */
+async function scanLastClusterTimecodeMs(file: File): Promise<number> {
+  try {
+    const scanSize = Math.min(16 * 1024 * 1024, file.size);
+    const scanOffset = file.size - scanSize;
+    const buf = await readSlice(file, scanOffset, scanSize);
+
+    let maxTc = 0;
+    for (let i = buf.length - 8; i >= 0; i--) {
+      // Cluster ID: 0x1F 0x43 0xB6 0x75
+      if (buf[i] === 0x1F && buf[i + 1] === 0x43 && buf[i + 2] === 0xB6 && buf[i + 3] === 0x75) {
+        const sizeVint = parseVint(buf, i + 4);
+        if (!sizeVint) continue;
+        let pos = i + 4 + sizeVint.length;
+        while (pos < buf.length - 3 && pos < i + 128) {
+          if (buf[pos] === 0xE7) { // Timecode ID
+            const tcSize = parseVint(buf, pos + 1);
+            if (tcSize && pos + 1 + tcSize.length + tcSize.value <= buf.length) {
+              let tc = 0;
+              const valStart = pos + 1 + tcSize.length;
+              for (let k = 0; k < tcSize.value; k++) {
+                tc = (tc * 256) + buf[valStart + k];
+              }
+              if (tc > maxTc) maxTc = tc;
+            }
+            break;
+          }
+          pos++;
+        }
+        if (maxTc > 0) break;
+      }
+    }
+    return maxTc > 0 ? (maxTc + 1000) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Estimates file duration in milliseconds
+ */
+export async function estimateFileDurationMs(file: File): Promise<number> {
+  // 1. Fast & exact MKV / WebM header parsing
+  const mkvDur = await readMkvDurationMs(file);
+  if (mkvDur > 0) return mkvDur;
+
+  // 2. HTML5 Video element fallback
+  const htmlDur = await getFileDurationMs(file);
+  if (htmlDur > 0) return htmlDur;
+
+  return 0;
+}
+
+/**
+ * Check if a File is EBML (MKV or WebM)
+ */
+async function isMkvOrWebm(file: File): Promise<boolean> {
+  if (file.name.toLowerCase().endsWith('.mkv') || file.name.toLowerCase().endsWith('.webm')) {
+    return true;
+  }
+  try {
+    const first4 = await readSlice(file, 0, 4);
+    // EBML Header ID: 0x1A 0x45 0xDF 0xA3
+    return first4[0] === 0x1A && first4[1] === 0x45 && first4[2] === 0xDF && first4[3] === 0xA3;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Patch Segment Header in MKV File #1 to Unknown Size (allows streaming beyond File #1 boundaries)
  */
 function patchSegmentHeader(headerBuf: Uint8Array): Uint8Array {
@@ -185,14 +284,14 @@ function patchSegmentInfo(headerBuf: Uint8Array, totalDurationMs: number): Uint8
       if (!infoSizeVint) break;
 
       const infoContentStart = pos + 4 + infoSizeVint.length;
-      const infoContentEnd = infoSizeVint.value > 0 ? infoContentStart + infoSizeVint.value : buf.length;
+      const infoContentEnd = infoSizeVint.value > 0 ? Math.min(buf.length, infoContentStart + infoSizeVint.value) : buf.length;
 
       let timecodeScale = 1000000; // Default 1ms = 1,000,000 ns
       let durValOffset = -1;
       let durValLen = 0;
 
       let iPos = infoContentStart;
-      while (iPos < infoContentEnd - 3 && iPos < buf.length - 4) {
+      while (iPos < infoContentEnd - 3) {
         // TimecodeScale ID: 0x2A 0xD7 0xB1
         if (buf[iPos] === 0x2A && buf[iPos + 1] === 0xD7 && buf[iPos + 2] === 0xB1) {
           const tcScaleSize = parseVint(buf, iPos + 3);
@@ -211,7 +310,7 @@ function patchSegmentInfo(headerBuf: Uint8Array, totalDurationMs: number): Uint8
         // Duration ID: 0x44 0x89
         if (buf[iPos] === 0x44 && buf[iPos + 1] === 0x89) {
           const durSizeVint = parseVint(buf, iPos + 2);
-          if (durSizeVint) {
+          if (durSizeVint && (durSizeVint.value === 4 || durSizeVint.value === 8)) {
             durValOffset = iPos + 2 + durSizeVint.length;
             durValLen = durSizeVint.value;
             break;
@@ -241,7 +340,7 @@ function patchSegmentInfo(headerBuf: Uint8Array, totalDurationMs: number): Uint8
         const before = buf.slice(0, infoContentStart);
         const after = buf.slice(infoContentStart);
 
-        const newBuf = new Uint8Array(buf.length + 3 + 8);
+        const newBuf = new Uint8Array(buf.length + 11);
         newBuf.set(before, 0);
         newBuf.set(durHeader, infoContentStart);
         newBuf.set(durVal, infoContentStart + 3);
@@ -263,21 +362,33 @@ function patchSegmentInfo(headerBuf: Uint8Array, totalDurationMs: number): Uint8
 }
 
 /**
- * Neutralizes Cues (0x1C53BB6B) and SeekHead (0x114D9B74) in Header
- * Replaces 4-byte IDs with EBML Void element (0xEC 0x82 0x00 0x00)
- * Prevents players from seeking to stale File #1 index offsets and freezing
+ * Neutralizes Cues (0x1C53BB6B), SeekHead (0x114D9B74), and Tags (0x1254C367) in Header
+ * Replaces them with valid EBML Void elements (0xEC) of matching length
  */
-function invalidateCuesAndSeekHeadInHeader(headerBuf: Uint8Array): Uint8Array {
+function neutralizeEbmlElementsInHeader(headerBuf: Uint8Array): Uint8Array {
   const buf = new Uint8Array(headerBuf);
   let pos = 0;
-  while (pos < buf.length - 4) {
-    // Cues ID: 0x1C 0x53 0xBB 0x6B
-    // SeekHead ID: 0x11 0x4D 0x9B 0x74
-    if (
-      (buf[pos] === 0x1C && buf[pos + 1] === 0x53 && buf[pos + 2] === 0xBB && buf[pos + 3] === 0x6B) ||
-      (buf[pos] === 0x11 && buf[pos + 1] === 0x4D && buf[pos + 2] === 0x9B && buf[pos + 3] === 0x74)
-    ) {
-      // Replace with valid EBML Void: 0xEC (ID) 0x82 (Len 2) 0x00 0x00
+
+  while (pos < buf.length - 8) {
+    const isCues = buf[pos] === 0x1C && buf[pos + 1] === 0x53 && buf[pos + 2] === 0xBB && buf[pos + 3] === 0x6B;
+    const isSeekHead = buf[pos] === 0x11 && buf[pos + 1] === 0x4D && buf[pos + 2] === 0x9B && buf[pos + 3] === 0x74;
+    const isTags = buf[pos] === 0x12 && buf[pos + 1] === 0x54 && buf[pos + 2] === 0xC3 && buf[pos + 3] === 0x67;
+
+    if (isCues || isSeekHead || isTags) {
+      const sizeVint = parseVint(buf, pos + 4);
+      if (sizeVint && sizeVint.value >= 0) {
+        const totalElemLen = 4 + sizeVint.length + sizeVint.value;
+        if (pos + totalElemLen <= buf.length) {
+          buf[pos] = 0xEC; // Void ID
+          const payloadLen = totalElemLen - 1 - sizeVint.length;
+          const voidVint = encodeVint(payloadLen, sizeVint.length);
+          buf.set(voidVint, pos + 1);
+          buf.fill(0x00, pos + 1 + sizeVint.length, pos + totalElemLen);
+          pos += totalElemLen;
+          continue;
+        }
+      }
+      // Fallback 4-byte Void
       buf[pos] = 0xEC;
       buf[pos + 1] = 0x82;
       buf[pos + 2] = 0x00;
@@ -443,16 +554,16 @@ export async function processNativeConcatStream(
   const startTime = Date.now();
   const CHUNK_SIZE = 16 * 1024 * 1024;
 
-  const isMkv = files.every((f) => f.name.toLowerCase().endsWith('.mkv') || f.name.toLowerCase().endsWith('.webm'));
+  const isEbml = await isMkvOrWebm(files[0]);
 
-  if (isMkv && files.length > 1) {
+  if (isEbml && files.length > 1) {
     if (onProgress) {
       onProgress({
         processedBytes: 0,
         totalBytes: totalInputSize,
         percentage: 0,
         speedMBs: 0,
-        statusText: 'กำลังคำนวณความยาวไฟล์และเตรียมข้อมูลหัวไฟล์...',
+        statusText: 'กำลังคำนวณความยาวรวมของทุกไฟล์ และปรับแต่ง Header...',
       });
     }
 
@@ -471,7 +582,7 @@ export async function processNativeConcatStream(
       if (totalDurationMs > 0) {
         patchedHeaderBuf = patchSegmentInfo(patchedHeaderBuf, totalDurationMs);
       }
-      patchedHeaderBuf = invalidateCuesAndSeekHeadInHeader(patchedHeaderBuf);
+      patchedHeaderBuf = neutralizeEbmlElementsInHeader(patchedHeaderBuf);
 
       await writeChunkZeroCopy(new Blob([patchedHeaderBuf]), writable);
       totalBytesWritten += patchedHeaderBuf.length;
@@ -533,23 +644,69 @@ export async function processNativeConcatStream(
             offset = chunkEnd;
           }
         } else {
-          // Skip non-cluster trailing data (Cues, Tags, SeekHead) at end of file
-          let foundNext = -1;
-          const scanBufLen = Math.min(64 * 1024, file.size - offset);
-          const scanBuf = await readSlice(file, offset, scanBufLen);
+          // Check for top-level non-cluster elements (Cues, SeekHead, Tags, Chapters, Void) to skip
+          let skipped = false;
 
-          for (let p = 0; p < scanBuf.length - 4; p++) {
-            if (scanBuf[p] === 0x1F && scanBuf[p + 1] === 0x43 && scanBuf[p + 2] === 0xB6 && scanBuf[p + 3] === 0x75) {
-              foundNext = offset + p;
-              break;
+          // Cues (0x1C53BB6B)
+          if (inspectBuf[0] === 0x1C && inspectBuf[1] === 0x53 && inspectBuf[2] === 0xBB && inspectBuf[3] === 0x6B) {
+            const sizeVint = parseVint(inspectBuf, 4);
+            if (sizeVint && sizeVint.value >= 0) {
+              offset += 4 + sizeVint.length + sizeVint.value;
+              skipped = true;
+            }
+          }
+          // SeekHead (0x114D9B74)
+          else if (inspectBuf[0] === 0x11 && inspectBuf[1] === 0x4D && inspectBuf[2] === 0x9B && inspectBuf[3] === 0x74) {
+            const sizeVint = parseVint(inspectBuf, 4);
+            if (sizeVint && sizeVint.value >= 0) {
+              offset += 4 + sizeVint.length + sizeVint.value;
+              skipped = true;
+            }
+          }
+          // Tags (0x1254C367)
+          else if (inspectBuf[0] === 0x12 && inspectBuf[1] === 0x54 && inspectBuf[2] === 0xC3 && inspectBuf[3] === 0x67) {
+            const sizeVint = parseVint(inspectBuf, 4);
+            if (sizeVint && sizeVint.value >= 0) {
+              offset += 4 + sizeVint.length + sizeVint.value;
+              skipped = true;
+            }
+          }
+          // Chapters (0x1043A770)
+          else if (inspectBuf[0] === 0x10 && inspectBuf[1] === 0x43 && inspectBuf[2] === 0xA7 && inspectBuf[3] === 0x70) {
+            const sizeVint = parseVint(inspectBuf, 4);
+            if (sizeVint && sizeVint.value >= 0) {
+              offset += 4 + sizeVint.length + sizeVint.value;
+              skipped = true;
+            }
+          }
+          // Void (0xEC)
+          else if (inspectBuf[0] === 0xEC) {
+            const sizeVint = parseVint(inspectBuf, 1);
+            if (sizeVint && sizeVint.value >= 0) {
+              offset += 1 + sizeVint.length + sizeVint.value;
+              skipped = true;
             }
           }
 
-          if (foundNext !== -1) {
-            offset = foundNext;
-          } else {
-            // No more clusters in this file, finish file
-            break;
+          if (!skipped) {
+            // Scan for next Cluster ID
+            let foundNext = -1;
+            const scanBufLen = Math.min(1024 * 1024, file.size - offset);
+            if (scanBufLen <= 4) break;
+
+            const scanBuf = await readSlice(file, offset, scanBufLen);
+            for (let p = 0; p < scanBuf.length - 4; p++) {
+              if (scanBuf[p] === 0x1F && scanBuf[p + 1] === 0x43 && scanBuf[p + 2] === 0xB6 && scanBuf[p + 3] === 0x75) {
+                foundNext = offset + p;
+                break;
+              }
+            }
+
+            if (foundNext !== -1) {
+              offset = foundNext;
+            } else {
+              break; // No more clusters in this file
+            }
           }
         }
 
@@ -561,7 +718,7 @@ export async function processNativeConcatStream(
             totalBytes: totalInputSize,
             percentage: Math.min(99.9, (totalBytesWritten / totalInputSize) * 100),
             speedMBs,
-            statusText: `กำลังสตรีมรวมไฟล์ ${fIdx + 1}/${files.length} (${file.name}) [Opus/HEVC/MKV Direct Stream]`,
+            statusText: `กำลังสตรีมรวมไฟล์ ${fIdx + 1}/${files.length} (${file.name}) [Zero-Copy Direct Stream]`,
           });
         }
       }
