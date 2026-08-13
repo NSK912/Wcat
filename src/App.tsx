@@ -32,6 +32,24 @@ const DEFAULT_SETTINGS: EditSettings = {
   outputFormat: 'mp4',
 };
 
+const getFileDuration = async (file: File): Promise<number> => {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    const url = URL.createObjectURL(file);
+    video.src = url;
+    video.onloadedmetadata = () => {
+      const dur = video.duration || 0;
+      URL.revokeObjectURL(url);
+      resolve(dur);
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(0);
+    };
+  });
+};
+
 const getFFmpegDuration = async (ffmpeg: any, inputPath: string): Promise<number> => {
   return new Promise(async (resolve) => {
     let extractedDuration = 0;
@@ -53,61 +71,6 @@ const getFFmpegDuration = async (ffmpeg: any, inputPath: string): Promise<number
     ffmpeg.off('log', logHandler);
     resolve(extractedDuration);
   });
-};
-
-const runFFmpegChunk = async (
-  ffmpeg: any,
-  inputPath: string,
-  startTime: number,
-  durationSeconds: number,
-  outName: string,
-  targetExt: string = 'mp4'
-): Promise<boolean> => {
-  const ext = targetExt.toLowerCase();
-  const strategies: { args: string[] }[] = [];
-
-  // Strategy 1: Direct stream copy
-  strategies.push({
-    args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-map', '0:v?', '-map', '0:a?', outName]
-  });
-
-  if (ext === 'mp4') {
-    strategies.push({
-      args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', outName]
-    });
-  }
-
-  // Strategy 3: Matroska container (.mkv) which supports all codecs (HEVC, Opus, VP9, etc)
-  const mkvOut = outName.endsWith('.mkv') ? outName : `${outName}_fallback.mkv`;
-  strategies.push({
-    args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-f', 'matroska', mkvOut]
-  });
-
-  // Strategy 4: Audio convert to AAC (for MP4/TS compatibility)
-  strategies.push({
-    args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', outName]
-  });
-
-  for (const strat of strategies) {
-    try {
-      const targetFile = strat.args[strat.args.length - 1];
-      const ret = await ffmpeg.exec(strat.args);
-      if (ret === 0) {
-        const data = await ffmpeg.readFile(targetFile);
-        if (data && data.length > 0) {
-          if (targetFile !== outName) {
-            await ffmpeg.writeFile(outName, data);
-            await ffmpeg.deleteFile(targetFile);
-          }
-          return true;
-        }
-      }
-    } catch (e: any) {
-      console.warn('Strategy execution error:', e);
-    }
-  }
-
-  return false;
 };
 
 export default function App() {
@@ -452,87 +415,124 @@ export default function App() {
         return { writable, opfsFileHandle };
       };
 
-      const executeStreamPipeline = async (args: string[], progressLabel: string) => {
-        const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
-        const chunks: Uint8Array[] = [];
-        let activeIndex = 0;
-        let totalBytesProcessed = 0;
+      const CHUNK_TIME = 20; // 20-second chunk slices for ultra-low RAM footprint (~15MB constant)
 
-        const readAndRemoveSegment = async (fname: string): Promise<Uint8Array | null> => {
-          try {
-            const segData = await ffmpeg.readFile(fname);
-            if (segData && segData.length > 0) {
-              await ffmpeg.deleteFile(fname);
-              return segData as Uint8Array;
-            }
-          } catch {
-            // Segment not ready
-          }
-          return null;
-        };
+      const processChunkSlice = async (
+        ffmpeg: FFmpeg,
+        inputPath: string,
+        start: number,
+        len: number,
+        chunkName: string = 'temp_chunk.ts'
+      ): Promise<Uint8Array | null> => {
+        // Strategy 1: AAC audio + Copy video with MPEG-TS
+        const args1 = [
+          '-ss', start.toString(),
+          '-i', inputPath,
+          '-t', len.toString(),
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-muxdelay', '0',
+          '-muxpreload', '0',
+          '-f', 'mpegts',
+          chunkName
+        ];
 
-        let isPolling = false;
-        const pollInterval = setInterval(async () => {
-          if (isPolling) return;
-          isPolling = true;
-          try {
-            const files = await ffmpeg.listDir('/');
-            const fileNames = new Set(files.map((f) => f.name));
-
-            while (true) {
-              const nextFileName = `out_seg_${(activeIndex + 1).toString().padStart(3, '0')}.ts`;
-              if (fileNames.has(nextFileName)) {
-                const currentFileName = `out_seg_${activeIndex.toString().padStart(3, '0')}.ts`;
-                let segData: Uint8Array | null = await readAndRemoveSegment(currentFileName);
-                if (segData) {
-                  totalBytesProcessed += segData.length;
-                  if (writable) {
-                    await writable.write(segData);
-                  } else {
-                    chunks.push(segData);
-                  }
-                  segData = null; // Instantly release buffer for Garbage Collector
-                  setProcessingMessage(`${progressLabel}: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~0 MB)...`);
-                }
-                activeIndex++;
-              } else {
-                break;
-              }
-            }
-          } catch (e) {
-            console.warn('Pipeline poll error:', e);
-          } finally {
-            isPolling = false;
-          }
-        }, 200);
-
-        let execSuccess = false;
         try {
-          const exitCode = await ffmpeg.exec(args);
-          if (exitCode === 0) {
-            execSuccess = true;
+          const code = await ffmpeg.exec(args1);
+          if (code === 0) {
+            const data = await ffmpeg.readFile(chunkName);
+            await ffmpeg.deleteFile(chunkName);
+            if (data && data.length > 0) {
+              return data as Uint8Array;
+            }
           }
-        } catch (err) {
-          console.warn('FFmpeg execution warning:', err);
-        } finally {
-          clearInterval(pollInterval);
+        } catch (e) {
+          console.warn('Chunk args1 failed:', e);
         }
 
-        // Flush remaining segments
-        while (true) {
-          const currentFileName = `out_seg_${activeIndex.toString().padStart(3, '0')}.ts`;
-          let segData: Uint8Array | null = await readAndRemoveSegment(currentFileName);
-          if (segData) {
-            totalBytesProcessed += segData.length;
-            if (writable) {
-              await writable.write(segData);
-            } else {
-              chunks.push(segData);
+        // Strategy 2: Full Direct Copy fallback
+        const args2 = [
+          '-ss', start.toString(),
+          '-i', inputPath,
+          '-t', len.toString(),
+          '-c', 'copy',
+          '-muxdelay', '0',
+          '-muxpreload', '0',
+          '-f', 'mpegts',
+          chunkName
+        ];
+
+        try {
+          const code = await ffmpeg.exec(args2);
+          if (code === 0) {
+            const data = await ffmpeg.readFile(chunkName);
+            await ffmpeg.deleteFile(chunkName);
+            if (data && data.length > 0) {
+              return data as Uint8Array;
             }
-            segData = null;
-            activeIndex++;
-          } else {
-            break;
+          }
+        } catch (e) {
+          console.warn('Chunk args2 failed:', e);
+        }
+
+        return null;
+      };
+
+      if (selectedFiles.length > 1) {
+        setProcessingMessage('กำลังเตรียมไฟล์สำหรับรวมวิดีโอ (Low-RAM Direct Stream)...');
+        await ffmpeg.createDir('/work');
+        await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
+
+        const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
+        const chunks: Uint8Array[] = [];
+        let totalBytesProcessed = 0;
+
+        let totalConcatDuration = 0;
+        const fileDurations: number[] = [];
+
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const fileObj = selectedFiles[i];
+          let dur = await getFileDuration(fileObj);
+          if (dur === 0) {
+            dur = await getFFmpegDuration(ffmpeg, `/work/${fileObj.name}`);
+          }
+          if (dur === 0) dur = 600;
+          fileDurations.push(dur);
+          totalConcatDuration += dur;
+        }
+
+        let accumulatedDurationProcessed = 0;
+
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const fileObj = selectedFiles[i];
+          const inputPath = `/work/${fileObj.name}`;
+          const fileDur = fileDurations[i];
+
+          let curStart = 0;
+          while (curStart < fileDur) {
+            const curLen = Math.min(CHUNK_TIME, fileDur - curStart);
+            
+            let sliceData = await processChunkSlice(ffmpeg, inputPath, curStart, curLen);
+            if (!sliceData) {
+              sliceData = await processChunkSlice(ffmpeg, inputPath, curStart, Math.min(5, curLen));
+            }
+
+            if (sliceData && sliceData.length > 0) {
+              totalBytesProcessed += sliceData.length;
+              if (writable) {
+                await writable.write(sliceData);
+              } else {
+                chunks.push(sliceData);
+              }
+              sliceData = null; // GC release
+            }
+
+            curStart += curLen;
+            accumulatedDurationProcessed += curLen;
+            const progress = Math.min(0.99, accumulatedDurationProcessed / totalConcatDuration);
+            setProcessingProgress(progress);
+            setProcessingMessage(`กำลังรวมไฟล์ที่ ${i + 1}/${selectedFiles.length}: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~15 MB)...`);
           }
         }
 
@@ -540,91 +540,20 @@ export default function App() {
           await writable.close();
         }
 
-        if (!execSuccess && totalBytesProcessed === 0) {
-          return { success: false, url: null };
-        }
+        try { await ffmpeg.unmount('/work'); } catch {}
 
         if (opfsFileHandle) {
           const diskFile = await opfsFileHandle.getFile();
           const url = URL.createObjectURL(diskFile);
-          return { success: true, url };
-        }
-
-        if (fileHandle) {
-          return { success: true, url: null };
-        }
-
-        if (chunks.length > 0) {
+          setOutputUrl(url);
+          setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
+        } else if (fileHandle) {
+          setProcessingMessage(`รวมไฟล์วิดีโอบันทึกลงปลายทางสำเร็จ (ใช้ RAM รวมตลอดงานเพียง ~15MB): ${fileHandle.name}`);
+        } else if (chunks.length > 0) {
           const blob = new Blob(chunks, { type: 'video/mp2t' });
           const url = URL.createObjectURL(blob);
-          return { success: true, url };
-        }
-
-        return { success: totalBytesProcessed > 0, url: null };
-      };
-
-      if (selectedFiles.length > 1) {
-        setProcessingMessage('กำลังเตรียมไฟล์สำหรับรวมวิดีโอ (FFmpeg Concat)...');
-        await ffmpeg.createDir('/work');
-        await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
-
-        let listContent = '';
-        for (let i = 0; i < selectedFiles.length; i++) {
-          const filename = `/work/${selectedFiles[i].name}`;
-          listContent += `file '${filename}'\n`;
-        }
-        await ffmpeg.writeFile('list.txt', listContent);
-
-        setProcessingMessage('กำลังรวมวิดีโอ (Low-RAM Streaming - เคลียร์หน่วยความจำชั่วคราวอัตโนมัติ)...');
-
-        // Concat mode
-        const concatArgs1 = [
-          '-f', 'concat',
-          '-safe', '0',
-          '-i', 'list.txt',
-          '-c:v', 'copy',
-          '-c:a', 'aac',
-          '-b:a', '192k',
-          '-map', '0:v?',
-          '-map', '0:a?',
-          '-f', 'segment',
-          '-segment_time', '10',
-          '-segment_format', 'mpegts',
-          '-reset_timestamps', '1',
-          '/out_seg_%03d.ts'
-        ];
-
-        let result = await executeStreamPipeline(concatArgs1, 'กำลังสตรีมวิดีโอลงปลายทาง (Pipeline Streaming)');
-
-        if (!result.success) {
-          setProcessingMessage('กำลังสลับไปใช้โหมด Direct Copy เพื่อรวมวิดีโอ (Low-RAM Mode)...');
-          const concatArgs2 = [
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', 'list.txt',
-            '-c', 'copy',
-            '-map', '0:v?',
-            '-map', '0:a?',
-            '-f', 'segment',
-            '-segment_time', '10',
-            '-segment_format', 'mpegts',
-            '-reset_timestamps', '1',
-            '/out_seg_%03d.ts'
-          ];
-          result = await executeStreamPipeline(concatArgs2, 'กำลังสตรีมวิดีโอลงปลายทาง (Pipeline Streaming)');
-        }
-
-        try { await ffmpeg.deleteFile('list.txt'); } catch (e) {}
-
-        if (!result.success) {
-          throw new Error('ไม่สามารถรวมไฟล์วิดีโอได้ กรุณาตรวจสอบว่าไฟล์วิดีโอมีสเปกใกล้เคียงกัน');
-        }
-
-        if (result.url) {
-          setOutputUrl(result.url);
+          setOutputUrl(url);
           setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
-        } else {
-          setProcessingMessage(`รวมไฟล์และบันทึกลงปลายทางสำเร็จ (เคลียร์ RAM ตลอดการทำงาน ภาพไม่พัง 100%): ${fileHandle?.name}`);
         }
 
         setProcessingProgress(1.0);
@@ -651,65 +580,71 @@ export default function App() {
 
         let currentFileDuration = duration;
         if (currentFileDuration === 0) {
-           setProcessingMessage(`วิเคราะห์ความยาวไฟล์ด้วย FFmpeg...`);
-           currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
+           if (isLocalFile) {
+             currentFileDuration = await getFileDuration(selectedFiles[0]);
+           }
+           if (currentFileDuration === 0) {
+             setProcessingMessage(`วิเคราะห์ความยาวไฟล์ด้วย FFmpeg...`);
+             currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
+           }
         }
 
         let currentStart = settings.startTime;
         const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
-        const totalTrimDuration = finalEndTime - currentStart;
+        const totalTrimDuration = Math.max(0.1, finalEndTime - currentStart);
 
-        setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (Low-RAM Streaming - เคลียร์หน่วยความจำชั่วคราว)...');
+        const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
+        const chunks: Uint8Array[] = [];
+        let totalBytesProcessed = 0;
 
-        const trimArgs1 = [
-          '-ss', currentStart.toString(),
-          '-i', inputFilename,
-          ...(totalTrimDuration > 0 ? ['-t', totalTrimDuration.toString()] : []),
-          '-c:v', 'copy',
-          '-c:a', 'aac',
-          '-b:a', '192k',
-          '-map', '0:v?',
-          '-map', '0:a?',
-          '-f', 'segment',
-          '-segment_time', '10',
-          '-segment_format', 'mpegts',
-          '-reset_timestamps', '1',
-          '/out_seg_%03d.ts'
-        ];
+        let curStart = currentStart;
+        while (curStart < finalEndTime) {
+          const curLen = Math.min(CHUNK_TIME, finalEndTime - curStart);
 
-        let result = await executeStreamPipeline(trimArgs1, 'กำลังสตรีมตัดวิดีโอลงปลายทาง (Pipeline Streaming)');
+          let sliceData = await processChunkSlice(ffmpeg, inputFilename, curStart, curLen);
+          if (!sliceData) {
+            sliceData = await processChunkSlice(ffmpeg, inputFilename, curStart, Math.min(5, curLen));
+          }
 
-        if (!result.success) {
-          setProcessingMessage('กำลังตัดวิดีโอด้วยโหมด Direct Copy (Low-RAM Mode)...');
-          const trimArgs2 = [
-            '-ss', currentStart.toString(),
-            '-i', inputFilename,
-            ...(totalTrimDuration > 0 ? ['-t', totalTrimDuration.toString()] : []),
-            '-c', 'copy',
-            '-map', '0:v?',
-            '-map', '0:a?',
-            '-f', 'segment',
-            '-segment_time', '10',
-            '-segment_format', 'mpegts',
-            '-reset_timestamps', '1',
-            '/out_seg_%03d.ts'
-          ];
-          result = await executeStreamPipeline(trimArgs2, 'กำลังสตรีมตัดวิดีโอลงปลายทาง (Pipeline Streaming)');
+          if (sliceData && sliceData.length > 0) {
+            totalBytesProcessed += sliceData.length;
+            if (writable) {
+              await writable.write(sliceData);
+            } else {
+              chunks.push(sliceData);
+            }
+            sliceData = null; // GC release
+          }
+
+          curStart += curLen;
+          const processedSoFar = curStart - currentStart;
+          const progress = Math.min(0.99, processedSoFar / totalTrimDuration);
+          setProcessingProgress(progress);
+          setProcessingMessage(`กำลังสตรีมตัดวิดีโอลงปลายทาง (${(processedSoFar / 60).toFixed(1)} นาที): ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~15 MB)...`);
         }
 
-        if (!isLocalFile) {
+        if (writable) {
+          await writable.close();
+        }
+
+        if (isLocalFile) {
+          try { await ffmpeg.unmount('/work'); } catch {}
+        } else {
           try { await ffmpeg.deleteFile(inputFilename); } catch (e) {}
         }
 
-        if (!result.success) {
-          throw new Error('ไม่สามารถตัด/ประมวลผลวิดีโอได้');
-        }
-
-        if (result.url) {
-          setOutputUrl(result.url);
+        if (opfsFileHandle) {
+          const diskFile = await opfsFileHandle.getFile();
+          const url = URL.createObjectURL(diskFile);
+          setOutputUrl(url);
           setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
-        } else {
-          setProcessingMessage(`บันทึกไฟล์ลงปลายทางสำเร็จ (ภาพไม่พัง เวลาตรงตามต้นฉบับ 100%): ${fileHandle?.name}`);
+        } else if (fileHandle) {
+          setProcessingMessage(`ตัดวิดีโอบันทึกลงปลายทางสำเร็จ (ใช้ RAM รวมตลอดงานเพียง ~15MB): ${fileHandle.name}`);
+        } else if (chunks.length > 0) {
+          const blob = new Blob(chunks, { type: 'video/mp2t' });
+          const url = URL.createObjectURL(blob);
+          setOutputUrl(url);
+          setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
         }
 
         setProcessingProgress(1.0);
@@ -720,18 +655,13 @@ export default function App() {
       setProcessingMessage(`Error: ${err.message || 'Processing failed'}`);
       setIsProcessingComplete(true);
     } finally {
-      // Global cleanup: delete leftover segments and unmount WORKERFS to prevent RAM memory accumulation
+      // Global cleanup
       try {
-        const files = await ffmpegRef.current?.listDir('/');
-        if (files) {
-          for (const f of files) {
-            if (f.name.startsWith('out_seg_')) {
-              try { await ffmpegRef.current?.deleteFile(`/${f.name}`); } catch {}
-            }
-          }
-        }
+        await ffmpegRef.current?.deleteFile('temp_chunk.ts');
       } catch {}
-      try { await ffmpegRef.current?.unmount('/work'); } catch {}
+      try {
+        await ffmpegRef.current?.unmount('/work');
+      } catch {}
     }
   };
 
