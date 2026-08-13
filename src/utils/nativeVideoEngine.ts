@@ -4,7 +4,7 @@
  * Bypasses WebAssembly & V8 ArrayBuffer allocations completely.
  * Passes Blob slices directly to FileSystemWritableFileStream handles.
  * Uses RAM strictly as a pass-through reference without allocating ArrayBuffers in JS Heap.
- * Includes Smart EBML Cluster Timecode Patcher for seamless Opus/HEVC/MKV video concatenation.
+ * Includes Smart EBML Cluster Timecode Patcher & Duration Calculator for seamless Opus/HEVC/MKV video concatenation.
  */
 
 export interface NativeStreamProgress {
@@ -18,12 +18,84 @@ export interface NativeStreamProgress {
 export type NativeProgressCallback = (progress: NativeStreamProgress) => void;
 
 /**
+ * Reads exact duration of a video file in milliseconds using HTML5 Video Element with timeout fallback
+ */
+export function getFileDurationMs(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    const url = URL.createObjectURL(file);
+    video.src = url;
+
+    const timer = setTimeout(() => {
+      URL.revokeObjectURL(url);
+      resolve(0);
+    }, 1500);
+
+    video.onloadedmetadata = () => {
+      clearTimeout(timer);
+      const dur = video.duration || 0;
+      URL.revokeObjectURL(url);
+      resolve(Math.floor(dur * 1000));
+    };
+
+    video.onerror = () => {
+      clearTimeout(timer);
+      URL.revokeObjectURL(url);
+      resolve(0);
+    };
+  });
+}
+
+/**
  * Reads a small slice of a File as Uint8Array for header inspection only.
  */
 async function readSlice(file: File, start: number, length: number): Promise<Uint8Array> {
   const blob = file.slice(start, start + length);
   const buffer = await blob.arrayBuffer();
   return new Uint8Array(buffer);
+}
+
+/**
+ * Fallback: Estimates file duration by scanning the last 2MB for the highest Cluster Timecode
+ */
+async function estimateFileDurationMs(file: File): Promise<number> {
+  const htmlDur = await getFileDurationMs(file);
+  if (htmlDur > 0) return htmlDur;
+
+  try {
+    const scanSize = Math.min(2 * 1024 * 1024, file.size);
+    const scanOffset = file.size - scanSize;
+    const buf = await readSlice(file, scanOffset, scanSize);
+
+    let maxTc = 0;
+    for (let i = 0; i < buf.length - 8; i++) {
+      // Cluster ID: 0x1F 0x43 0xB6 0x75
+      if (buf[i] === 0x1F && buf[i + 1] === 0x43 && buf[i + 2] === 0xB6 && buf[i + 3] === 0x75) {
+        const sizeVint = parseVint(buf, i + 4);
+        if (!sizeVint) continue;
+        let pos = i + 4 + sizeVint.length;
+        while (pos < buf.length - 3 && pos < i + 128) {
+          if (buf[pos] === 0xE7) { // Timecode ID
+            const tcSize = parseVint(buf, pos + 1);
+            if (tcSize && pos + 1 + tcSize.length + tcSize.value <= buf.length) {
+              let tc = 0;
+              const valStart = pos + 1 + tcSize.length;
+              for (let k = 0; k < tcSize.value; k++) {
+                tc = (tc * 256) + buf[valStart + k];
+              }
+              if (tc > maxTc) maxTc = tc;
+            }
+            break;
+          }
+          pos++;
+        }
+      }
+    }
+    return maxTc > 0 ? (maxTc + 1000) : 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
@@ -72,7 +144,7 @@ function encodeVint(value: number, length: number): Uint8Array {
 }
 
 /**
- * Patch Segment Header in MKV File #1 to Unknown Size (allows streaming beyond File #1 duration)
+ * Patch Segment Header in MKV File #1 to Unknown Size (allows streaming beyond File #1 boundaries)
  */
 function patchSegmentHeader(headerBuf: Uint8Array): Uint8Array {
   const patched = new Uint8Array(headerBuf);
@@ -99,6 +171,124 @@ function patchSegmentHeader(headerBuf: Uint8Array): Uint8Array {
 }
 
 /**
+ * Patch Segment Info element (0x1549A966) Duration (0x4489) in File #1
+ * Updates total duration so players display full combined length on timeline
+ */
+function patchSegmentInfo(headerBuf: Uint8Array, totalDurationMs: number): Uint8Array {
+  const buf = new Uint8Array(headerBuf);
+  let pos = 0;
+
+  while (pos < buf.length - 8) {
+    // Segment Info ID: 0x15 0x49 0xA9 0x66
+    if (buf[pos] === 0x15 && buf[pos + 1] === 0x49 && buf[pos + 2] === 0xA9 && buf[pos + 3] === 0x66) {
+      const infoSizeVint = parseVint(buf, pos + 4);
+      if (!infoSizeVint) break;
+
+      const infoContentStart = pos + 4 + infoSizeVint.length;
+      const infoContentEnd = infoSizeVint.value > 0 ? infoContentStart + infoSizeVint.value : buf.length;
+
+      let timecodeScale = 1000000; // Default 1ms = 1,000,000 ns
+      let durValOffset = -1;
+      let durValLen = 0;
+
+      let iPos = infoContentStart;
+      while (iPos < infoContentEnd - 3 && iPos < buf.length - 4) {
+        // TimecodeScale ID: 0x2A 0xD7 0xB1
+        if (buf[iPos] === 0x2A && buf[iPos + 1] === 0xD7 && buf[iPos + 2] === 0xB1) {
+          const tcScaleSize = parseVint(buf, iPos + 3);
+          if (tcScaleSize && tcScaleSize.value > 0) {
+            let scaleVal = 0;
+            const valStart = iPos + 3 + tcScaleSize.length;
+            for (let k = 0; k < tcScaleSize.value; k++) {
+              scaleVal = (scaleVal * 256) + buf[valStart + k];
+            }
+            if (scaleVal > 0) timecodeScale = scaleVal;
+            iPos = valStart + tcScaleSize.value;
+            continue;
+          }
+        }
+
+        // Duration ID: 0x44 0x89
+        if (buf[iPos] === 0x44 && buf[iPos + 1] === 0x89) {
+          const durSizeVint = parseVint(buf, iPos + 2);
+          if (durSizeVint) {
+            durValOffset = iPos + 2 + durSizeVint.length;
+            durValLen = durSizeVint.value;
+            break;
+          }
+        }
+
+        iPos++;
+      }
+
+      const durationInTicks = totalDurationMs / (timecodeScale / 1000000);
+
+      if (durValOffset !== -1 && (durValLen === 4 || durValLen === 8)) {
+        const view = new DataView(buf.buffer, buf.byteOffset + durValOffset, durValLen);
+        if (durValLen === 4) {
+          view.setFloat32(0, durationInTicks, false);
+        } else if (durValLen === 8) {
+          view.setFloat64(0, durationInTicks, false);
+        }
+        return buf;
+      } else {
+        // Insert Duration element (0x44 0x89) if missing
+        const durHeader = new Uint8Array([0x44, 0x89, 0x88]); // len 8
+        const durVal = new Uint8Array(8);
+        const view = new DataView(durVal.buffer);
+        view.setFloat64(0, durationInTicks, false);
+
+        const before = buf.slice(0, infoContentStart);
+        const after = buf.slice(infoContentStart);
+
+        const newBuf = new Uint8Array(buf.length + 3 + 8);
+        newBuf.set(before, 0);
+        newBuf.set(durHeader, infoContentStart);
+        newBuf.set(durVal, infoContentStart + 3);
+        newBuf.set(after, infoContentStart + 11);
+
+        if (infoSizeVint.value > 0) {
+          const newInfoSize = infoSizeVint.value + 11;
+          const newInfoSizeVint = encodeVint(newInfoSize, infoSizeVint.length);
+          newBuf.set(newInfoSizeVint, pos + 4);
+        }
+
+        return newBuf;
+      }
+    }
+    pos++;
+  }
+
+  return buf;
+}
+
+/**
+ * Neutralizes Cues (0x1C53BB6B) and SeekHead (0x114D9B74) in Header
+ * Replaces 4-byte IDs with EBML Void element (0xEC 0x82 0x00 0x00)
+ * Prevents players from seeking to stale File #1 index offsets and freezing
+ */
+function invalidateCuesAndSeekHeadInHeader(headerBuf: Uint8Array): Uint8Array {
+  const buf = new Uint8Array(headerBuf);
+  let pos = 0;
+  while (pos < buf.length - 4) {
+    // Cues ID: 0x1C 0x53 0xBB 0x6B
+    // SeekHead ID: 0x11 0x4D 0x9B 0x74
+    if (
+      (buf[pos] === 0x1C && buf[pos + 1] === 0x53 && buf[pos + 2] === 0xBB && buf[pos + 3] === 0x6B) ||
+      (buf[pos] === 0x11 && buf[pos + 1] === 0x4D && buf[pos + 2] === 0x9B && buf[pos + 3] === 0x74)
+    ) {
+      // Replace with valid EBML Void: 0xEC (ID) 0x82 (Len 2) 0x00 0x00
+      buf[pos] = 0xEC;
+      buf[pos + 1] = 0x82;
+      buf[pos + 2] = 0x00;
+      buf[pos + 3] = 0x00;
+    }
+    pos++;
+  }
+  return buf;
+}
+
+/**
  * Find EBML Element ID offset in Matroska / MKV / WebM file
  */
 async function findEbmlClustersOffset(file: File): Promise<{ headerLength: number; firstClusterOffset: number }> {
@@ -109,7 +299,7 @@ async function findEbmlClustersOffset(file: File): Promise<{ headerLength: numbe
   let firstClusterOffset = -1;
 
   while (pos < buffer.length - 4) {
-    // Check for Cluster ID: 0x1F 0x43 0xB6 0x75
+    // Cluster ID: 0x1F 0x43 0xB6 0x75
     if (buffer[pos] === 0x1F && buffer[pos + 1] === 0x43 && buffer[pos + 2] === 0xB6 && buffer[pos + 3] === 0x75) {
       firstClusterOffset = pos;
       break;
@@ -152,7 +342,7 @@ function patchClusterHeader(
   let pos = 4 + clusterSizeVint.length;
 
   while (pos < inspectBuf.length - 3) {
-    if (inspectBuf[pos] === 0xE7) {
+    if (inspectBuf[pos] === 0xE7) { // Timecode ID
       const tcSizeVint = parseVint(inspectBuf, pos + 1);
       if (!tcSizeVint) return null;
 
@@ -191,7 +381,7 @@ function patchClusterHeader(
         const newClusterSizeVint = encodeVint(newClusterSize, clusterSizeVint.length);
 
         const headerId = inspectBuf.slice(0, 4);
-        const tcHeader = new Uint8Array([0xE7, 0x84]);
+        const tcHeader = new Uint8Array([0xE7, 0x84]); // ID 0xE7, VINT len 4
         const tcVal = new Uint8Array(4);
         let tempTc = newTc;
         for (let i = 3; i >= 0; i--) {
@@ -256,13 +446,32 @@ export async function processNativeConcatStream(
   const isMkv = files.every((f) => f.name.toLowerCase().endsWith('.mkv') || f.name.toLowerCase().endsWith('.webm'));
 
   if (isMkv && files.length > 1) {
-    // Advanced EBML Cluster Timecode Patcher for Opus / HEVC / MKV
+    if (onProgress) {
+      onProgress({
+        processedBytes: 0,
+        totalBytes: totalInputSize,
+        percentage: 0,
+        speedMBs: 0,
+        statusText: 'กำลังคำนวณความยาวไฟล์และเตรียมข้อมูลหัวไฟล์...',
+      });
+    }
+
+    // 1. Calculate durations of all video files
+    const fileDurationsMs = await Promise.all(files.map((f) => estimateFileDurationMs(f)));
+    const totalDurationMs = fileDurationsMs.reduce((sum, d) => sum + d, 0);
+
+    // 2. Prepare File #1 Header
     const { headerLength, firstClusterOffset } = await findEbmlClustersOffset(files[0]);
 
     if (headerLength > 0) {
       const origHeaderBlob = files[0].slice(0, headerLength);
       const origHeaderBuf = new Uint8Array(await origHeaderBlob.arrayBuffer());
-      const patchedHeaderBuf = patchSegmentHeader(origHeaderBuf);
+
+      let patchedHeaderBuf = patchSegmentHeader(origHeaderBuf);
+      if (totalDurationMs > 0) {
+        patchedHeaderBuf = patchSegmentInfo(patchedHeaderBuf, totalDurationMs);
+      }
+      patchedHeaderBuf = invalidateCuesAndSeekHeadInHeader(patchedHeaderBuf);
 
       await writeChunkZeroCopy(new Blob([patchedHeaderBuf]), writable);
       totalBytesWritten += patchedHeaderBuf.length;
@@ -270,6 +479,7 @@ export async function processNativeConcatStream(
 
     let timeOffsetMs = 0;
 
+    // 3. Process Clusters sequentially from File #1, #2, #3, #4, #5
     for (let fIdx = 0; fIdx < files.length; fIdx++) {
       const file = files[fIdx];
       const clusterStartOffset = (fIdx === 0 && firstClusterOffset > 0)
@@ -285,6 +495,7 @@ export async function processNativeConcatStream(
         const inspectLen = Math.min(128, file.size - offset);
         const inspectBuf = await readSlice(file, offset, inspectLen);
 
+        // Check if Cluster ID: 0x1F 0x43 0xB6 0x75
         if (inspectBuf[0] === 0x1F && inspectBuf[1] === 0x43 && inspectBuf[2] === 0xB6 && inspectBuf[3] === 0x75) {
           const sizeVint = parseVint(inspectBuf, 4);
           if (!sizeVint) {
@@ -322,6 +533,7 @@ export async function processNativeConcatStream(
             offset = chunkEnd;
           }
         } else {
+          // Skip non-cluster trailing data (Cues, Tags, SeekHead) at end of file
           let foundNext = -1;
           const scanBufLen = Math.min(64 * 1024, file.size - offset);
           const scanBuf = await readSlice(file, offset, scanBufLen);
@@ -336,6 +548,7 @@ export async function processNativeConcatStream(
           if (foundNext !== -1) {
             offset = foundNext;
           } else {
+            // No more clusters in this file, finish file
             break;
           }
         }
@@ -353,9 +566,12 @@ export async function processNativeConcatStream(
         }
       }
 
-      timeOffsetMs += (fileMaxTc > 0 ? fileMaxTc : 0) + 33;
+      const fileKnownDurMs = fileDurationsMs[fIdx] || 0;
+      const effectiveFileDurMs = Math.max(fileMaxTc + 1000, fileKnownDurMs);
+      timeOffsetMs += effectiveFileDurMs;
     }
   } else {
+    // Direct Zero-Copy Stream Concatenator (For TS / MP4 / Generic formats)
     for (let fIdx = 0; fIdx < files.length; fIdx++) {
       const file = files[fIdx];
       let offset = 0;
@@ -464,4 +680,3 @@ export async function processNativeTrimStream(
 
   return { success: true, totalBytesWritten };
 }
-
