@@ -66,7 +66,7 @@ const runFFmpegChunk = async (
   const ext = targetExt.toLowerCase();
   const strategies: { args: string[] }[] = [];
 
-  // Strategy 1: Direct stream copy with -map 0:v? -map 0:a? (preserves original codecs like HEVC, Opus, H264, AAC)
+  // Strategy 1: Direct stream copy
   strategies.push({
     args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-map', '0:v?', '-map', '0:a?', outName]
   });
@@ -77,17 +77,30 @@ const runFFmpegChunk = async (
     });
   }
 
-  // Fallback Strategy: Matroska container
+  // Strategy 3: Matroska container (.mkv) which supports all codecs (HEVC, Opus, VP9, etc)
+  const mkvOut = outName.endsWith('.mkv') ? outName : `${outName}_fallback.mkv`;
   strategies.push({
-    args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-f', 'matroska', outName]
+    args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-f', 'matroska', mkvOut]
+  });
+
+  // Strategy 4: Audio convert to AAC (for MP4/TS compatibility)
+  strategies.push({
+    args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', outName]
   });
 
   for (const strat of strategies) {
     try {
+      const targetFile = strat.args[strat.args.length - 1];
       const ret = await ffmpeg.exec(strat.args);
       if (ret === 0) {
-        const data = await ffmpeg.readFile(outName);
-        if (data && data.length > 0) return true;
+        const data = await ffmpeg.readFile(targetFile);
+        if (data && data.length > 0) {
+          if (targetFile !== outName) {
+            await ffmpeg.writeFile(outName, data);
+            await ffmpeg.deleteFile(targetFile);
+          }
+          return true;
+        }
       }
     } catch (e: any) {
       console.warn('Strategy execution error:', e);
@@ -424,18 +437,52 @@ export default function App() {
         await ffmpeg.writeFile('list.txt', listContent);
 
         setProcessingMessage('กำลังรวมวิดีโอแบบไร้การสูญเสียคุณภาพ (-c copy)...');
-        const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
-        const outName = `output_merged.${targetExt}`;
+        const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mkv';
+        let actualOutName = `output_merged.${targetExt}`;
+        let success = false;
 
-        let ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', outName]);
-        let actualOutName = outName;
-        if (ret !== 0) {
-          actualOutName = 'output_merged.mkv';
-          ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-f', 'matroska', actualOutName]);
-          if (ret !== 0) {
-            await ffmpeg.unmount('/work');
-            throw new Error('ไม่สามารถรวมวิดีโอได้ (Exit code ' + ret + ')');
+        // Strategy 1: Direct copy with target filename
+        try {
+          const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', actualOutName]);
+          if (ret === 0) {
+            const dataCheck = await ffmpeg.readFile(actualOutName);
+            if (dataCheck && dataCheck.length > 0) success = true;
           }
+        } catch (e) {
+          console.warn('Concat strategy 1 failed:', e);
+        }
+
+        // Strategy 2: Matroska MKV fallback (handles all video/audio codecs)
+        if (!success) {
+          actualOutName = 'output_merged_fallback.mkv';
+          try {
+            const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-f', 'matroska', actualOutName]);
+            if (ret === 0) {
+              const dataCheck = await ffmpeg.readFile(actualOutName);
+              if (dataCheck && dataCheck.length > 0) success = true;
+            }
+          } catch (e) {
+            console.warn('Concat strategy 2 (MKV) failed:', e);
+          }
+        }
+
+        // Strategy 3: Convert audio to AAC (for TS/MP4 compatibility)
+        if (!success) {
+          actualOutName = `output_merged_aac.${targetExt === 'ts' ? 'ts' : 'mp4'}`;
+          try {
+            const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', actualOutName]);
+            if (ret === 0) {
+              const dataCheck = await ffmpeg.readFile(actualOutName);
+              if (dataCheck && dataCheck.length > 0) success = true;
+            }
+          } catch (e) {
+            console.warn('Concat strategy 3 (AAC transcode) failed:', e);
+          }
+        }
+
+        if (!success) {
+          await ffmpeg.unmount('/work');
+          throw new Error('ไม่สามารถรวมวิดีโอได้ กรุณาตรวจสอบฟอร์แมตไฟล์');
         }
 
         setProcessingMessage('กำลังอ่านข้อมูลวิดีโอที่รวมสำเร็จ...');
