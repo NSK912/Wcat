@@ -32,6 +32,22 @@ const DEFAULT_SETTINGS: EditSettings = {
   outputFormat: 'mp4',
 };
 
+const getFFmpegDuration = async (ffmpeg: any, inputPath: string): Promise<number> => {
+  return new Promise(async (resolve) => {
+    let extractedDuration = 0;
+    const logHandler = ({ message }: { message: string }) => {
+      const match = message.match(/Duration: (\d{2}):(\d{2}):(\d{2}\.\d+)/);
+      if (match) {
+        extractedDuration = parseInt(match[1]) * 3600 + parseInt(match[2]) * 60 + parseFloat(match[3]);
+      }
+    };
+    ffmpeg.on('log', logHandler);
+    await ffmpeg.exec(['-i', inputPath]);
+    ffmpeg.off('log', logHandler);
+    resolve(extractedDuration);
+  });
+};
+
 export default function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoName, setVideoName] = useState<string>('');
@@ -343,27 +359,77 @@ export default function App() {
           
           for (let i = 0; i < selectedFiles.length; i++) {
               const file = selectedFiles[i];
-              setProcessingMessage(`กำลังต่อไฟล์ ${i+1}/${selectedFiles.length} (${file.name})...`);
+              setProcessingMessage(`กำลังประมวลผลไฟล์ต้นฉบับที่ ${i + 1}/${selectedFiles.length} (${file.name})...`);
               
               const dirName = `/work${i}`;
               await ffmpeg.createDir(dirName);
               await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
               const inputFilename = `${dirName}/${file.name}`;
-              const outName = `chunk${i}.ts`;
+              const outName = `chunk_${i}.ts`;
               
-              const ret = await ffmpeg.exec(['-i', inputFilename, '-c', 'copy', '-f', 'mpegts', outName]);
-              if (ret !== 0) throw new Error('FFmpeg error converting ' + file.name);
+              let currentFileDuration = 0;
+              try {
+                currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
+              } catch (e) {
+                console.warn('Could not read duration with FFmpeg', e);
+              }
+
+              const targetChunkBytes = 30 * 1024 * 1024; // 30 MB target chunk in RAM
+              let CHUNK_DURATION = 30; // 30s default
+              if (currentFileDuration > 0 && file.size > 0) {
+                const bytesPerSecond = file.size / currentFileDuration;
+                if (bytesPerSecond > 0) {
+                  CHUNK_DURATION = Math.max(5, Math.min(60, Math.floor(targetChunkBytes / bytesPerSecond)));
+                }
+              }
+
+              if (currentFileDuration > 0) {
+                 let currentStart = 0;
+                 while (currentStart < currentFileDuration) {
+                    const chunkEnd = Math.min(currentStart + CHUNK_DURATION, currentFileDuration);
+                    const chunkDuration = chunkEnd - currentStart;
+                    if (chunkDuration <= 0) break;
+                    
+                    setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i+1}/${selectedFiles.length} (${Math.round(currentStart)}s - ${Math.round(chunkEnd)}s)...`);
+                    
+                    const ret = await ffmpeg.exec(['-ss', currentStart.toString(), '-i', inputFilename, '-t', chunkDuration.toString(), '-c', 'copy', '-f', 'mpegts', outName]);
+                    if (ret !== 0) throw new Error('FFmpeg error processing ' + file.name + ' at ' + currentStart);
+                    
+                    let data = await ffmpeg.readFile(outName);
+                    await writable.write(data);
+                    await ffmpeg.deleteFile(outName);
+                    
+                    // @ts-ignore
+                    data = null;
+                    currentStart = chunkEnd;
+                    const fileProgress = i + (currentStart / currentFileDuration);
+                    setProcessingProgress(fileProgress / selectedFiles.length);
+                 }
+              } else {
+                 let chunkIndex = 0;
+                 while (true) {
+                    setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i+1}/${selectedFiles.length} (ช่วงที่ ${chunkIndex + 1})...`);
+                    const ret = await ffmpeg.exec(['-ss', (chunkIndex * 30).toString(), '-i', inputFilename, '-t', '30', '-c', 'copy', '-f', 'mpegts', outName]);
+                    if (ret !== 0) break;
+                    
+                    let data = await ffmpeg.readFile(outName);
+                    if (!data || data.length === 0) {
+                       await ffmpeg.deleteFile(outName);
+                       break;
+                    }
+                    await writable.write(data);
+                    await ffmpeg.deleteFile(outName);
+                    // @ts-ignore
+                    data = null;
+                    chunkIndex++;
+                 }
+                 setProcessingProgress((i + 1) / selectedFiles.length);
+              }
               
-              const data = await ffmpeg.readFile(outName);
-              await writable.write(data);
-              
-              await ffmpeg.deleteFile(outName);
               await ffmpeg.unmount(dirName);
-              
-              setProcessingProgress((i + 1) / selectedFiles.length);
           }
           await writable.close();
-          setProcessingMessage(`รวมไฟล์สำเร็จ (RAM ปลอดภัย): ${fileHandle.name}`);
+          setProcessingMessage(`รวมไฟล์และบันทึกลง SSD สำเร็จ (RAM ปลอดภัย): ${fileHandle.name}`);
           setProcessingProgress(1.0);
           setIsProcessingComplete(true);
         } else {
@@ -433,56 +499,93 @@ export default function App() {
         }
 
         if (fileHandle && fileHandle.name.endsWith('.ts')) {
-          // คำนวณหาขนาด Chunk ที่เหมาะสมกับไฟล์ เพื่อไม่ให้ RAM บวมเกินไป (ตั้งเป้าไว้ที่ 30MB ต่อ Chunk)
-          let CHUNK_DURATION = 60; 
-          if (isLocalFile && duration > 0) {
-            const fileSizeBytes = selectedFiles[0].size;
-            const bytesPerSecond = fileSizeBytes / duration;
-            const targetChunkBytes = 30 * 1024 * 1024; // 30 MB
-            CHUNK_DURATION = Math.max(2, Math.min(60, Math.floor(targetChunkBytes / bytesPerSecond)));
+          let currentFileDuration = duration;
+          if (currentFileDuration === 0) {
+             setProcessingMessage(`วิเคราะห์ความยาวไฟล์ด้วย FFmpeg...`);
+             currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
+          }
+
+          const targetChunkBytes = 30 * 1024 * 1024; // 30 MB
+          let CHUNK_DURATION = 30; // 30s default
+          if (isLocalFile && currentFileDuration > 0 && selectedFiles.length > 0 && selectedFiles[0].size > 0) {
+              const bytesPerSecond = selectedFiles[0].size / currentFileDuration;
+              if (bytesPerSecond > 0) {
+                CHUNK_DURATION = Math.max(5, Math.min(60, Math.floor(targetChunkBytes / bytesPerSecond)));
+              }
           }
 
           let currentStart = settings.startTime;
-          const finalEndTime = (settings.endTime > 0 && settings.endTime < duration) ? settings.endTime : duration;
+          const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
+          const totalTrimDuration = finalEndTime - currentStart;
           const outName = 'chunk.ts';
           
           setProcessingMessage('เปิดท่อส่งข้อมูลลง SSD (Streaming Mode)...');
           const writable = await fileHandle.createWritable();
           
-          while (currentStart < finalEndTime) {
-              const chunkEnd = Math.min(currentStart + CHUNK_DURATION, finalEndTime);
-              const chunkDuration = chunkEnd - currentStart;
-              
-              setProcessingMessage(`กำลังเขียนข้อมูลช่วง ${Math.round(currentStart)}s ถึง ${Math.round(chunkEnd)}s (ประหยัด RAM)...`);
-              
-              const args = [
-                  '-ss', currentStart.toString(),
-                  '-i', inputFilename,
-                  '-t', chunkDuration.toString(),
-                  '-c', 'copy',
-                  '-f', 'mpegts',
-                  outName
-              ];
-              
-              const ret = await ffmpeg.exec(args);
-              if (ret !== 0) throw new Error('FFmpeg error at chunk ' + currentStart);
-              
-              let data = await ffmpeg.readFile(outName);
-              await writable.write(data);
-              
-              // 🔥 หัวใจสำคัญ: ลบไฟล์ออกจาก RAM ทันที และเคลียร์ตัวแปร
-              await ffmpeg.deleteFile(outName);
-              // @ts-ignore
-              data = null; // ช่วย Garbage Collector คืน RAM ไวขึ้น
-              
-              currentStart = chunkEnd;
-              setProcessingProgress((currentStart - settings.startTime) / (finalEndTime - settings.startTime));
+          if (totalTrimDuration > 0) {
+              while (currentStart < finalEndTime) {
+                  const chunkEnd = Math.min(currentStart + CHUNK_DURATION, finalEndTime);
+                  const chunkDuration = chunkEnd - currentStart;
+                  if (chunkDuration <= 0) break;
+                  
+                  setProcessingMessage(`กำลังสตรีมลง SSD: ช่วง ${Math.round(currentStart)}s ถึง ${Math.round(chunkEnd)}s (ประหยัด RAM ~30MB)...`);
+                  
+                  const args = [
+                      '-ss', currentStart.toString(),
+                      '-i', inputFilename,
+                      '-t', chunkDuration.toString(),
+                      '-c', 'copy',
+                      '-f', 'mpegts',
+                      outName
+                  ];
+                  
+                  const ret = await ffmpeg.exec(args);
+                  if (ret !== 0) throw new Error('FFmpeg error at chunk ' + currentStart);
+                  
+                  let data = await ffmpeg.readFile(outName);
+                  await writable.write(data);
+                  
+                  // 🔥 หัวใจสำคัญ: ลบไฟล์ออกจาก RAM ทันที และเคลียร์ตัวแปร
+                  await ffmpeg.deleteFile(outName);
+                  // @ts-ignore
+                  data = null; // ช่วย Garbage Collector คืน RAM ไวขึ้น
+                  
+                  currentStart = chunkEnd;
+                  setProcessingProgress(totalTrimDuration > 0 ? (currentStart - settings.startTime) / totalTrimDuration : 1.0);
+              }
+          } else {
+             let chunkIndex = 0;
+             while (true) {
+                 setProcessingMessage(`กำลังสตรีมลง SSD (ช่วงที่ ${chunkIndex + 1})...`);
+                 const args = [
+                     '-ss', (chunkIndex * 30).toString(),
+                     '-i', inputFilename,
+                     '-t', '30',
+                     '-c', 'copy',
+                     '-f', 'mpegts',
+                     outName
+                 ];
+                 const ret = await ffmpeg.exec(args);
+                 if (ret !== 0) break;
+
+                 let data = await ffmpeg.readFile(outName);
+                 if (!data || data.length === 0) {
+                     await ffmpeg.deleteFile(outName);
+                     break;
+                 }
+                 await writable.write(data);
+                 await ffmpeg.deleteFile(outName);
+                 // @ts-ignore
+                 data = null;
+                 chunkIndex++;
+             }
+             setProcessingProgress(1.0);
           }
           
           await writable.close();
           if (isLocalFile) await ffmpeg.unmount('/work');
           
-          setProcessingMessage(`บันทึกไฟล์สำเร็จ (RAM ปลอดภัย): ${fileHandle.name}`);
+          setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ (RAM ปลอดภัย): ${fileHandle.name}`);
           setProcessingProgress(1.0);
           setIsProcessingComplete(true);
         } else {
