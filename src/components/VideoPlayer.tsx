@@ -1,6 +1,7 @@
 import React, { useRef, useEffect } from 'react';
 import { EditSettings } from '../types';
-import { Play, Pause, RotateCcw, Volume2, VolumeX, Maximize2 } from 'lucide-react';
+import { Play, Pause, RotateCcw, Volume2, VolumeX, Maximize2, Bug } from 'lucide-react';
+import { inspectVideo } from '../utils/videoInspector';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
@@ -11,6 +12,8 @@ interface VideoPlayerProps {
   onDurationLoaded: (duration: number) => void;
   onTogglePlay: () => void;
   onSeek: (time: number) => void;
+  videoName?: string;
+  selectedFile?: File;
 }
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
@@ -22,8 +25,73 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onDurationLoaded,
   onTogglePlay,
   onSeek,
+  videoName,
+  selectedFile,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const lastTimeRef = useRef<number>(0);
+  const freezeCountRef = useRef<number>(0);
+  const seekingStartRef = useRef<number | null>(null);
+
+  const handleRunDiagnostic = async () => {
+    const target = selectedFile || videoUrl;
+    if (!target) return;
+    console.info('🔍 Running Video Diagnostic Inspector (Check DevTools Console F12)...');
+    await inspectVideo(target, videoName, videoRef.current);
+  };
+
+  // Real-time Freeze & Stall Watchdog Monitor
+  useEffect(() => {
+    if (!videoUrl) return;
+
+    const interval = setInterval(() => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      // 1. Detect if playback is active but currentTime is frozen
+      if (isPlaying && !video.paused && !video.ended) {
+        if (Math.abs(video.currentTime - lastTimeRef.current) < 0.02) {
+          freezeCountRef.current++;
+          // If video time has not advanced for 2 seconds
+          if (freezeCountRef.current >= 2) {
+            console.error(
+              `❌ [DevTools Alert] VIDEO PLAYBACK FROZEN AT ${video.currentTime.toFixed(2)}s!`,
+              `Playback state is active (isPlaying=true) but currentTime has not advanced for >2s. (readyState: ${video.readyState}, networkState: ${video.networkState}, seeking: ${video.seeking})`
+            );
+            const target = selectedFile || videoUrl;
+            if (target) {
+              inspectVideo(target, videoName, video);
+            }
+            freezeCountRef.current = 0;
+          }
+        } else {
+          freezeCountRef.current = 0;
+          lastTimeRef.current = video.currentTime;
+        }
+      } else {
+        freezeCountRef.current = 0;
+        if (video) lastTimeRef.current = video.currentTime;
+      }
+
+      // 2. Detect if seeking operation is stuck
+      if (seekingStartRef.current !== null) {
+        const seekDur = performance.now() - seekingStartRef.current;
+        if (seekDur > 2500) {
+          console.error(
+            `❌ [DevTools Alert] VIDEO SEEKING STUCK AT ${video.currentTime.toFixed(2)}s!`,
+            `Seeking operation has taken ${(seekDur / 1000).toFixed(1)}s without completing. (readyState: ${video.readyState}, networkState: ${video.networkState})`
+          );
+          const target = selectedFile || videoUrl;
+          if (target) {
+            inspectVideo(target, videoName, video);
+          }
+          seekingStartRef.current = null;
+        }
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, videoUrl, selectedFile, videoName]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -194,11 +262,54 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               }
             }}
             onEnded={() => onTogglePlay()}
+            onWaiting={() => {
+              const video = videoRef.current;
+              if (video) {
+                console.warn(`⚠️ [DevTools Event] Video 'waiting' (stalled/buffering) at ${video.currentTime.toFixed(2)}s (readyState: ${video.readyState})`);
+              }
+            }}
+            onStalled={() => {
+              const video = videoRef.current;
+              if (video) {
+                console.warn(`⚠️ [DevTools Event] Video 'stalled' (no media data arriving) at ${video.currentTime.toFixed(2)}s (networkState: ${video.networkState})`);
+              }
+            }}
+            onSeeking={() => {
+              seekingStartRef.current = performance.now();
+              const video = videoRef.current;
+              if (video) {
+                console.info(`⏩ [DevTools Event] Seeking started to ${video.currentTime.toFixed(2)}s`);
+              }
+            }}
+            onSeeked={() => {
+              if (seekingStartRef.current !== null) {
+                const dur = Math.round(performance.now() - seekingStartRef.current);
+                console.info(`✅ [DevTools Event] Seek completed in ${dur}ms`);
+                seekingStartRef.current = null;
+              }
+            }}
+            onError={async () => {
+              console.error('❌ [VideoPlayer] HTML5 Video playback error detected! Running diagnostic inspection...');
+              const target = selectedFile || videoUrl;
+              if (target) {
+                await inspectVideo(target, videoName, videoRef.current);
+              }
+            }}
             playsInline
             preload="auto"
             crossOrigin="anonymous"
             muted={settings.muteAudio}
           />
+
+          {/* Top-Right Diagnostic Button */}
+          <button
+            onClick={handleRunDiagnostic}
+            className="absolute top-3 right-3 z-30 bg-slate-900/80 hover:bg-indigo-600 text-slate-200 hover:text-white px-2.5 py-1.5 rounded-lg border border-white/10 text-xs font-semibold backdrop-blur-md transition flex items-center space-x-1.5 shadow-lg group"
+            title="กดเพื่อส่งรายงานโครงสร้างวิดีโอระดับไบต์เข้า DevTools Console (F12)"
+          >
+            <Bug className="w-3.5 h-3.5 text-indigo-400 group-hover:text-white transition" />
+            <span>DevTools Check</span>
+          </button>
 
           {/* Live Watermark Overlay */}
           {settings.watermarkText && (

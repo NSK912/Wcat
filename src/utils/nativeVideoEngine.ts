@@ -205,7 +205,7 @@ async function scanLastClusterTimecodeMs(file: File): Promise<number> {
         if (maxTc > 0) break;
       }
     }
-    return maxTc > 0 ? (maxTc + 1000) : 0;
+    return maxTc > 0 ? (maxTc + 33) : 0;
   } catch {
     return 0;
   }
@@ -1200,7 +1200,11 @@ export async function processNativeConcatStream(
       }
 
       const fileKnownDurMs = fileDurationsMs[fIdx] || 0;
-      const effectiveFileDurMs = Math.max(fileMaxTc + 1000, fileKnownDurMs);
+      // Precision timestamp offset calculation:
+      // Use exact file metadata duration if available, otherwise fall back to max cluster timecode + 33ms (1 frame duration)
+      // Never add an artificial 1000ms gap, which creates timestamp holes and causes HTML5 player stalls!
+      const minClusterDurMs = fileMaxTc > 0 ? (fileMaxTc + 33) : 0;
+      const effectiveFileDurMs = Math.max(fileKnownDurMs, minClusterDurMs);
       timeOffsetMs += effectiveFileDurMs;
     }
 

@@ -1,5 +1,6 @@
 import React from 'react';
-import { Loader2, Download, AlertCircle, X, FileDown } from 'lucide-react';
+import { Loader2, Download, AlertCircle, X, FileDown, Bug } from 'lucide-react';
+import { inspectVideo } from '../utils/videoInspector';
 
 interface ProcessingModalProps {
   isOpen: boolean;
@@ -83,34 +84,50 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
         {/* Actions / Progress Button */}
         <div className="pt-1">
           {isDone ? (
-            <div className="flex space-x-2">
+            <div className="flex flex-col space-y-2">
+              <div className="flex space-x-2">
+                {outputUrl && (
+                  <button
+                    onClick={onDownload}
+                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-emerald-600/20 flex items-center justify-center space-x-2 transition"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Download {outputFilename}</span>
+                  </button>
+                )}
+
+                {isError && (
+                  <button
+                    onClick={handleSaveLog}
+                    className="flex-1 bg-rose-600 hover:bg-rose-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-rose-600/20 flex items-center justify-center space-x-2 transition"
+                  >
+                    <FileDown className="w-4 h-4" />
+                    <span>เซฟ Error Log (.txt)</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={onClose}
+                  className={`px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center ${!outputUrl && !isError ? 'w-full py-3' : ''}`}
+                >
+                  <X className="w-4 h-4 mr-1" />
+                  <span>Close</span>
+                </button>
+              </div>
+
               {outputUrl && (
                 <button
-                  onClick={onDownload}
-                  className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-emerald-600/20 flex items-center justify-center space-x-2 transition"
+                  onClick={async () => {
+                    console.info('🔍 Running Diagnostic on Exported Output Video (Check DevTools Console F12)...');
+                    await inspectVideo(outputUrl, outputFilename);
+                  }}
+                  className="w-full py-2 bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 hover:text-white rounded-xl text-xs font-semibold transition border border-indigo-500/30 flex items-center justify-center space-x-1.5"
+                  title="ส่งรายงานวิเคราะห์โครงสร้างไฟล์วิดีโอที่รวมเสร็จแล้วเข้า DevTools Console"
                 >
-                  <Download className="w-4 h-4" />
-                  <span>Download {outputFilename}</span>
+                  <Bug className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>🔍 ส่งรายงานตรวจสอบวิดีโอเข้า DevTools Console (F12)</span>
                 </button>
               )}
-
-              {isError && (
-                <button
-                  onClick={handleSaveLog}
-                  className="flex-1 bg-rose-600 hover:bg-rose-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-rose-600/20 flex items-center justify-center space-x-2 transition"
-                >
-                  <FileDown className="w-4 h-4" />
-                  <span>เซฟ Error Log (.txt)</span>
-                </button>
-              )}
-
-              <button
-                onClick={onClose}
-                className={`px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center ${!outputUrl && !isError ? 'w-full py-3' : ''}`}
-              >
-                <X className="w-4 h-4 mr-1" />
-                <span>Close</span>
-              </button>
             </div>
           ) : (
             <button
