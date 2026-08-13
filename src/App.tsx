@@ -468,7 +468,7 @@ export default function App() {
               }
             }
             if (totalBytesProcessed > 0) {
-              setProcessingMessage(`${progressLabel}: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~15 MB Strict)...`);
+              setProcessingMessage(`${progressLabel}: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (⚡ Zero-Copy Stream Active)...`);
             }
           } catch (e) {
             console.warn('Polling listDir error:', e);
@@ -477,7 +477,7 @@ export default function App() {
           }
         };
 
-        const pollInterval = setInterval(processSegments, 50);
+        const pollInterval = setInterval(processSegments, 25);
 
         let execCode = -1;
         try {
@@ -527,7 +527,7 @@ export default function App() {
 
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
 
-        setProcessingMessage('กำลังรวมวิดีโอแบบต่อเนื่อง (ภาพชัด 100% เวลาตรง RAM ~15MB)...');
+        setProcessingMessage('กำลังรวมวิดีโอแบบต่อเนื่อง (Zero-Copy Stream - WORKERFS Direct Disk Read)...');
 
         const concatArgs1 = [
           '-f', 'concat',
@@ -539,12 +539,12 @@ export default function App() {
           '-map', '0:v?',
           '-map', '0:a?',
           '-f', 'segment',
-          '-segment_time', '4',
+          '-segment_time', '1',
           '-reset_timestamps', '0',
           '/out_seg_%05d.ts'
         ];
 
-        let result = await runSegmentPipeline(ffmpeg, concatArgs1, writable, 'กำลังสตรีมรวมวิดีโอ');
+        let result = await runSegmentPipeline(ffmpeg, concatArgs1, writable, '⚡ Zero-Copy Streaming');
 
         if (!result.success || result.totalBytesProcessed === 0) {
           setProcessingMessage('กำลังสลับไปใช้โหมด Direct Copy เพื่อรวมวิดีโอ...');
@@ -556,11 +556,11 @@ export default function App() {
             '-map', '0:v?',
             '-map', '0:a?',
             '-f', 'segment',
-            '-segment_time', '4',
+            '-segment_time', '1',
             '-reset_timestamps', '0',
             '/out_seg_%05d.ts'
           ];
-          result = await runSegmentPipeline(ffmpeg, concatArgs2, writable, 'กำลังสตรีมรวมวิดีโอ');
+          result = await runSegmentPipeline(ffmpeg, concatArgs2, writable, '⚡ Zero-Copy Streaming');
         }
 
         try { await ffmpeg.deleteFile('list.txt'); } catch {}
@@ -622,7 +622,7 @@ export default function App() {
 
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
 
-        setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (Strict Stream - อ่าน 1 เซฟ 1 ลบ 1)...');
+        setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (⚡ Zero-Copy Stream - WORKERFS Direct Disk Read)...');
 
         const trimArgs1 = [
           '-ss', currentStart.toString(),
@@ -634,12 +634,12 @@ export default function App() {
           '-map', '0:v?',
           '-map', '0:a?',
           '-f', 'segment',
-          '-segment_time', '4',
+          '-segment_time', '1',
           '-reset_timestamps', '0',
           '/out_seg_%05d.ts'
         ];
 
-        let result = await runSegmentPipeline(ffmpeg, trimArgs1, writable, 'กำลังสตรีมตัดวิดีโอ');
+        let result = await runSegmentPipeline(ffmpeg, trimArgs1, writable, '⚡ Zero-Copy Streaming');
 
         if (!result.success || result.totalBytesProcessed === 0) {
           setProcessingMessage('กำลังสลับไปใช้โหมด Direct Copy เพื่อตัดวิดีโอ...');
@@ -651,11 +651,11 @@ export default function App() {
             '-map', '0:v?',
             '-map', '0:a?',
             '-f', 'segment',
-            '-segment_time', '4',
+            '-segment_time', '1',
             '-reset_timestamps', '0',
             '/out_seg_%05d.ts'
           ];
-          result = await runSegmentPipeline(ffmpeg, trimArgs2, writable, 'กำลังสตรีมตัดวิดีโอ');
+          result = await runSegmentPipeline(ffmpeg, trimArgs2, writable, '⚡ Zero-Copy Streaming');
         }
 
         if (writable) {
