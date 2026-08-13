@@ -402,178 +402,64 @@ export default function App() {
       }
 
       if (selectedFiles.length > 1) {
-        if (fileHandle) {
-          setProcessingMessage('เปิดท่อส่งข้อมูลลง SSD (Streaming Mode)...');
-          const writable = await fileHandle.createWritable();
-          let totalChunksWritten = 0;
-          
-          for (let i = 0; i < selectedFiles.length; i++) {
-              const file = selectedFiles[i];
-              setProcessingMessage(`กำลังประมวลผลไฟล์ต้นฉบับที่ ${i + 1}/${selectedFiles.length} (${file.name})...`);
-              
-              const dirName = `/work${i}`;
-              await ffmpeg.createDir(dirName);
-              await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
-              const inputFilename = `${dirName}/${file.name}`;
-              const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
-              const outName = `chunk_${i}.${targetExt}`;
-              
-              let currentFileDuration = 0;
-              try {
-                currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
-              } catch (e) {
-                console.warn('Could not read duration with FFmpeg', e);
-              }
+        setProcessingMessage('กำลังเตรียมไฟล์สำหรับรวมวิดีโอ (FFmpeg Concat)...');
+        
+        await ffmpeg.createDir('/work');
+        await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
 
-              const targetChunkBytes = 30 * 1024 * 1024; // 30 MB target chunk in RAM
-              let CHUNK_DURATION = 30; // 30s default
-              if (currentFileDuration > 0 && file.size > 0) {
-                const bytesPerSecond = file.size / currentFileDuration;
-                if (bytesPerSecond > 0) {
-                  CHUNK_DURATION = Math.max(5, Math.min(60, Math.floor(targetChunkBytes / bytesPerSecond)));
-                }
-              }
+        let listContent = '';
+        for (let i = 0; i < selectedFiles.length; i++) {
+          const filename = `/work/${selectedFiles[i].name}`;
+          listContent += `file '${filename}'\n`;
+        }
 
-              if (currentFileDuration > 0) {
-                 let currentStart = 0;
-                 while (currentStart < currentFileDuration) {
-                    const chunkEnd = Math.min(currentStart + CHUNK_DURATION, currentFileDuration);
-                    const chunkDuration = chunkEnd - currentStart;
-                    if (chunkDuration <= 0) break;
-                    
-                    setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i+1}/${selectedFiles.length} (${Math.round(currentStart)}s - ${Math.round(chunkEnd)}s)...`);
-                    
-                    let success = false;
-                    try {
-                      success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName, targetExt);
-                    } catch (chunkErr: any) {
-                      if (chunkErr?.message === 'FFMPEG_WAS_ABORTED') {
-                        await loadFFmpeg();
-                        ffmpeg = ffmpegRef.current;
-                        await ffmpeg.createDir(dirName);
-                        await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
-                        success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName, 'mp4');
-                      } else {
-                        throw chunkErr;
-                      }
-                    }
+        await ffmpeg.writeFile('list.txt', listContent);
 
-                    if (!success) {
-                      throw new Error(`ไม่สามารถประมวลผลวิดีโอช่วง ${Math.round(currentStart)}s ของไฟล์ ${file.name} ได้`);
-                    }
-                    
-                    let data = await ffmpeg.readFile(outName);
-                    await writable.write(data);
-                    await ffmpeg.deleteFile(outName);
-                    
-                    // @ts-ignore
-                    data = null;
-                    totalChunksWritten++;
-                    currentStart = chunkEnd;
-                    const fileProgress = i + (currentStart / currentFileDuration);
-                    setProcessingProgress(fileProgress / selectedFiles.length);
-                 }
-              } else {
-                 let chunkIndex = 0;
-                 while (true) {
-                    setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i+1}/${selectedFiles.length} (ช่วงที่ ${chunkIndex + 1})...`);
-                    let success = false;
-                    try {
-                      success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName, targetExt);
-                    } catch (chunkErr: any) {
-                      if (chunkErr?.message === 'FFMPEG_WAS_ABORTED') {
-                        await loadFFmpeg();
-                        ffmpeg = ffmpegRef.current;
-                        await ffmpeg.createDir(dirName);
-                        await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
-                        success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName, 'mp4');
-                      } else {
-                        throw chunkErr;
-                      }
-                    }
-                    if (!success) break;
-                    
-                    let data = await ffmpeg.readFile(outName);
-                    if (!data || data.length === 0) {
-                       await ffmpeg.deleteFile(outName);
-                       break;
-                    }
-                    await writable.write(data);
-                    await ffmpeg.deleteFile(outName);
-                    // @ts-ignore
-                    data = null;
-                    totalChunksWritten++;
-                    chunkIndex++;
-                 }
-                 setProcessingProgress((i + 1) / selectedFiles.length);
-              }
-              
-              await ffmpeg.unmount(dirName);
-          }
-          await writable.close();
-          if (totalChunksWritten === 0) {
-            throw new Error('ไม่สามารถเขียนข้อมูลลงไฟล์ได้ (0 bytes)');
-          }
-          setProcessingMessage(`รวมไฟล์และบันทึกลง SSD สำเร็จ (RAM ปลอดภัย): ${fileHandle.name}`);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
-        } else {
-          setProcessingMessage('Mounting input files for merge...');
-          
-          await ffmpeg.createDir('/work');
-          await ffmpeg.mount('WORKERFS', { files: selectedFiles }, '/work');
+        setProcessingMessage('กำลังรวมวิดีโอแบบไร้การสูญเสียคุณภาพ (-c copy)...');
+        const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
+        const outName = `output_merged.${targetExt}`;
 
-          let listContent = '';
-          for (let i = 0; i < selectedFiles.length; i++) {
-            const filename = `/work/${selectedFiles[i].name}`;
-            listContent += `file '${filename}'\n`;
-          }
-
-          await ffmpeg.writeFile('list.txt', listContent);
-
-          setProcessingMessage('Merging videos without re-encoding (-c copy)...');
-          const outName = 'output.ts';
-
-          const ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-f', 'mpegts', outName]);
+        let ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', outName]);
+        let actualOutName = outName;
+        if (ret !== 0) {
+          actualOutName = 'output_merged.mkv';
+          ret = await ffmpeg.exec(['-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', '-f', 'matroska', actualOutName]);
           if (ret !== 0) {
             await ffmpeg.unmount('/work');
-            throw new Error('FFmpeg merge failed with exit code ' + ret);
-          }
-
-          setProcessingMessage('Reading merged output file...');
-          const data = await ffmpeg.readFile(outName);
-          const blob = new Blob([data], { type: 'video/mp2t' });
-          
-          // Delete from MEMFS to free memory
-          await ffmpeg.deleteFile(outName);
-          await ffmpeg.unmount('/work');
-
-          if (fileHandle) {
-            setProcessingMessage(`Writing output to selected location (${fileHandle.name})...`);
-            const writable = await fileHandle.createWritable();
-            await writable.write(blob);
-            await writable.close();
-            setProcessingMessage(`Saved directly to selected folder: ${fileHandle.name}`);
-            setProcessingProgress(1.0);
-            setIsProcessingComplete(true);
-            // Do not create ObjectURL to prevent SSD caching wear
-          } else {
-            setProcessingMessage('Merge completed successfully without re-encoding!');
-            const url = URL.createObjectURL(blob);
-            setOutputUrl(url);
-            setProcessingProgress(1.0);
-            setIsProcessingComplete(true);
+            throw new Error('ไม่สามารถรวมวิดีโอได้ (Exit code ' + ret + ')');
           }
         }
+
+        setProcessingMessage('กำลังอ่านข้อมูลวิดีโอที่รวมสำเร็จ...');
+        const data = await ffmpeg.readFile(actualOutName);
+        
+        await ffmpeg.deleteFile(actualOutName);
+        await ffmpeg.deleteFile('list.txt');
+        await ffmpeg.unmount('/work');
+
+        if (fileHandle) {
+          setProcessingMessage(`กำลังบันทึกไฟล์รวมลง SSD (${fileHandle.name})...`);
+          const writable = await fileHandle.createWritable();
+          await writable.write(data);
+          await writable.close();
+          setProcessingMessage(`รวมไฟล์และบันทึกลง SSD สำเร็จ: ${fileHandle.name}`);
+        } else {
+          setProcessingMessage('รวมไฟล์สำเร็จแล้ว!');
+          const blob = new Blob([data], { type: `video/${targetExt}` });
+          const url = URL.createObjectURL(blob);
+          setOutputUrl(url);
+        }
+        setProcessingProgress(1.0);
+        setIsProcessingComplete(true);
       } else {
-        setProcessingMessage('Reading input video...');
+        setProcessingMessage('กำลังอ่านวิดีโอต้นฉบับ...');
         
         let inputFilename = '';
         const inputExt = videoName.split('.').pop() || 'mp4';
         const isLocalFile = selectedFiles.length > 0;
         
         if (isLocalFile) {
-          setProcessingMessage('Mounting local file...');
+          setProcessingMessage('กำลัง Mount ไฟล์จากเครื่อง...');
           await ffmpeg.createDir('/work');
           await ffmpeg.mount('WORKERFS', { files: [selectedFiles[0]] }, '/work');
           inputFilename = `/work/${selectedFiles[0].name}`;
@@ -583,147 +469,59 @@ export default function App() {
           await ffmpeg.writeFile(inputFilename, inputData);
         }
 
-        if (fileHandle) {
-          let currentFileDuration = duration;
-          if (currentFileDuration === 0) {
-             setProcessingMessage(`วิเคราะห์ความยาวไฟล์ด้วย FFmpeg...`);
-             currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
-          }
-
-          let currentStart = settings.startTime;
-          const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
-          const totalTrimDuration = finalEndTime - currentStart;
-          const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
-          const outName = `output_temp.${targetExt}`;
-
-          setProcessingMessage('เปิดท่อส่งข้อมูลลง SSD (Direct Stream Copy Mode)...');
-          const writable = await fileHandle.createWritable();
-          
-          let singlePassSuccess = false;
-          try {
-            setProcessingMessage('กำลังประมวลผลวิดีโอแบบไร้การสูญเสียคุณภาพ (Direct Stream Copy)...');
-            const success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, outName, targetExt);
-            if (success) {
-              const data = await ffmpeg.readFile(outName);
-              if (data && data.length > 0) {
-                setProcessingMessage(`กำลังบันทึกไฟล์ลง SSD (${fileHandle.name})...`);
-                await writable.write(data);
-                await writable.close();
-                await ffmpeg.deleteFile(outName);
-                singlePassSuccess = true;
-              }
-            }
-          } catch (e) {
-            console.warn('Single-pass streaming error, falling back to 5-minute chunk mode:', e);
-          }
-
-          if (!singlePassSuccess) {
-            // Fallback: 300-second (5-minute) chunks for huge files without re-encoding
-            const CHUNK_DURATION = 300; 
-            let totalChunksWritten = 0;
-            let startPos = currentStart;
-
-            while (startPos < (finalEndTime > 0 ? finalEndTime : currentFileDuration)) {
-              const chunkEnd = finalEndTime > 0 ? Math.min(startPos + CHUNK_DURATION, finalEndTime) : startPos + CHUNK_DURATION;
-              const chunkDur = chunkEnd - startPos;
-              if (chunkDur <= 0) break;
-
-              setProcessingMessage(`กำลังสตรีมลง SSD: ช่วง ${Math.round(startPos)}s ถึง ${Math.round(chunkEnd)}s...`);
-              const chunkOutName = `chunk_temp.${targetExt}`;
-              const chunkOk = await runFFmpegChunk(ffmpeg, inputFilename, startPos, chunkDur, chunkOutName, targetExt);
-              
-              if (!chunkOk) break;
-
-              let data = await ffmpeg.readFile(chunkOutName);
-              if (!data || data.length === 0) {
-                await ffmpeg.deleteFile(chunkOutName);
-                break;
-              }
-
-              await writable.write(data);
-              await ffmpeg.deleteFile(chunkOutName);
-              // @ts-ignore
-              data = null;
-              totalChunksWritten++;
-              startPos = chunkEnd;
-
-              if (totalTrimDuration > 0) {
-                setProcessingProgress((startPos - currentStart) / totalTrimDuration);
-              }
-            }
-
-            await writable.close();
-            if (totalChunksWritten === 0) {
-              throw new Error('ไม่สามารถเขียนข้อมูลลงไฟล์ได้');
-            }
-          }
-
-          if (isLocalFile) await ffmpeg.unmount('/work');
-          
-          setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ (Direct Stream Copy): ${fileHandle.name}`);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
-        } else {
-          // Build FFmpeg arguments for fast lossless copy cut (-c copy)
-          const args: string[] = [];
-
-          const startTime = settings.startTime;
-          const endTime = settings.endTime;
-
-        if (startTime > 0) {
-          args.push('-ss', startTime.toString());
-        }
-        args.push('-i', inputFilename);
-
-        const trimDuration = endTime - startTime;
-        if (trimDuration > 0 && trimDuration < duration) {
-          args.push('-t', trimDuration.toString());
+        let currentFileDuration = duration;
+        if (currentFileDuration === 0) {
+           setProcessingMessage(`วิเคราะห์ความยาวไฟล์ด้วย FFmpeg...`);
+           currentFileDuration = await getFFmpegDuration(ffmpeg, inputFilename);
         }
 
-        args.push('-c', 'copy');
-        const outName = `output.${inputExt}`;
-        args.push(outName);
+        let currentStart = settings.startTime;
+        const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
+        const totalTrimDuration = finalEndTime - currentStart;
+        const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
+        const outName = `output_temp.${targetExt}`;
 
-        setProcessingMessage(`Running FFmpeg fast copy-cut command...`);
-        console.log('FFmpeg args:', args);
-
-        const ret = await ffmpeg.exec(args);
+        setProcessingMessage('กำลังประมวลผลวิดีโอแบบ Direct Stream Copy...');
         
+        let success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, outName, targetExt);
+        let actualOutName = outName;
+
+        if (!success) {
+          // Fallback single-pass: Matroska
+          actualOutName = `output_temp.mkv`;
+          success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, actualOutName, 'mkv');
+        }
+
+        if (!success) {
+          if (isLocalFile) await ffmpeg.unmount('/work');
+          throw new Error(`ไม่สามารถตัด/ประมวลผลวิดีโอได้`);
+        }
+
+        const data = await ffmpeg.readFile(actualOutName);
+        await ffmpeg.deleteFile(actualOutName);
+
         if (isLocalFile) {
           await ffmpeg.unmount('/work');
-        }
-        
-        if (ret !== 0) {
-          throw new Error('FFmpeg command failed with exit code ' + ret);
-        }
-
-        setProcessingMessage('Reading output file...');
-        const data = await ffmpeg.readFile(outName);
-        const blob = new Blob([data], { type: `video/${inputExt}` });
-        
-        // Free MEMFS memory
-        await ffmpeg.deleteFile(outName);
-        if (!isLocalFile) {
+        } else {
           await ffmpeg.deleteFile(inputFilename);
         }
 
         if (fileHandle) {
-          setProcessingMessage(`Writing output to selected location (${fileHandle.name})...`);
+          setProcessingMessage(`กำลังบันทึกไฟล์ลง SSD (${fileHandle.name})...`);
           const writable = await fileHandle.createWritable();
-          await writable.write(blob);
+          await writable.write(data);
           await writable.close();
-          setProcessingMessage(`Saved directly to selected folder: ${fileHandle.name}`);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
+          setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ: ${fileHandle.name}`);
         } else {
-          setProcessingMessage('Copy-cut completed successfully!');
+          setProcessingMessage('ประมวลผลสำเร็จเรียบร้อย!');
+          const blob = new Blob([data], { type: `video/${targetExt}` });
           const url = URL.createObjectURL(blob);
           setOutputUrl(url);
-          setProcessingProgress(1.0);
-          setIsProcessingComplete(true);
         }
+
+        setProcessingProgress(1.0);
+        setIsProcessingComplete(true);
       }
-    }
     } catch (err: any) {
       console.error('FFmpeg processing error:', err);
       setProcessingMessage(`Error: ${err.message || 'Processing failed'}`);
