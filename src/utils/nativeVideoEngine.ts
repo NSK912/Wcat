@@ -748,7 +748,7 @@ export function buildSeekHeadElement(seeks: { id: number[]; pos: number }[]): Ui
     const seekPayload = new Uint8Array(seekIdElem.length + seekPosElem.length);
     seekPayload.set(seekIdElem, 0);
     seekPayload.set(seekPosElem, seekIdElem.length);
-    const seekElem = buildElement([0x4D, 0xBB], seekPayload);
+    const seekElem = buildElement([0x4D, 0xB8], seekPayload);
 
     seekBuffers.push(seekElem);
   }
