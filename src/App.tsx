@@ -3,13 +3,10 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { EditSettings, ActiveTab, SampleVideo } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
-import { Navbar } from './components/Navbar';
 import { VideoPlayer } from './components/VideoPlayer';
 import { Timeline } from './components/Timeline';
 import { ProcessingModal } from './components/ProcessingModal';
 import { SampleModal } from './components/SampleModal';
-import { RamMonitorModal } from './components/RamMonitorModal';
-import { getMemoryUsage, formatBytes, ProcessingRamLog } from './utils/ramTracker';
 
 import ffmpegCoreUrl from '@ffmpeg/core?url';
 import ffmpegWasmUrl from '@ffmpeg/core/wasm?url';
@@ -89,9 +86,6 @@ export default function App() {
   // Modals
   const [isSampleModalOpen, setIsSampleModalOpen] = useState<boolean>(false);
   const [isProcessingModalOpen, setIsProcessingModalOpen] = useState<boolean>(false);
-  const [isRamMonitorOpen, setIsRamMonitorOpen] = useState<boolean>(false);
-  const [ramLogs, setRamLogs] = useState<ProcessingRamLog[]>([]);
-
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [isProcessingComplete, setIsProcessingComplete] = useState<boolean>(false);
   const [processingMessage, setProcessingMessage] = useState<string>('');
@@ -381,13 +375,6 @@ export default function App() {
     setProcessingProgress(0);
     setIsProcessingComplete(false);
     setProcessingLogs([]);
-
-    // Record RAM metrics for RAM Diagnostic Log
-    const exportStartTimestamp = Date.now();
-    const startTimeStr = new Date().toLocaleTimeString('th-TH');
-    const initMem = getMemoryUsage();
-    const startRamMB = parseFloat((initMem.usedJSHeapSize / (1024 * 1024)).toFixed(1));
-    let sessionPeakRamMB = startRamMB;
     
     // Revoke previous blob url if exists to free memory/cache
     if (outputUrl) {
@@ -413,8 +400,14 @@ export default function App() {
         let opfsFileHandle: FileSystemFileHandle | null = null;
 
         if (handle) {
-          writable = await handle.createWritable();
-        } else if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.getDirectory) {
+          try {
+            writable = await handle.createWritable();
+          } catch (e) {
+            console.warn('FileHandle createWritable failed:', e);
+          }
+        }
+
+        if (!writable && typeof navigator !== 'undefined' && navigator.storage && navigator.storage.getDirectory) {
           try {
             const opfsRoot = await navigator.storage.getDirectory();
             const tempName = `opfs_stream_${Date.now()}_${outName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
@@ -425,30 +418,24 @@ export default function App() {
           }
         }
 
+        if (!writable) {
+          throw new Error('ไม่สามารถสร้าง Direct Stream บนดิสก์ได้ กรุณาตรวจสอบพื้นที่จัดเก็บข้อมูลบนเครื่อง');
+        }
+
         return { writable, opfsFileHandle };
       };
 
       const runSegmentPipeline = async (
         ffmpeg: FFmpeg,
         args: string[],
-        writable: FileSystemWritableFileStream | null,
-        chunks: Uint8Array[],
+        writable: FileSystemWritableFileStream,
         progressLabel: string
       ) => {
         let activeIndex = 0;
         let totalBytesProcessed = 0;
 
         let isPolling = false;
-        const pollInterval = setInterval(async () => {
-          // Monitor live memory peak during polling
-          const curMem = getMemoryUsage();
-          if (curMem.supported) {
-            const curUsedMB = curMem.usedJSHeapSize / (1024 * 1024);
-            if (curUsedMB > sessionPeakRamMB) {
-              sessionPeakRamMB = curUsedMB;
-            }
-          }
-
+        const processSegments = async () => {
           if (isPolling) return;
           isPolling = true;
           try {
@@ -456,23 +443,24 @@ export default function App() {
             const fileNames = new Set(files.map((f) => f.name));
 
             while (true) {
-              const nextSegName = `out_seg_${(activeIndex + 1).toString().padStart(5, '0')}.ts`;
               const curSegName = `out_seg_${activeIndex.toString().padStart(5, '0')}.ts`;
+              const nextSegName = `out_seg_${(activeIndex + 1).toString().padStart(5, '0')}.ts`;
 
+              // When next segment is created, current segment is 100% finished writing
               if (fileNames.has(nextSegName)) {
-                try {
-                  const segData = await ffmpeg.readFile(curSegName);
-                  if (segData && segData.length > 0) {
-                    totalBytesProcessed += segData.length;
-                    if (writable) {
+                if (fileNames.has(curSegName)) {
+                  try {
+                    let segData: any = await ffmpeg.readFile(curSegName);
+                    if (segData && segData.length > 0) {
+                      totalBytesProcessed += segData.length;
                       await writable.write(segData);
-                    } else {
-                      chunks.push(segData as Uint8Array);
                     }
+                    // Immediately delete from RAM & WASM MEMFS
+                    segData = null;
+                    await ffmpeg.deleteFile(curSegName);
+                  } catch (e) {
+                    console.warn('Read/delete segment error:', e);
                   }
-                  await ffmpeg.deleteFile(curSegName);
-                } catch (e) {
-                  console.warn('Read/delete segment error:', e);
                 }
                 activeIndex++;
               } else {
@@ -480,14 +468,16 @@ export default function App() {
               }
             }
             if (totalBytesProcessed > 0) {
-              setProcessingMessage(`${progressLabel}: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~15 MB)...`);
+              setProcessingMessage(`${progressLabel}: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~15 MB Strict)...`);
             }
           } catch (e) {
             console.warn('Polling listDir error:', e);
           } finally {
             isPolling = false;
           }
-        }, 100);
+        };
+
+        const pollInterval = setInterval(processSegments, 50);
 
         let execCode = -1;
         try {
@@ -498,25 +488,28 @@ export default function App() {
           clearInterval(pollInterval);
         }
 
-        // Final flush for remaining segments
-        while (true) {
-          const curSegName = `out_seg_${activeIndex.toString().padStart(5, '0')}.ts`;
-          try {
-            const segData = await ffmpeg.readFile(curSegName);
-            if (segData && segData.length > 0) {
-              totalBytesProcessed += segData.length;
-              if (writable) {
-                await writable.write(segData);
-              } else {
-                chunks.push(segData as Uint8Array);
-              }
+        // Final flush for last remaining segment after FFmpeg exec terminates
+        try {
+          const files = await ffmpeg.listDir('/');
+          const fileNames = new Set(files.map((f) => f.name));
+          while (true) {
+            const curSegName = `out_seg_${activeIndex.toString().padStart(5, '0')}.ts`;
+            if (fileNames.has(curSegName)) {
+              try {
+                let segData: any = await ffmpeg.readFile(curSegName);
+                if (segData && segData.length > 0) {
+                  totalBytesProcessed += segData.length;
+                  await writable.write(segData);
+                }
+                segData = null;
+                await ffmpeg.deleteFile(curSegName);
+              } catch {}
+              activeIndex++;
+            } else {
+              break;
             }
-            await ffmpeg.deleteFile(curSegName);
-            activeIndex++;
-          } catch {
-            break; // Finished all segments
           }
-        }
+        } catch {}
 
         return { success: execCode === 0 || totalBytesProcessed > 0, totalBytesProcessed };
       };
@@ -533,7 +526,6 @@ export default function App() {
         await ffmpeg.writeFile('list.txt', listContent);
 
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
-        const chunks: Uint8Array[] = [];
 
         setProcessingMessage('กำลังรวมวิดีโอแบบต่อเนื่อง (ภาพชัด 100% เวลาตรง RAM ~15MB)...');
 
@@ -552,7 +544,7 @@ export default function App() {
           '/out_seg_%05d.ts'
         ];
 
-        let result = await runSegmentPipeline(ffmpeg, concatArgs1, writable, chunks, 'กำลังสตรีมรวมวิดีโอ');
+        let result = await runSegmentPipeline(ffmpeg, concatArgs1, writable, 'กำลังสตรีมรวมวิดีโอ');
 
         if (!result.success || result.totalBytesProcessed === 0) {
           setProcessingMessage('กำลังสลับไปใช้โหมด Direct Copy เพื่อรวมวิดีโอ...');
@@ -568,7 +560,7 @@ export default function App() {
             '-reset_timestamps', '0',
             '/out_seg_%05d.ts'
           ];
-          result = await runSegmentPipeline(ffmpeg, concatArgs2, writable, chunks, 'กำลังสตรีมรวมวิดีโอ');
+          result = await runSegmentPipeline(ffmpeg, concatArgs2, writable, 'กำลังสตรีมรวมวิดีโอ');
         }
 
         try { await ffmpeg.deleteFile('list.txt'); } catch {}
@@ -589,11 +581,6 @@ export default function App() {
           setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
         } else if (fileHandle) {
           setProcessingMessage(`รวมไฟล์วิดีโอบันทึกลงปลายทางสำเร็จ: ${fileHandle.name}`);
-        } else if (chunks.length > 0) {
-          const blob = new Blob(chunks, { type: 'video/mp2t' });
-          const url = URL.createObjectURL(blob);
-          setOutputUrl(url);
-          setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
         }
 
         setProcessingProgress(1.0);
@@ -634,9 +621,8 @@ export default function App() {
         const totalTrimDuration = Math.max(0.1, finalEndTime - currentStart);
 
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
-        const chunks: Uint8Array[] = [];
 
-        setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (Single-Pass Low-RAM - ภาพชัด 100% เวลาตรง)...');
+        setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (Strict Stream - อ่าน 1 เซฟ 1 ลบ 1)...');
 
         const trimArgs1 = [
           '-ss', currentStart.toString(),
@@ -653,7 +639,7 @@ export default function App() {
           '/out_seg_%05d.ts'
         ];
 
-        let result = await runSegmentPipeline(ffmpeg, trimArgs1, writable, chunks, 'กำลังสตรีมตัดวิดีโอ');
+        let result = await runSegmentPipeline(ffmpeg, trimArgs1, writable, 'กำลังสตรีมตัดวิดีโอ');
 
         if (!result.success || result.totalBytesProcessed === 0) {
           setProcessingMessage('กำลังสลับไปใช้โหมด Direct Copy เพื่อตัดวิดีโอ...');
@@ -669,7 +655,7 @@ export default function App() {
             '-reset_timestamps', '0',
             '/out_seg_%05d.ts'
           ];
-          result = await runSegmentPipeline(ffmpeg, trimArgs2, writable, chunks, 'กำลังสตรีมตัดวิดีโอ');
+          result = await runSegmentPipeline(ffmpeg, trimArgs2, writable, 'กำลังสตรีมตัดวิดีโอ');
         }
 
         if (writable) {
@@ -693,11 +679,6 @@ export default function App() {
           setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
         } else if (fileHandle) {
           setProcessingMessage(`ตัดวิดีโอบันทึกลงปลายทางสำเร็จ: ${fileHandle.name}`);
-        } else if (chunks.length > 0) {
-          const blob = new Blob(chunks, { type: 'video/mp2t' });
-          const url = URL.createObjectURL(blob);
-          setOutputUrl(url);
-          setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
         }
 
         setProcessingProgress(1.0);
@@ -715,27 +696,6 @@ export default function App() {
       try {
         await ffmpegRef.current?.unmount('/work');
       } catch {}
-
-      const finalMem = getMemoryUsage();
-      const finalRamMB = parseFloat((finalMem.usedJSHeapSize / (1024 * 1024)).toFixed(1));
-      const fileSizeTotal = selectedFiles.length > 0
-        ? formatBytes(selectedFiles.reduce((sum, f) => sum + f.size, 0))
-        : 'Sample Video';
-      const durationSec = Math.max(1, Math.round((Date.now() - exportStartTimestamp) / 1000));
-
-      const logEntry: ProcessingRamLog = {
-        id: `log_${Date.now()}`,
-        taskName: selectedFiles.length > 1 ? `รวมวิดีโอ (${selectedFiles.length} ไฟล์)` : 'ตัดวิดีโอ',
-        fileSizeStr: fileSizeTotal,
-        startTime: startTimeStr,
-        durationSec,
-        startRamMB,
-        peakRamMB: parseFloat(sessionPeakRamMB.toFixed(1)),
-        finalRamMB,
-        status: 'completed',
-        notes: 'สตรีมแบบประหยัดแรม (Low-RAM Pipeline) บันทึกสำเร็จ',
-      };
-      setRamLogs((prev) => [logEntry, ...prev]);
     }
   };
 
@@ -757,18 +717,6 @@ export default function App() {
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-600/20 rounded-full blur-[120px]"></div>
       </div>
 
-      {/* Top Navigation Bar with Live RAM Badge */}
-      <Navbar
-        videoName={videoName}
-        onUploadClick={() => singleFileInputRef.current?.click()}
-        onSampleClick={() => setIsSampleModalOpen(true)}
-        onReset={handleReset}
-        onExportClick={handleExport}
-        isLoaded={!!videoUrl}
-        isProcessing={isProcessingModalOpen && !isProcessingComplete}
-        onOpenRamMonitor={() => setIsRamMonitorOpen(true)}
-      />
-
       {/* Hidden file input for Single File selection (1 file at a time) */}
       <input
         type="file"
@@ -787,6 +735,10 @@ export default function App() {
         multiple
         className="hidden"
       />
+
+
+
+
 
       {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden relative z-10">
@@ -825,6 +777,8 @@ export default function App() {
             isProcessing={false}
           />
         </div>
+
+
       </div>
 
       {/* Processing Modal */}
@@ -845,14 +799,6 @@ export default function App() {
         isOpen={isSampleModalOpen}
         onClose={() => setIsSampleModalOpen(false)}
         onSelectSample={handleSelectSample}
-      />
-
-      {/* RAM Monitor & Diagnostic Modal */}
-      <RamMonitorModal
-        isOpen={isRamMonitorOpen}
-        onClose={() => setIsRamMonitorOpen(false)}
-        logs={ramLogs}
-        onClearLogs={() => setRamLogs([])}
       />
     </div>
   );
