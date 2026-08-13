@@ -674,6 +674,117 @@ function findElemOffsetInBuf(buf: Uint8Array, idBytes: number[], startPos: numbe
 }
 
 /**
+ * Finds the Video Track Number in MKV header Tracks element (0x1654AE6B)
+ */
+function findVideoTrackNumber(headerBuf: Uint8Array): number {
+  let pos = 0;
+  while (pos < headerBuf.length - 12) {
+    if (headerBuf[pos] === 0x16 && headerBuf[pos + 1] === 0x54 && headerBuf[pos + 2] === 0xAE && headerBuf[pos + 3] === 0x6B) {
+      const tracksSize = parseVint(headerBuf, pos + 4);
+      if (!tracksSize) break;
+      const tracksStart = pos + 4 + tracksSize.length;
+      const tracksEnd = Math.min(headerBuf.length, tracksStart + tracksSize.value);
+
+      let tPos = tracksStart;
+      while (tPos < tracksEnd - 8) {
+        if (headerBuf[tPos] === 0xAE) { // TrackEntry
+          const entrySize = parseVint(headerBuf, tPos + 1);
+          if (!entrySize) break;
+          const entryStart = tPos + 1 + entrySize.length;
+          const entryEnd = Math.min(tracksEnd, entryStart + entrySize.value);
+
+          let trackNum = 1;
+          let isVideo = false;
+          let ePos = entryStart;
+          while (ePos < entryEnd - 2) {
+            if (headerBuf[ePos] === 0xD7) { // TrackNumber
+              const tnSize = parseVint(headerBuf, ePos + 1);
+              if (tnSize && tnSize.value > 0) {
+                trackNum = headerBuf[ePos + 1 + tnSize.length];
+              }
+            } else if (headerBuf[ePos] === 0x83) { // TrackType
+              const ttSize = parseVint(headerBuf, ePos + 1);
+              if (ttSize && ttSize.value > 0) {
+                if (headerBuf[ePos + 1 + ttSize.length] === 1) { // 1 = Video
+                  isVideo = true;
+                }
+              }
+            }
+            ePos++;
+          }
+          if (isVideo) return trackNum;
+          tPos = entryEnd;
+        } else {
+          tPos++;
+        }
+      }
+      break;
+    }
+    pos++;
+  }
+  return 1;
+}
+
+/**
+ * Inserts a dedicated 256-byte Void placeholder element at segmentDataStartOffset
+ * so that in-place header patching for SeekHead always succeeds.
+ */
+function insertSeekHeadPlaceholder(
+  headerBuf: Uint8Array,
+  segmentDataStartOffset: number
+): { patchedBuf: Uint8Array; seekHeadFileOffset: number; seekHeadLen: number } {
+  const PLACEHOLDER_SIZE = 256;
+
+  // Create 256-byte Void element: 0xEC ID, 2-byte VINT for payload length 253, 253 zero bytes
+  const voidElem = new Uint8Array(PLACEHOLDER_SIZE);
+  voidElem[0] = 0xEC; // Void ID
+  voidElem[1] = 0x40; // 2-byte VINT prefix (0x4000 | 253 = 0x40FD)
+  voidElem[2] = 0xFD;
+
+  const before = headerBuf.slice(0, segmentDataStartOffset);
+  const after = headerBuf.slice(segmentDataStartOffset);
+
+  const newBuf = new Uint8Array(headerBuf.length + PLACEHOLDER_SIZE);
+  newBuf.set(before, 0);
+  newBuf.set(voidElem, segmentDataStartOffset);
+  newBuf.set(after, segmentDataStartOffset + PLACEHOLDER_SIZE);
+
+  return {
+    patchedBuf: newBuf,
+    seekHeadFileOffset: segmentDataStartOffset,
+    seekHeadLen: PLACEHOLDER_SIZE,
+  };
+}
+
+/**
+ * Creates exact EBML Void padding element bytes for a given total size
+ */
+function buildVoidPadding(size: number): Uint8Array {
+  if (size <= 0) return new Uint8Array(0);
+  const result = new Uint8Array(size);
+  if (size === 1) {
+    result[0] = 0xEC;
+    return result;
+  }
+  if (size === 2) {
+    result[0] = 0xEC;
+    result[1] = 0x80;
+    return result;
+  }
+  if (size === 3) {
+    result[0] = 0xEC;
+    result[1] = 0x81;
+    result[2] = 0x00;
+    return result;
+  }
+  result[0] = 0xEC; // Void ID
+  const payloadLen = size - 1 - 2; // Subtract ID (1 byte) and VINT length (2 bytes)
+  result[1] = 0x40 | ((payloadLen >> 8) & 0x3F);
+  result[2] = payloadLen & 0xFF;
+  return result;
+}
+
+/**
  * Checks if a Cluster payload contains a Video Keyframe (SimpleBlock with bit 0x80 set or BlockGroup)
  */
 function clusterHasKeyframe(inspectBuf: Uint8Array): boolean {
@@ -755,6 +866,7 @@ export async function processNativeConcatStream(
     let tracksPosInSegment = -1;
     let tagsPosInSegment = -1;
     let chaptersPosInSegment = -1;
+    let videoTrackNum = 1;
 
     if (headerLength > 0) {
       const origHeaderBlob = files[0].slice(0, headerLength);
@@ -778,8 +890,16 @@ export async function processNativeConcatStream(
         }
       }
 
-      // Record offsets of top-level header elements relative to segmentDataStartOffset
+      // Insert dedicated 256-byte SeekHead placeholder Void element at segmentDataStartOffset
       if (segmentDataStartOffset > 0) {
+        const inserted = insertSeekHeadPlaceholder(patchedHeaderBuf, segmentDataStartOffset);
+        patchedHeaderBuf = inserted.patchedBuf;
+        seekHeadFileOffset = inserted.seekHeadFileOffset;
+        seekHeadLen = inserted.seekHeadLen;
+
+        videoTrackNum = findVideoTrackNumber(patchedHeaderBuf);
+
+        // Record offsets of top-level header elements relative to segmentDataStartOffset
         const infoOff = findElemOffsetInBuf(patchedHeaderBuf, [0x15, 0x49, 0xA9, 0x66], segmentDataStartOffset);
         if (infoOff >= 0) infoPosInSegment = infoOff - segmentDataStartOffset;
 
@@ -791,18 +911,6 @@ export async function processNativeConcatStream(
 
         const chapOff = findElemOffsetInBuf(patchedHeaderBuf, [0x10, 0x43, 0xA7, 0x70], segmentDataStartOffset);
         if (chapOff >= 0) chaptersPosInSegment = chapOff - segmentDataStartOffset;
-      }
-
-      // Find first Void element in header to place initial SeekHead placeholder
-      for (let p = segmentDataStartOffset; p < patchedHeaderBuf.length - 16; p++) {
-        if (patchedHeaderBuf[p] === 0xEC) { // Void ID
-          const vSize = parseVint(patchedHeaderBuf, p + 1);
-          if (vSize && vSize.value >= 32) {
-            seekHeadFileOffset = p;
-            seekHeadLen = 1 + vSize.length + vSize.value;
-            break;
-          }
-        }
       }
 
       await writeChunkZeroCopy(new Blob([patchedHeaderBuf]), writable);
@@ -975,8 +1083,7 @@ export async function processNativeConcatStream(
         });
       }
 
-      const cuesPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
-      const cuesElem = buildCuesElement(cuePoints);
+      const cuesElem = buildCuesElement(cuePoints, videoTrackNum);
 
       // Build complete SeekHead pointing to Info, Tracks, Tags, Chapters, and Cues
       const seekEntries: { id: number[]; pos: number }[] = [];
@@ -984,13 +1091,24 @@ export async function processNativeConcatStream(
       if (tracksPosInSegment >= 0) seekEntries.push({ id: [0x16, 0x54, 0xAE, 0x6B], pos: tracksPosInSegment });
       if (tagsPosInSegment >= 0) seekEntries.push({ id: [0x12, 0x54, 0xC3, 0x67], pos: tagsPosInSegment });
       if (chaptersPosInSegment >= 0) seekEntries.push({ id: [0x10, 0x43, 0xA7, 0x70], pos: chaptersPosInSegment });
-      seekEntries.push({ id: [0x1C, 0x53, 0xBB, 0x6B], pos: cuesPosInSegment });
 
-      const seekHeadElem = buildSeekHeadElement(seekEntries);
+      // Calculate initial position before writing SeekHead
+      const initialCuesPos = Math.max(0, totalBytesWritten - segmentDataStartOffset);
+
+      // First pass: estimate seekHeadElem size
+      let candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: initialCuesPos }];
+      let seekHeadElem = buildSeekHeadElement(candidateSeekEntries);
+
+      // Exact Cues position = offset before SeekHead + SeekHead length
+      const realCuesPos = initialCuesPos + seekHeadElem.length;
+
+      // Second pass: build seekHeadElem with exact Cues position
+      candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: realCuesPos }];
+      seekHeadElem = buildSeekHeadElement(candidateSeekEntries);
 
       // Write Tail SeekHead + Cues Element at end of file
       await writeChunkZeroCopy(new Blob([seekHeadElem, cuesElem]), writable);
-      totalBytesWritten += seekHeadElem.length + cuesElem.length;
+      totalBytesWritten += (seekHeadElem.length + cuesElem.length);
 
       // 5. In-place Header Patching if stream supports seek()
       if ('seek' in writable && typeof (writable as any).seek === 'function') {
@@ -1004,17 +1122,18 @@ export async function processNativeConcatStream(
             await seekableStream.write(sizeVint8);
           }
 
-          // Patch SeekHead in header placeholder if available
+          // Patch SeekHead in header placeholder at segmentDataStartOffset
           if (seekHeadFileOffset >= 0 && seekHeadElem.length <= seekHeadLen) {
             const paddedSeekHead = new Uint8Array(seekHeadLen);
             paddedSeekHead.set(seekHeadElem, 0);
+
             // Pad remaining space with Void (0xEC)
             const remaining = seekHeadLen - seekHeadElem.length;
             if (remaining > 0) {
-              paddedSeekHead[seekHeadElem.length] = 0xEC;
-              const voidVint = encodeVint(remaining - 1 - 1, 1);
-              paddedSeekHead.set(voidVint, seekHeadElem.length + 1);
+              const voidPad = buildVoidPadding(remaining);
+              paddedSeekHead.set(voidPad, seekHeadElem.length);
             }
+
             await seekableStream.seek(seekHeadFileOffset);
             await seekableStream.write(paddedSeekHead);
           }
