@@ -438,49 +438,76 @@ export default function App() {
 
         setProcessingMessage('กำลังรวมวิดีโอ (Low-RAM Streaming - เคลียร์หน่วยความจำชั่วคราวอัตโนมัติ)...');
         
-        const executeStreamMerge = async (args: string[]) => {
-          let writable: any = null;
-          if (fileHandle) {
-            writable = await fileHandle.createWritable();
+        const createPipelineStream = async (handle: FileSystemFileHandle | null, outName: string) => {
+          let writable: FileSystemWritableFileStream | null = null;
+          let opfsFileHandle: FileSystemFileHandle | null = null;
+
+          if (handle) {
+            writable = await handle.createWritable();
+          } else if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.getDirectory) {
+            try {
+              const opfsRoot = await navigator.storage.getDirectory();
+              const tempName = `opfs_stream_${Date.now()}_${outName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+              opfsFileHandle = await opfsRoot.getFileHandle(tempName, { create: true });
+              writable = await opfsFileHandle.createWritable();
+            } catch (err) {
+              console.warn('OPFS stream initialization error:', err);
+            }
           }
 
+          return { writable, opfsFileHandle };
+        };
+
+        const executeStreamMerge = async (args: string[]) => {
+          const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
           const chunks: Uint8Array[] = [];
           let activeIndex = 0;
           let totalBytesProcessed = 0;
 
-          const fileExists = async (fname: string): Promise<boolean> => {
+          const readAndRemoveSegment = async (fname: string): Promise<Uint8Array | null> => {
             try {
-              const checkData = await ffmpeg.readFile(fname);
-              return checkData !== undefined && checkData.length > 0;
+              const segData = await ffmpeg.readFile(fname);
+              if (segData && segData.length > 0) {
+                await ffmpeg.deleteFile(fname);
+                return segData as Uint8Array;
+              }
             } catch {
-              return false;
+              // Segment not ready
             }
+            return null;
           };
 
           const formatIndex = (idx: number) => `/out_seg_${idx.toString().padStart(3, '0')}.ts`;
 
           const pollInterval = setInterval(async () => {
             const nextFile = formatIndex(activeIndex + 1);
-            if (await fileExists(nextFile)) {
+            let nextExists = false;
+            try {
+              const testNext = await ffmpeg.readFile(nextFile);
+              if (testNext && testNext.length > 0) {
+                nextExists = true;
+              }
+            } catch {}
+
+            if (nextExists) {
               const currentFile = formatIndex(activeIndex);
               try {
-                const segData = await ffmpeg.readFile(currentFile);
-                if (segData && segData.length > 0) {
+                const segData = await readAndRemoveSegment(currentFile);
+                if (segData) {
                   totalBytesProcessed += segData.length;
                   if (writable) {
                     await writable.write(segData);
                   } else {
                     chunks.push(segData);
                   }
-                  await ffmpeg.deleteFile(currentFile);
-                  setProcessingMessage(`กำลังสตรีมวิดีโอลง SSD: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (เคลียร์ RAM เรียบร้อย)...`);
+                  setProcessingMessage(`กำลังสตรีมวิดีโอลงปลายทาง (Pipeline Streaming): ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~0 MB)...`);
                 }
               } catch (e) {
                 console.warn(`Failed to process segment ${currentFile}`, e);
               }
               activeIndex++;
             }
-          }, 300);
+          }, 250);
 
           let execSuccess = false;
           try {
@@ -497,20 +524,13 @@ export default function App() {
           // Flush remaining segments
           while (true) {
             const currentFile = formatIndex(activeIndex);
-            if (await fileExists(currentFile)) {
-              try {
-                const segData = await ffmpeg.readFile(currentFile);
-                if (segData && segData.length > 0) {
-                  totalBytesProcessed += segData.length;
-                  if (writable) {
-                    await writable.write(segData);
-                  } else {
-                    chunks.push(segData);
-                  }
-                  await ffmpeg.deleteFile(currentFile);
-                }
-              } catch (e) {
-                console.warn(`Failed to flush final segment ${currentFile}`, e);
+            const segData = await readAndRemoveSegment(currentFile);
+            if (segData) {
+              totalBytesProcessed += segData.length;
+              if (writable) {
+                await writable.write(segData);
+              } else {
+                chunks.push(segData);
               }
               activeIndex++;
             } else {
@@ -526,14 +546,20 @@ export default function App() {
             return { success: false, url: null };
           }
 
-          if (!fileHandle && chunks.length > 0) {
-            try {
-              const blob = new Blob(chunks, { type: 'video/mp2t' });
-              const url = URL.createObjectURL(blob);
-              return { success: true, url };
-            } catch (e) {
-              throw new Error('ไฟล์ผลลัพธ์ใหญ่เกิน RAM เบราว์เซอร์ กรุณากดปุ่ม "เลือกตำแหน่งบันทึกลง SSD" เพื่อบันทึกลงดิสก์โดยตรง');
-            }
+          if (opfsFileHandle) {
+            const diskFile = await opfsFileHandle.getFile();
+            const url = URL.createObjectURL(diskFile);
+            return { success: true, url };
+          }
+
+          if (fileHandle) {
+            return { success: true, url: null };
+          }
+
+          if (chunks.length > 0) {
+            const blob = new Blob(chunks, { type: 'video/mp2t' });
+            const url = URL.createObjectURL(blob);
+            return { success: true, url };
           }
 
           return { success: totalBytesProcessed > 0, url: null };
@@ -588,7 +614,7 @@ export default function App() {
           setOutputUrl(result.url);
           setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
         } else {
-          setProcessingMessage(`รวมไฟล์และบันทึกลง SSD สำเร็จ (เคลียร์ RAM ตลอดการทำงาน ภาพไม่พัง 100%): ${fileHandle?.name}`);
+          setProcessingMessage(`รวมไฟล์และบันทึกลงปลายทางสำเร็จ (เคลียร์ RAM ตลอดการทำงาน ภาพไม่พัง 100%): ${fileHandle?.name}`);
         }
 
         setProcessingProgress(1.0);
@@ -626,48 +652,55 @@ export default function App() {
         setProcessingMessage('กำลังประมวลผลตัดวิดีโอ (Low-RAM Streaming - เคลียร์หน่วยความจำชั่วคราว)...');
 
         const executeStreamTrim = async (args: string[]) => {
-          let writable: any = null;
-          if (fileHandle) {
-            writable = await fileHandle.createWritable();
-          }
-
+          const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
           const chunks: Uint8Array[] = [];
           let activeIndex = 0;
           let totalBytesProcessed = 0;
 
-          const fileExists = async (fname: string): Promise<boolean> => {
+          const readAndRemoveSegment = async (fname: string): Promise<Uint8Array | null> => {
             try {
-              const checkData = await ffmpeg.readFile(fname);
-              return checkData !== undefined && checkData.length > 0;
+              const segData = await ffmpeg.readFile(fname);
+              if (segData && segData.length > 0) {
+                await ffmpeg.deleteFile(fname);
+                return segData as Uint8Array;
+              }
             } catch {
-              return false;
+              // Segment not ready
             }
+            return null;
           };
 
           const formatIndex = (idx: number) => `/out_seg_${idx.toString().padStart(3, '0')}.ts`;
 
           const pollInterval = setInterval(async () => {
             const nextFile = formatIndex(activeIndex + 1);
-            if (await fileExists(nextFile)) {
+            let nextExists = false;
+            try {
+              const testNext = await ffmpeg.readFile(nextFile);
+              if (testNext && testNext.length > 0) {
+                nextExists = true;
+              }
+            } catch {}
+
+            if (nextExists) {
               const currentFile = formatIndex(activeIndex);
               try {
-                const segData = await ffmpeg.readFile(currentFile);
-                if (segData && segData.length > 0) {
+                const segData = await readAndRemoveSegment(currentFile);
+                if (segData) {
                   totalBytesProcessed += segData.length;
                   if (writable) {
                     await writable.write(segData);
                   } else {
                     chunks.push(segData);
                   }
-                  await ffmpeg.deleteFile(currentFile);
-                  setProcessingMessage(`กำลังสตรีมตัดวิดีโอลง SSD: ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (เคลียร์ RAM เรียบร้อย)...`);
+                  setProcessingMessage(`กำลังสตรีมตัดวิดีโอลงปลายทาง (Pipeline Streaming): ${(totalBytesProcessed / (1024 * 1024)).toFixed(1)} MB (RAM ~0 MB)...`);
                 }
               } catch (e) {
                 console.warn(`Failed to process segment ${currentFile}`, e);
               }
               activeIndex++;
             }
-          }, 300);
+          }, 250);
 
           let execSuccess = false;
           try {
@@ -684,20 +717,13 @@ export default function App() {
           // Flush remaining segments
           while (true) {
             const currentFile = formatIndex(activeIndex);
-            if (await fileExists(currentFile)) {
-              try {
-                const segData = await ffmpeg.readFile(currentFile);
-                if (segData && segData.length > 0) {
-                  totalBytesProcessed += segData.length;
-                  if (writable) {
-                    await writable.write(segData);
-                  } else {
-                    chunks.push(segData);
-                  }
-                  await ffmpeg.deleteFile(currentFile);
-                }
-              } catch (e) {
-                console.warn(`Failed to flush final segment ${currentFile}`, e);
+            const segData = await readAndRemoveSegment(currentFile);
+            if (segData) {
+              totalBytesProcessed += segData.length;
+              if (writable) {
+                await writable.write(segData);
+              } else {
+                chunks.push(segData);
               }
               activeIndex++;
             } else {
@@ -713,14 +739,20 @@ export default function App() {
             return { success: false, url: null };
           }
 
-          if (!fileHandle && chunks.length > 0) {
-            try {
-              const blob = new Blob(chunks, { type: 'video/mp2t' });
-              const url = URL.createObjectURL(blob);
-              return { success: true, url };
-            } catch (e) {
-              throw new Error('ไฟล์ผลลัพธ์ใหญ่เกิน RAM เบราว์เซอร์ กรุณากดปุ่ม "เลือกตำแหน่งบันทึกลง SSD" เพื่อบันทึกลงดิสก์โดยตรง');
-            }
+          if (opfsFileHandle) {
+            const diskFile = await opfsFileHandle.getFile();
+            const url = URL.createObjectURL(diskFile);
+            return { success: true, url };
+          }
+
+          if (fileHandle) {
+            return { success: true, url: null };
+          }
+
+          if (chunks.length > 0) {
+            const blob = new Blob(chunks, { type: 'video/mp2t' });
+            const url = URL.createObjectURL(blob);
+            return { success: true, url };
           }
 
           return { success: totalBytesProcessed > 0, url: null };
@@ -776,7 +808,7 @@ export default function App() {
           setOutputUrl(result.url);
           setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
         } else {
-          setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ (ภาพไม่พัง เวลาตรงตามต้นฉบับ 100%): ${fileHandle?.name}`);
+          setProcessingMessage(`บันทึกไฟล์ลงปลายทางสำเร็จ (ภาพไม่พัง เวลาตรงตามต้นฉบับ 100%): ${fileHandle?.name}`);
         }
 
         setProcessingProgress(1.0);
