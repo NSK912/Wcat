@@ -62,6 +62,51 @@ function concatBuffers(buffers: Uint8Array[]): Uint8Array {
     return res;
 }
 
+export function getVideoTrackNumber(tracksBuf: Uint8Array): number {
+    let pos = 0;
+    while (pos < tracksBuf.length) {
+        const el = readElementHeader(tracksBuf, pos);
+        if (!el) break;
+        if (el.idHex === 'ae') { // TrackEntry
+            const trackEntryView = tracksBuf.subarray(pos + el.totalHeaderLen, pos + el.totalHeaderLen + el.size);
+            let innerPos = 0;
+            let trackNum = -1;
+            let trackType = -1;
+            while (innerPos < trackEntryView.length) {
+                const innerEl = readElementHeader(trackEntryView, innerPos);
+                if (!innerEl) break;
+                if (innerEl.idHex === 'd7') { // TrackNumber
+                    if (innerEl.size === 1) trackNum = trackEntryView[innerPos + innerEl.totalHeaderLen];
+                } else if (innerEl.idHex === '83') { // TrackType
+                    if (innerEl.size === 1) trackType = trackEntryView[innerPos + innerEl.totalHeaderLen];
+                }
+                innerPos += innerEl.totalHeaderLen + innerEl.size;
+            }
+            if (trackType === 1 && trackNum !== -1) {
+                return trackNum;
+            }
+        }
+        pos += el.totalHeaderLen + el.size;
+    }
+    return 1; // fallback
+}
+
+export function buildSeekHead(cuesOffset: number): Uint8Array {
+    const offsetBuf = new Uint8Array(8);
+    let remaining = cuesOffset;
+    for (let i = 7; i >= 0; i--) {
+        offsetBuf[i] = remaining & 0xff;
+        remaining = Math.floor(remaining / 256);
+    }
+    const seekPos = new Uint8Array([0x53, 0xAC, 0x88, ...offsetBuf]);
+    const seekId = new Uint8Array([0x53, 0xAB, 0x84, 0x1C, 0x53, 0xBB, 0x6B]);
+    const seekPayload = concatBuffers([seekId, seekPos]);
+    const seekSize = encodeVintSize(seekPayload.length);
+    const seek = concatBuffers([new Uint8Array([0x4D, 0xBB]), seekSize, seekPayload]);
+    const seekHeadSize = encodeVintSize(seek.length);
+    return concatBuffers([new Uint8Array([0x11, 0x4D, 0x9B, 0x74]), seekHeadSize, seek]);
+}
+
 function encodeVintSize(value: number): Uint8Array {
    if (value < 127) return writeVint(value, 1);
    if (value < 16383) return writeVint(value, 2);
@@ -445,6 +490,12 @@ export async function processNativeConcatStream(
         }
     }
 
+    let seekHeadOffset = 0;
+    let videoTrackNum = 1;
+    if (firstMeta) {
+        videoTrackNum = getVideoTrackNumber(firstMeta.segmentTracks);
+    }
+
     if (writable) {
         await writable.write(firstMeta.ebmlHeader);
         totalBytesWritten += firstMeta.ebmlHeader.length;
@@ -455,6 +506,13 @@ export async function processNativeConcatStream(
         await writable.write(segId);
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
+
+        seekHeadOffset = totalBytesWritten;
+        const dummySeekHead = buildSeekHead(0);
+        await writable.write(dummySeekHead);
+        totalBytesWritten += dummySeekHead.length;
+
+        segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
         totalBytesWritten += patchedSegmentInfo.length;
@@ -538,9 +596,17 @@ export async function processNativeConcatStream(
 
     if (writable && cuePoints.length > 0) {
         onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
-        const cuesBuffer = buildCuesElement(cuePoints, 1);
+        const cuesOffset = totalBytesWritten - segmentDataOffset;
+        const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
         await writable.write(cuesBuffer);
         totalBytesWritten += cuesBuffer.length;
+        
+        try {
+            const actualSeekHead = buildSeekHead(cuesOffset);
+            await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+        } catch (seekErr) {
+            console.warn("SeekHead update failed:", seekErr);
+        }
     }
 
     onProgress({ percentage: 100, statusText: 'สำเร็จ! (Standard Engine)', speedMBs: 0 });
@@ -593,6 +659,9 @@ export async function processNativeTrimStream(
          }
      }
 
+     let seekHeadOffset = 0;
+     let videoTrackNum = getVideoTrackNumber(meta.segmentTracks);
+
      if (writable) {
         await writable.write(meta.ebmlHeader);
         totalBytesWritten += meta.ebmlHeader.length;
@@ -602,6 +671,12 @@ export async function processNativeTrimStream(
         await writable.write(segId);
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
+        
+        seekHeadOffset = totalBytesWritten;
+        const dummySeekHead = buildSeekHead(0);
+        await writable.write(dummySeekHead);
+        totalBytesWritten += dummySeekHead.length;
+
         segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
@@ -671,9 +746,17 @@ export async function processNativeTrimStream(
 
      if (writable && cuePoints.length > 0) {
          onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
-         const cuesBuffer = buildCuesElement(cuePoints, 1);
+         const cuesOffset = totalBytesWritten - segmentDataOffset;
+         const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
          await writable.write(cuesBuffer);
          totalBytesWritten += cuesBuffer.length;
+         
+         try {
+             const actualSeekHead = buildSeekHead(cuesOffset);
+             await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+         } catch (seekErr) {
+             console.warn("SeekHead update failed:", seekErr);
+         }
      }
 
      onProgress({ percentage: 100, statusText: 'ตัดไฟล์สำเร็จ! (Standard Engine)', speedMBs: 0 });
@@ -721,6 +804,9 @@ export async function processNativeRemuxStream(
          }
      }
 
+     let seekHeadOffset = 0;
+     let videoTrackNum = getVideoTrackNumber(meta.segmentTracks);
+
      if (writable) {
         await writable.write(meta.ebmlHeader);
         totalBytesWritten += meta.ebmlHeader.length;
@@ -730,6 +816,12 @@ export async function processNativeRemuxStream(
         await writable.write(segId);
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
+        
+        seekHeadOffset = totalBytesWritten;
+        const dummySeekHead = buildSeekHead(0);
+        await writable.write(dummySeekHead);
+        totalBytesWritten += dummySeekHead.length;
+
         segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
@@ -793,9 +885,17 @@ export async function processNativeRemuxStream(
 
      if (writable && cuePoints.length > 0) {
          onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
-         const cuesBuffer = buildCuesElement(cuePoints, 1);
+         const cuesOffset = totalBytesWritten - segmentDataOffset;
+         const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
          await writable.write(cuesBuffer);
          totalBytesWritten += cuesBuffer.length;
+         
+         try {
+             const actualSeekHead = buildSeekHead(cuesOffset);
+             await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+         } catch (seekErr) {
+             console.warn("SeekHead update failed:", seekErr);
+         }
      }
 
      onProgress({ percentage: 100, statusText: 'รีมิกซ์ไฟล์สำเร็จ! (Standard Remux)', speedMBs: 0 });
