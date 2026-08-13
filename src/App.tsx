@@ -457,7 +457,7 @@ export default function App() {
             }
           };
 
-          const formatIndex = (idx: number) => `/out_seg_${idx.toString().padStart(3, '0')}.mkv`;
+          const formatIndex = (idx: number) => `/out_seg_${idx.toString().padStart(3, '0')}.ts`;
 
           const pollInterval = setInterval(async () => {
             const nextFile = formatIndex(activeIndex + 1);
@@ -527,48 +527,52 @@ export default function App() {
           }
 
           if (!fileHandle && chunks.length > 0) {
-            const blob = new Blob(chunks, { type: `video/${targetExt === 'mp4' ? 'mp4' : 'x-matroska'}` });
-            const url = URL.createObjectURL(blob);
-            return { success: true, url };
+            try {
+              const blob = new Blob(chunks, { type: 'video/mp2t' });
+              const url = URL.createObjectURL(blob);
+              return { success: true, url };
+            } catch (e) {
+              throw new Error('ไฟล์ผลลัพธ์ใหญ่เกิน RAM เบราว์เซอร์ กรุณากดปุ่ม "เลือกตำแหน่งบันทึกลง SSD" เพื่อบันทึกลงดิสก์โดยตรง');
+            }
           }
 
           return { success: totalBytesProcessed > 0, url: null };
         };
 
-        // Strategy 1: Direct stream copy in low-RAM segment mode
+        // Strategy 1: AAC audio convert with MPEG-TS segmenting (Seamless stream concat)
         const concatArgs1 = [
           '-f', 'concat',
           '-safe', '0',
           '-i', 'list.txt',
-          '-c', 'copy',
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
           '-map', '0:v?',
           '-map', '0:a?',
           '-f', 'segment',
           '-segment_time', '180',
-          '-segment_format', 'matroska',
-          '-reset_timestamps', '0',
-          '/out_seg_%03d.mkv'
+          '-segment_format', 'mpegts',
+          '-reset_timestamps', '1',
+          '/out_seg_%03d.ts'
         ];
 
         let result = await executeStreamMerge(concatArgs1);
 
-        // Strategy 2: Convert audio to AAC if direct copy fails
+        // Strategy 2: Direct stream copy fallback
         if (!result.success) {
-          setProcessingMessage('กำลังสลับไปใช้โหมดแปลงเสียงเพื่อรวมวิดีโอ (Low-RAM AAC Mode)...');
+          setProcessingMessage('กำลังสลับไปใช้โหมด Direct Copy เพื่อรวมวิดีโอ (Low-RAM Mode)...');
           const concatArgs2 = [
             '-f', 'concat',
             '-safe', '0',
             '-i', 'list.txt',
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-b:a', '192k',
+            '-c', 'copy',
             '-map', '0:v?',
             '-map', '0:a?',
             '-f', 'segment',
             '-segment_time', '180',
-            '-segment_format', 'matroska',
-            '-reset_timestamps', '0',
-            '/out_seg_%03d.mkv'
+            '-segment_format', 'mpegts',
+            '-reset_timestamps', '1',
+            '/out_seg_%03d.ts'
           ];
           result = await executeStreamMerge(concatArgs2);
         }
@@ -640,7 +644,7 @@ export default function App() {
             }
           };
 
-          const formatIndex = (idx: number) => `/out_seg_${idx.toString().padStart(3, '0')}.mkv`;
+          const formatIndex = (idx: number) => `/out_seg_${idx.toString().padStart(3, '0')}.ts`;
 
           const pollInterval = setInterval(async () => {
             const nextFile = formatIndex(activeIndex + 1);
@@ -710,9 +714,13 @@ export default function App() {
           }
 
           if (!fileHandle && chunks.length > 0) {
-            const blob = new Blob(chunks, { type: `video/${targetExt === 'mp4' ? 'mp4' : 'x-matroska'}` });
-            const url = URL.createObjectURL(blob);
-            return { success: true, url };
+            try {
+              const blob = new Blob(chunks, { type: 'video/mp2t' });
+              const url = URL.createObjectURL(blob);
+              return { success: true, url };
+            } catch (e) {
+              throw new Error('ไฟล์ผลลัพธ์ใหญ่เกิน RAM เบราว์เซอร์ กรุณากดปุ่ม "เลือกตำแหน่งบันทึกลง SSD" เพื่อบันทึกลงดิสก์โดยตรง');
+            }
           }
 
           return { success: totalBytesProcessed > 0, url: null };
@@ -722,34 +730,34 @@ export default function App() {
           '-ss', currentStart.toString(),
           '-i', inputFilename,
           ...(totalTrimDuration > 0 ? ['-t', totalTrimDuration.toString()] : []),
-          '-c', 'copy',
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
           '-map', '0:v?',
           '-map', '0:a?',
           '-f', 'segment',
           '-segment_time', '180',
-          '-segment_format', 'matroska',
-          '-reset_timestamps', '0',
-          '/out_seg_%03d.mkv'
+          '-segment_format', 'mpegts',
+          '-reset_timestamps', '1',
+          '/out_seg_%03d.ts'
         ];
 
         let result = await executeStreamTrim(trimArgs1);
 
         if (!result.success) {
-          setProcessingMessage('กำลังตัดวิดีโอด้วยโหมดปรับแต่งเสียง (Low-RAM AAC Mode)...');
+          setProcessingMessage('กำลังตัดวิดีโอด้วยโหมด Direct Copy (Low-RAM Mode)...');
           const trimArgs2 = [
             '-ss', currentStart.toString(),
             '-i', inputFilename,
             ...(totalTrimDuration > 0 ? ['-t', totalTrimDuration.toString()] : []),
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-b:a', '192k',
+            '-c', 'copy',
             '-map', '0:v?',
             '-map', '0:a?',
             '-f', 'segment',
             '-segment_time', '180',
-            '-segment_format', 'matroska',
-            '-reset_timestamps', '0',
-            '/out_seg_%03d.mkv'
+            '-segment_format', 'mpegts',
+            '-reset_timestamps', '1',
+            '/out_seg_%03d.ts'
           ];
           result = await executeStreamTrim(trimArgs2);
         }
