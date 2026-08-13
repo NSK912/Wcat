@@ -1,5 +1,5 @@
 import React from 'react';
-import { Loader2, Download, AlertCircle, X, FileDown, Terminal } from 'lucide-react';
+import { Loader2, Download, AlertCircle, X, FileDown } from 'lucide-react';
 
 interface ProcessingModalProps {
   isOpen: boolean;
@@ -58,24 +58,6 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
       <div className="bg-slate-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl w-full max-w-lg p-5 shadow-2xl flex flex-col space-y-4 animate-in fade-in zoom-in duration-200">
         
-        {/* Modal Header Bar */}
-        <div className="flex items-center justify-between pb-1 border-b border-white/10">
-          <div className="flex items-center space-x-2">
-            <Terminal className="w-4 h-4 text-indigo-400" />
-            <h3 className="text-sm font-semibold text-slate-200">
-              {isError ? 'เกิดข้อผิดพลาดในการประมวลผล' : 'สถานะการประมวลผล'}
-            </h3>
-          </div>
-          <button
-            onClick={handleSaveLog}
-            className="flex items-center space-x-1 px-2.5 py-1 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 border border-indigo-500/30 rounded-lg transition"
-            title="บันทึก Log เป็นไฟล์ .txt"
-          >
-            <FileDown className="w-3.5 h-3.5" />
-            <span>เซฟ Log (.txt)</span>
-          </button>
-        </div>
-
         {/* Terminal log box (includes Error & Status reporting) */}
         <div className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-48 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
           {message && (

@@ -60,66 +60,51 @@ const runFFmpegChunk = async (
   inputPath: string,
   startTime: number,
   durationSeconds: number,
-  outName: string
+  outName: string,
+  targetExt: string = 'mp4'
 ): Promise<boolean> => {
-  // Strategy 1: Copy with HEVC bitstream filter (required when converting MKV HEVC/H.265 to MPEG-TS)
-  try {
-    const args1 = ['-ss', startTime.toString(), '-i', inputPath];
-    if (durationSeconds > 0) args1.push('-t', durationSeconds.toString());
-    args1.push('-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName);
+  const ext = targetExt.toLowerCase();
+  
+  const strategies: { args: string[] }[] = [];
 
-    const ret1 = await ffmpeg.exec(args1);
-    if (ret1 === 0) {
-      const data = await ffmpeg.readFile(outName);
-      if (data && data.length > 0) return true;
-    }
-  } catch (e) {
-    // try next strategy if HEVC filter or execution failed
+  if (ext === 'mkv' || ext === 'webm') {
+    strategies.push({
+      args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-f', 'matroska', outName]
+    });
+  } else if (ext === 'ts') {
+    strategies.push({
+      args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName]
+    });
+    strategies.push({
+      args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName]
+    });
+  } else {
+    strategies.push({
+      args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', outName]
+    });
+    strategies.push({
+      args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', outName]
+    });
   }
 
-  // Strategy 2: Copy with H264 bitstream filter
-  try {
-    const args2 = ['-ss', startTime.toString(), '-i', inputPath];
-    if (durationSeconds > 0) args2.push('-t', durationSeconds.toString());
-    args2.push('-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName);
+  // Universal fallback: Matroska
+  strategies.push({
+    args: ['-ss', startTime.toString(), '-i', inputPath, ...(durationSeconds > 0 ? ['-t', durationSeconds.toString()] : []), '-c', 'copy', '-f', 'matroska', outName]
+  });
 
-    const ret2 = await ffmpeg.exec(args2);
-    if (ret2 === 0) {
-      const data = await ffmpeg.readFile(outName);
-      if (data && data.length > 0) return true;
+  for (const strat of strategies) {
+    try {
+      const ret = await ffmpeg.exec(strat.args);
+      if (ret === 0) {
+        const data = await ffmpeg.readFile(outName);
+        if (data && data.length > 0) return true;
+      }
+    } catch (e: any) {
+      console.warn('Strategy execution error:', e);
+      if (e?.message?.includes('Aborted') || e?.toString().includes('Aborted')) {
+        throw new Error('FFMPEG_WAS_ABORTED');
+      }
     }
-  } catch (e) {
-    // try next strategy
-  }
-
-  // Strategy 3: Standard copy with AAC audio (handles Opus/FLAC audio incompatible with MPEG-TS)
-  try {
-    const args3 = ['-ss', startTime.toString(), '-i', inputPath];
-    if (durationSeconds > 0) args3.push('-t', durationSeconds.toString());
-    args3.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName);
-
-    const ret3 = await ffmpeg.exec(args3);
-    if (ret3 === 0) {
-      const data = await ffmpeg.readFile(outName);
-      if (data && data.length > 0) return true;
-    }
-  } catch (e) {
-    // try next strategy
-  }
-
-  // Strategy 4: Raw Direct Copy
-  try {
-    const args4 = ['-ss', startTime.toString(), '-i', inputPath];
-    if (durationSeconds > 0) args4.push('-t', durationSeconds.toString());
-    args4.push('-c', 'copy', '-strict', '-2', '-f', 'mpegts', outName);
-
-    const ret4 = await ffmpeg.exec(args4);
-    if (ret4 === 0) {
-      const data = await ffmpeg.readFile(outName);
-      if (data && data.length > 0) return true;
-    }
-  } catch (e) {
-    // All strategies failed
   }
 
   return false;
@@ -443,7 +428,8 @@ export default function App() {
               await ffmpeg.createDir(dirName);
               await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
               const inputFilename = `${dirName}/${file.name}`;
-              const outName = `chunk_${i}.ts`;
+              const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
+              const outName = `chunk_${i}.${targetExt}`;
               
               let currentFileDuration = 0;
               try {
@@ -470,7 +456,21 @@ export default function App() {
                     
                     setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i+1}/${selectedFiles.length} (${Math.round(currentStart)}s - ${Math.round(chunkEnd)}s)...`);
                     
-                    const success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName);
+                    let success = false;
+                    try {
+                      success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName, targetExt);
+                    } catch (chunkErr: any) {
+                      if (chunkErr?.message === 'FFMPEG_WAS_ABORTED') {
+                        await loadFFmpeg();
+                        ffmpeg = ffmpegRef.current;
+                        await ffmpeg.createDir(dirName);
+                        await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
+                        success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName, 'mp4');
+                      } else {
+                        throw chunkErr;
+                      }
+                    }
+
                     if (!success) {
                       throw new Error(`ไม่สามารถประมวลผลวิดีโอช่วง ${Math.round(currentStart)}s ของไฟล์ ${file.name} ได้`);
                     }
@@ -490,7 +490,20 @@ export default function App() {
                  let chunkIndex = 0;
                  while (true) {
                     setProcessingMessage(`กำลังสตรีมลง SSD: ไฟล์ ${i+1}/${selectedFiles.length} (ช่วงที่ ${chunkIndex + 1})...`);
-                    const success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName);
+                    let success = false;
+                    try {
+                      success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName, targetExt);
+                    } catch (chunkErr: any) {
+                      if (chunkErr?.message === 'FFMPEG_WAS_ABORTED') {
+                        await loadFFmpeg();
+                        ffmpeg = ffmpegRef.current;
+                        await ffmpeg.createDir(dirName);
+                        await ffmpeg.mount('WORKERFS', { files: [file] }, dirName);
+                        success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName, 'mp4');
+                      } else {
+                        throw chunkErr;
+                      }
+                    }
                     if (!success) break;
                     
                     let data = await ffmpeg.readFile(outName);
@@ -602,7 +615,8 @@ export default function App() {
           let currentStart = settings.startTime;
           const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
           const totalTrimDuration = finalEndTime - currentStart;
-          const outName = 'chunk.ts';
+          const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
+          const outName = `chunk.${targetExt}`;
           let totalChunksWritten = 0;
           
           setProcessingMessage('เปิดท่อส่งข้อมูลลง SSD (Streaming Mode)...');
@@ -616,7 +630,23 @@ export default function App() {
                   
                   setProcessingMessage(`กำลังสตรีมลง SSD: ช่วง ${Math.round(currentStart)}s ถึง ${Math.round(chunkEnd)}s (ประหยัด RAM ~30MB)...`);
                   
-                  const success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName);
+                  let success = false;
+                  try {
+                    success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName, targetExt);
+                  } catch (chunkErr: any) {
+                    if (chunkErr?.message === 'FFMPEG_WAS_ABORTED') {
+                      await loadFFmpeg();
+                      ffmpeg = ffmpegRef.current;
+                      if (isLocalFile) {
+                        await ffmpeg.createDir('/work');
+                        await ffmpeg.mount('WORKERFS', { files: [selectedFiles[0]] }, '/work');
+                      }
+                      success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, chunkDuration, outName, 'mp4');
+                    } else {
+                      throw chunkErr;
+                    }
+                  }
+
                   if (!success) {
                     throw new Error(`ไม่สามารถประมวลผลวิดีโอช่วง ${Math.round(currentStart)}s ได้`);
                   }
@@ -637,7 +667,22 @@ export default function App() {
              let chunkIndex = 0;
              while (true) {
                  setProcessingMessage(`กำลังสตรีมลง SSD (ช่วงที่ ${chunkIndex + 1})...`);
-                 const success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName);
+                 let success = false;
+                 try {
+                   success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName, targetExt);
+                 } catch (chunkErr: any) {
+                   if (chunkErr?.message === 'FFMPEG_WAS_ABORTED') {
+                     await loadFFmpeg();
+                     ffmpeg = ffmpegRef.current;
+                     if (isLocalFile) {
+                       await ffmpeg.createDir('/work');
+                       await ffmpeg.mount('WORKERFS', { files: [selectedFiles[0]] }, '/work');
+                     }
+                     success = await runFFmpegChunk(ffmpeg, inputFilename, chunkIndex * 30, 30, outName, 'mp4');
+                   } else {
+                     throw chunkErr;
+                   }
+                 }
                  if (!success) break;
 
                  let data = await ffmpeg.readFile(outName);
