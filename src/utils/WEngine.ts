@@ -507,12 +507,12 @@ export async function processNativeConcatStream(
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
 
+        segmentDataOffset = totalBytesWritten;
+
         seekHeadOffset = totalBytesWritten;
         const dummySeekHead = buildSeekHead(0);
         await writable.write(dummySeekHead);
         totalBytesWritten += dummySeekHead.length;
-
-        segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
         totalBytesWritten += patchedSegmentInfo.length;
@@ -672,12 +672,12 @@ export async function processNativeTrimStream(
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
         
+        segmentDataOffset = totalBytesWritten;
+
         seekHeadOffset = totalBytesWritten;
         const dummySeekHead = buildSeekHead(0);
         await writable.write(dummySeekHead);
         totalBytesWritten += dummySeekHead.length;
-
-        segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
         totalBytesWritten += patchedSegmentInfo.length;
@@ -817,12 +817,12 @@ export async function processNativeRemuxStream(
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
         
+        segmentDataOffset = totalBytesWritten;
+
         seekHeadOffset = totalBytesWritten;
         const dummySeekHead = buildSeekHead(0);
         await writable.write(dummySeekHead);
         totalBytesWritten += dummySeekHead.length;
-
-        segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
         totalBytesWritten += patchedSegmentInfo.length;
