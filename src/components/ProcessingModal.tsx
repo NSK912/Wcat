@@ -58,26 +58,22 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
       <div className="bg-slate-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl w-full max-w-lg p-5 shadow-2xl flex flex-col space-y-4 animate-in fade-in zoom-in duration-200">
         
-        {/* Terminal log box (includes Error & Status reporting) */}
-        <div className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-48 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
-          {message && (
-            <div
-              className={`px-3 py-2 rounded-lg border text-xs font-sans font-medium flex items-center space-x-2 mb-2 ${
-                isError
-                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-300'
-                  : 'bg-indigo-500/15 border-indigo-500/30 text-indigo-300'
-              }`}
-            >
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span className="truncate">{message}</span>
-            </div>
-          )}
-
+        {/* Terminal log box */}
+        <div className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-56 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
           {logs.length === 0 ? (
-            <div className="text-slate-500 italic px-1">Initializing FFmpeg core...</div>
+            <div className="text-slate-400 italic px-1">
+              {message || 'กำลังประมวลผลด้วย FFmpeg...'}
+            </div>
           ) : (
             logs.map((log, idx) => (
-              <div key={idx} className="truncate px-1 text-slate-400">
+              <div
+                key={idx}
+                className={`truncate px-1 ${
+                  log.toLowerCase().includes('error') || log.toLowerCase().includes('aborted')
+                    ? 'text-rose-400 font-semibold'
+                    : 'text-slate-300'
+                }`}
+              >
                 {log}
               </div>
             ))
