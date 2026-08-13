@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, Scissors, Upload, Sparkles, RefreshCw, Download, Plus, LayoutGrid } from 'lucide-react';
+import { Play, Pause, Scissors, Upload, Sparkles, RefreshCw, Download, Plus, LayoutGrid, Maximize2 } from 'lucide-react';
 import { formatTime } from '../utils/sampleVideos';
 import wcatSeekPng from '../../assets/Wcat seek.png';
 import wcatSeekSvg from '../../public/wcat-seek.svg';
@@ -22,6 +22,7 @@ interface TimelineProps {
   onMultiUploadClick?: () => void;
   onReset: () => void;
   onExportClick: () => void;
+  onFullscreenClick: () => void;
   isLoaded: boolean;
   isProcessing: boolean;
 }
@@ -44,6 +45,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   onMultiUploadClick,
   onReset,
   onExportClick,
+  onFullscreenClick,
   isLoaded,
   isProcessing,
 }) => {
@@ -185,6 +187,13 @@ export const Timeline: React.FC<TimelineProps> = ({
       <div className="flex flex-wrap md:flex-nowrap items-center justify-between gap-3 text-sm text-slate-300">
         {/* Playback Controls & Time Display */}
         <div className="flex items-center space-x-3 shrink-0">
+          <button
+            onClick={onFullscreenClick}
+            className="h-9 w-9 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center shadow-sm border border-white/10 transition shrink-0"
+            title="เต็มจอ (Fullscreen)"
+          >
+            <Maximize2 className="w-4 h-4" />
+          </button>
           <button
             onClick={onTogglePlay}
             className="h-9 w-9 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center shadow-md shadow-indigo-600/20 transition shrink-0"

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { EditSettings, ActiveTab, SampleVideo } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
-import { processNativeConcatStream, processNativeTrimStream } from './utils/VEngine';
+import { processNativeConcatStream, processNativeTrimStream, processNativeRemuxStream } from './utils/VEngine';
 import { VideoPlayer } from './components/VideoPlayer';
 import { Timeline } from './components/Timeline';
 import { ProcessingModal } from './components/ProcessingModal';
@@ -253,6 +253,16 @@ export default function App() {
     setIsPlaying(false);
   };
 
+  const handleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch((err) => {
+        console.warn(`Fullscreen error: ${err.message}`);
+      });
+    } else {
+      document.exitFullscreen();
+    }
+  };
+
   // Run FFmpeg Export Process
   const handleExport = async () => {
     if (!videoUrl) return;
@@ -403,16 +413,30 @@ export default function App() {
         let currentStart = settings.startTime;
         const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
 
-        const result = await processNativeTrimStream(
-          inputFile,
-          currentStart,
-          finalEndTime,
-          writable,
-          (prog) => {
-            setProcessingProgress(prog.percentage / 100);
-            setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
-          }
-        );
+        const isFullLengthRemux = currentStart === 0 && finalEndTime >= currentFileDuration - 0.1;
+        let result;
+
+        if (isFullLengthRemux) {
+          result = await processNativeRemuxStream(
+            inputFile,
+            writable,
+            (prog) => {
+              setProcessingProgress(prog.percentage / 100);
+              setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
+            }
+          );
+        } else {
+          result = await processNativeTrimStream(
+            inputFile,
+            currentStart,
+            finalEndTime,
+            writable,
+            (prog) => {
+              setProcessingProgress(prog.percentage / 100);
+              setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
+            }
+          );
+        }
 
         if (writable) {
           try { await writable.close(); } catch {}
@@ -517,6 +541,7 @@ export default function App() {
             onMultiUploadClick={() => multiFileInputRef.current?.click()}
             onReset={handleReset}
             onExportClick={handleExport}
+            onFullscreenClick={handleFullscreen}
             isLoaded={!!videoUrl}
             isProcessing={false}
           />

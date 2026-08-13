@@ -605,3 +605,114 @@ export async function processNativeTrimStream(
      return { success: false };
   }
 }
+
+/**
+ * Standard Process Remux Stream
+ * Rebuilds the Matroska/WebM container strictly to standard, fixing timecodes and dropping junk.
+ */
+export async function processNativeRemuxStream(
+  file: File,
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  try {
+     onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์เพื่อซ่อมแซม (Standard Remux Engine)...', speedMBs: 0 });
+     
+     const meta = await parseWebMFile(file);
+     let totalBytesWritten = 0;
+
+     const CHUNK_SIZE = 1024 * 1024;
+
+     // Patch the Duration in SegmentInfo for Standard Compliance
+     const patchedSegmentInfo = new Uint8Array(meta.segmentInfo);
+     const infoHdr = readElementHeader(patchedSegmentInfo, 0);
+     if (infoHdr) {
+         let pos = infoHdr.totalHeaderLen;
+         while (pos < patchedSegmentInfo.length) {
+            const el = readElementHeader(patchedSegmentInfo, pos);
+            if (!el) break;
+            if (el.idHex === '4489') { // ID_DURATION
+                const durationVal = (meta.fileDurationMs * 1000000) / meta.timecodeScale;
+                const view = new DataView(patchedSegmentInfo.buffer, patchedSegmentInfo.byteOffset + pos + el.totalHeaderLen, el.size);
+                if (el.size === 4) view.setFloat32(0, durationVal);
+                else if (el.size === 8) view.setFloat64(0, durationVal);
+            }
+            pos += el.totalHeaderLen + el.size;
+         }
+     }
+
+     if (writable) {
+        await writable.write(meta.ebmlHeader);
+        totalBytesWritten += meta.ebmlHeader.length;
+        
+        const segId = new Uint8Array([0x18, 0x53, 0x80, 0x67]);
+        const segSize = new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        await writable.write(segId);
+        await writable.write(segSize);
+        totalBytesWritten += segId.length + segSize.length;
+
+        await writable.write(patchedSegmentInfo);
+        totalBytesWritten += patchedSegmentInfo.length;
+
+        await writable.write(meta.segmentTracks);
+        totalBytesWritten += meta.segmentTracks.length;
+     }
+
+     let firstIncludedTimecode = -1;
+
+     for (let cIdx = 0; cIdx < meta.clusters.length; cIdx++) {
+         const cluster = meta.clusters[cIdx];
+         
+         if (firstIncludedTimecode === -1) {
+             firstIncludedTimecode = cluster.timecode;
+         }
+
+         const newTc = cluster.timecode - firstIncludedTimecode;
+         if (newTc < 0) continue; // Safety check
+
+         if (writable) {
+             const preTcSize = (cluster.timecodeOffset - cluster.offset);
+             const preTcBuf = await readSlice(file, cluster.offset, preTcSize);
+             await writable.write(preTcBuf);
+             totalBytesWritten += preTcBuf.length;
+
+             const tcHdr = new Uint8Array([0xE7]);
+             const tcSizeVint = writeVint(cluster.timecodeValueLength, cluster.timecodeLength - cluster.timecodeValueLength - 1);
+             const tcValBuf = new Uint8Array(cluster.timecodeValueLength);
+             let remaining = newTc;
+             for (let k = cluster.timecodeValueLength - 1; k >= 0; k--) {
+                tcValBuf[k] = remaining & 0xFF;
+                remaining = Math.floor(remaining / 256);
+             }
+
+             await writable.write(tcHdr);
+             await writable.write(tcSizeVint);
+             await writable.write(tcValBuf);
+             totalBytesWritten += tcHdr.length + tcSizeVint.length + tcValBuf.length;
+
+             const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
+             const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
+             
+             let streamPos = restOffset;
+             const streamEnd = restOffset + restSize;
+             
+             while (streamPos < streamEnd) {
+                 const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
+                 const chunk = await readSlice(file, streamPos, toRead);
+                 await writable.write(chunk);
+                 totalBytesWritten += chunk.length;
+                 streamPos += chunk.length;
+             }
+         }
+
+         const prog = (cIdx / meta.clusters.length) * 100;
+         onProgress({ percentage: prog, statusText: 'กำลังรีมิกซ์โครงสร้างไฟล์ (Standard Remux)...', speedMBs: 0 });
+     }
+
+     onProgress({ percentage: 100, statusText: 'รีมิกซ์ไฟล์สำเร็จ! (Standard Remux)', speedMBs: 0 });
+     return { success: true, totalBytesWritten };
+  } catch (err) {
+     console.error("Remux Stream Error:", err);
+     return { success: false };
+  }
+}
