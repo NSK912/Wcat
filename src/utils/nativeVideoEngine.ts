@@ -540,6 +540,91 @@ async function writeChunkZeroCopy(
 }
 
 /**
+ * Helper to encode EBML Unsigned Integer
+ */
+function encodeEbmlUint(val: number): Uint8Array {
+  if (val === 0) return new Uint8Array([0]);
+  const b: number[] = [];
+  let temp = Math.floor(val);
+  while (temp > 0) {
+    b.unshift(temp & 0xff);
+    temp = Math.floor(temp / 256);
+  }
+  return new Uint8Array(b);
+}
+
+/**
+ * Get minimum VINT length for a given size
+ */
+function getVintLen(len: number): number {
+  if (len < 127) return 1;
+  if (len < 16383) return 2;
+  if (len < 2097151) return 3;
+  if (len < 268435455) return 4;
+  return 8;
+}
+
+/**
+ * Helper to wrap payload in an EBML Element
+ */
+function buildElement(idBytes: number[], payload: Uint8Array): Uint8Array {
+  const vintLen = getVintLen(payload.length);
+  const sizeVint = encodeVint(payload.length, vintLen);
+  const result = new Uint8Array(idBytes.length + sizeVint.length + payload.length);
+  result.set(idBytes, 0);
+  result.set(sizeVint, idBytes.length);
+  result.set(payload, idBytes.length + sizeVint.length);
+  return result;
+}
+
+/**
+ * Builds a valid Matroska / MKV Cues element (0x1C53BB6B) containing all CuePoints
+ * Maps every Cluster timestamp to its exact byte offset in the output Segment payload
+ */
+export function buildCuesElement(cuePoints: { timeMs: number; pos: number }[], trackNum: number = 1): Uint8Array {
+  const cuePointBuffers: Uint8Array[] = [];
+
+  for (const cp of cuePoints) {
+    // 1. CueTime (0xB3)
+    const timeBytes = encodeEbmlUint(cp.timeMs);
+    const cueTimeElem = buildElement([0xB3], timeBytes);
+
+    // 2. CueTrack (0xF7)
+    const trackBytes = encodeEbmlUint(trackNum);
+    const cueTrackElem = buildElement([0xF7], trackBytes);
+
+    // 3. CueClusterPosition (0xF1)
+    const posBytes = encodeEbmlUint(cp.pos);
+    const cuePosElem = buildElement([0xF1], posBytes);
+
+    // 4. CueTrackPositions (0xB7)
+    const trackPosPayload = new Uint8Array(cueTrackElem.length + cuePosElem.length);
+    trackPosPayload.set(cueTrackElem, 0);
+    trackPosPayload.set(cuePosElem, cueTrackElem.length);
+    const cueTrackPosElem = buildElement([0xB7], trackPosPayload);
+
+    // 5. CuePoint (0xBB)
+    const cuePointPayload = new Uint8Array(cueTimeElem.length + cueTrackPosElem.length);
+    cuePointPayload.set(cueTimeElem, 0);
+    cuePointPayload.set(cueTrackPosElem, cueTimeElem.length);
+    const cuePointElem = buildElement([0xBB], cuePointPayload);
+
+    cuePointBuffers.push(cuePointElem);
+  }
+
+  // Combine all CuePoints into Cues element (0x1C53BB6B)
+  const totalPayloadLen = cuePointBuffers.reduce((sum, b) => sum + b.length, 0);
+  const cuesPayload = new Uint8Array(totalPayloadLen);
+  let offset = 0;
+  for (const buf of cuePointBuffers) {
+    cuesPayload.set(buf, offset);
+    offset += buf.length;
+  }
+
+  return buildElement([0x1C, 0x53, 0xBB, 0x6B], cuesPayload);
+}
+
+/**
  * Pure JS Zero-Copy Stream Concatenator for MKV / WebM / MP4 / TS
  */
 export async function processNativeConcatStream(
@@ -573,6 +658,7 @@ export async function processNativeConcatStream(
 
     // 2. Prepare File #1 Header
     const { headerLength, firstClusterOffset } = await findEbmlClustersOffset(files[0]);
+    let segmentDataStartOffset = 0;
 
     if (headerLength > 0) {
       const origHeaderBlob = files[0].slice(0, headerLength);
@@ -584,11 +670,23 @@ export async function processNativeConcatStream(
       }
       patchedHeaderBuf = neutralizeEbmlElementsInHeader(patchedHeaderBuf);
 
+      // Find where Segment Data payload starts (after Segment ID + Size VINT)
+      for (let p = 0; p < patchedHeaderBuf.length - 8; p++) {
+        if (patchedHeaderBuf[p] === 0x18 && patchedHeaderBuf[p + 1] === 0x53 && patchedHeaderBuf[p + 2] === 0x80 && patchedHeaderBuf[p + 3] === 0x67) {
+          const vint = parseVint(patchedHeaderBuf, p + 4);
+          if (vint) {
+            segmentDataStartOffset = p + 4 + vint.length;
+          }
+          break;
+        }
+      }
+
       await writeChunkZeroCopy(new Blob([patchedHeaderBuf]), writable);
       totalBytesWritten += patchedHeaderBuf.length;
     }
 
     let timeOffsetMs = 0;
+    const cuePoints: { timeMs: number; pos: number }[] = [];
 
     // 3. Process Clusters sequentially from File #1, #2, #3, #4, #5
     for (let fIdx = 0; fIdx < files.length; fIdx++) {
@@ -621,6 +719,13 @@ export async function processNativeConcatStream(
 
           if (patchedResult) {
             fileMaxTc = Math.max(fileMaxTc, patchedResult.origTimecodeMs);
+
+            // Record CuePoint for seeking index table
+            const clusterPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
+            cuePoints.push({
+              timeMs: patchedResult.newTimecodeMs,
+              pos: clusterPosInSegment,
+            });
 
             await writeChunkZeroCopy(new Blob([patchedResult.patchedBuf]), writable);
             totalBytesWritten += patchedResult.patchedHeaderLen;
@@ -726,6 +831,23 @@ export async function processNativeConcatStream(
       const fileKnownDurMs = fileDurationsMs[fIdx] || 0;
       const effectiveFileDurMs = Math.max(fileMaxTc + 1000, fileKnownDurMs);
       timeOffsetMs += effectiveFileDurMs;
+    }
+
+    // 4. Append Cues index element at the end of the file for instant, accurate seeking
+    if (cuePoints.length > 0) {
+      if (onProgress) {
+        onProgress({
+          processedBytes: totalBytesWritten,
+          totalBytes: totalInputSize,
+          percentage: 99.9,
+          speedMBs: 0,
+          statusText: 'กำลังสร้างดรรชนีสแกนเวลา (Cues Index) เพื่อให้กรอ/ลากเวลาวิดีโอได้ลื่นไหล...',
+        });
+      }
+
+      const cuesElem = buildCuesElement(cuePoints);
+      await writeChunkZeroCopy(new Blob([cuesElem]), writable);
+      totalBytesWritten += cuesElem.length;
     }
   } else {
     // Direct Zero-Copy Stream Concatenator (For TS / MP4 / Generic formats)
