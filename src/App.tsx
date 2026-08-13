@@ -62,34 +62,64 @@ const runFFmpegChunk = async (
   durationSeconds: number,
   outName: string
 ): Promise<boolean> => {
-  // Strategy 1: Direct copy with -strict -2
-  const args1 = ['-ss', startTime.toString(), '-i', inputPath];
-  if (durationSeconds > 0) {
-    args1.push('-t', durationSeconds.toString());
-  }
-  args1.push('-c', 'copy', '-strict', '-2', '-f', 'mpegts', outName);
+  // Strategy 1: Copy with HEVC bitstream filter (required when converting MKV HEVC/H.265 to MPEG-TS)
+  try {
+    const args1 = ['-ss', startTime.toString(), '-i', inputPath];
+    if (durationSeconds > 0) args1.push('-t', durationSeconds.toString());
+    args1.push('-c:v', 'copy', '-bsf:v', 'hevc_mp4toannexb', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName);
 
-  let ret = await ffmpeg.exec(args1);
-  if (ret === 0) {
-    try {
+    const ret1 = await ffmpeg.exec(args1);
+    if (ret1 === 0) {
       const data = await ffmpeg.readFile(outName);
       if (data && data.length > 0) return true;
-    } catch (e) {}
+    }
+  } catch (e) {
+    // try next strategy if HEVC filter or execution failed
   }
 
-  // Strategy 2: If direct copy fails (e.g. Opus audio format in MPEG-TS), copy video & convert audio to AAC
-  const args2 = ['-ss', startTime.toString(), '-i', inputPath];
-  if (durationSeconds > 0) {
-    args2.push('-t', durationSeconds.toString());
-  }
-  args2.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName);
+  // Strategy 2: Copy with H264 bitstream filter
+  try {
+    const args2 = ['-ss', startTime.toString(), '-i', inputPath];
+    if (durationSeconds > 0) args2.push('-t', durationSeconds.toString());
+    args2.push('-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName);
 
-  ret = await ffmpeg.exec(args2);
-  if (ret === 0) {
-    try {
+    const ret2 = await ffmpeg.exec(args2);
+    if (ret2 === 0) {
       const data = await ffmpeg.readFile(outName);
       if (data && data.length > 0) return true;
-    } catch (e) {}
+    }
+  } catch (e) {
+    // try next strategy
+  }
+
+  // Strategy 3: Standard copy with AAC audio (handles Opus/FLAC audio incompatible with MPEG-TS)
+  try {
+    const args3 = ['-ss', startTime.toString(), '-i', inputPath];
+    if (durationSeconds > 0) args3.push('-t', durationSeconds.toString());
+    args3.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-strict', '-2', '-f', 'mpegts', outName);
+
+    const ret3 = await ffmpeg.exec(args3);
+    if (ret3 === 0) {
+      const data = await ffmpeg.readFile(outName);
+      if (data && data.length > 0) return true;
+    }
+  } catch (e) {
+    // try next strategy
+  }
+
+  // Strategy 4: Raw Direct Copy
+  try {
+    const args4 = ['-ss', startTime.toString(), '-i', inputPath];
+    if (durationSeconds > 0) args4.push('-t', durationSeconds.toString());
+    args4.push('-c', 'copy', '-strict', '-2', '-f', 'mpegts', outName);
+
+    const ret4 = await ffmpeg.exec(args4);
+    if (ret4 === 0) {
+      const data = await ffmpeg.readFile(outName);
+      if (data && data.length > 0) return true;
+    }
+  } catch (e) {
+    // All strategies failed
   }
 
   return false;
