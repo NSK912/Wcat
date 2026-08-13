@@ -187,19 +187,21 @@ export const Timeline: React.FC<TimelineProps> = ({
       <div className="flex flex-wrap md:flex-nowrap items-center justify-between gap-3 text-sm text-slate-300">
         {/* Playback Controls & Time Display */}
         <div className="flex items-center space-x-3 shrink-0">
-          <button
-            onClick={onFullscreenClick}
-            className="h-9 w-9 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center shadow-sm border border-white/10 transition shrink-0"
-            title="เต็มจอ (Fullscreen)"
-          >
-            <Maximize2 className="w-4 h-4" />
-          </button>
-          <button
-            onClick={onTogglePlay}
-            className="h-9 w-9 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center shadow-md shadow-indigo-600/20 transition shrink-0"
-          >
-            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
-          </button>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={onFullscreenClick}
+              className="h-9 w-9 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center shadow-sm border border-white/10 transition shrink-0"
+              title="เต็มจอ (Fullscreen)"
+            >
+              <Maximize2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={onTogglePlay}
+              className="h-9 w-9 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center shadow-md shadow-indigo-600/20 transition shrink-0"
+            >
+              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+            </button>
+          </div>
           <div className="font-mono text-xs font-medium leading-snug flex flex-col justify-center shrink-0 select-none">
             <span className="text-indigo-400 font-bold">{formatTime(currentTime, duration)}</span>
             <span className="text-slate-400 font-bold">{formatTime(duration || 0)}</span>

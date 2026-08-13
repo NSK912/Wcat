@@ -50,6 +50,62 @@ export function writeVint(value: number, length: number): Uint8Array {
   return buf;
 }
 
+// --- Cues (Index) Builder Helpers ---
+function concatBuffers(buffers: Uint8Array[]): Uint8Array {
+    const totalLen = buffers.reduce((acc, b) => acc + b.length, 0);
+    const res = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const b of buffers) {
+        res.set(b, offset);
+        offset += b.length;
+    }
+    return res;
+}
+
+function encodeVintSize(value: number): Uint8Array {
+   if (value < 127) return writeVint(value, 1);
+   if (value < 16383) return writeVint(value, 2);
+   if (value < 2097151) return writeVint(value, 3);
+   if (value < 268435455) return writeVint(value, 4);
+   return writeVint(value, 5);
+}
+
+function encodeUint(value: number): Uint8Array {
+    if (value === 0) return new Uint8Array([0]);
+    const bytes = [];
+    let remaining = value;
+    while (remaining > 0) {
+        bytes.unshift(remaining & 0xff);
+        remaining = Math.floor(remaining / 256);
+    }
+    return new Uint8Array(bytes);
+}
+
+function encodeElement(idHex: string, payload: Uint8Array): Uint8Array {
+    const idBytes = [];
+    for (let i = 0; i < idHex.length; i += 2) {
+        idBytes.push(parseInt(idHex.substring(i, i + 2), 16));
+    }
+    const sizeBytes = encodeVintSize(payload.length);
+    const result = new Uint8Array(idBytes.length + sizeBytes.length + payload.length);
+    result.set(idBytes, 0);
+    result.set(sizeBytes, idBytes.length);
+    result.set(payload, idBytes.length + sizeBytes.length);
+    return result;
+}
+
+function buildCuesElement(cuePoints: { time: number, offset: number }[], trackNum: number = 1): Uint8Array {
+    const cuePointBuffers = cuePoints.map(cp => {
+        const cueTime = encodeElement('B3', encodeUint(Math.floor(cp.time)));
+        const cueTrack = encodeElement('F7', encodeUint(trackNum));
+        const cueClusterPosition = encodeElement('F1', encodeUint(cp.offset));
+        const cueTrackPositions = encodeElement('B7', concatBuffers([cueTrack, cueClusterPosition]));
+        return encodeElement('BB', concatBuffers([cueTime, cueTrackPositions]));
+    });
+    return encodeElement('1C53BB6B', concatBuffers(cuePointBuffers));
+}
+// ------------------------------------
+
 /**
  * Read raw bytes from File
  */
@@ -365,6 +421,8 @@ export async function processNativeConcatStream(
     }
 
     let totalBytesWritten = 0;
+    let segmentDataOffset = 0;
+    const cuePoints: { time: number, offset: number }[] = [];
     
     // Write Base Headers from first file
     const firstMeta = fileMetas[0];
@@ -423,6 +481,8 @@ export async function processNativeConcatStream(
 
             // Stream Cluster to output, patching the timecode
             if (writable) {
+                cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
+                
                 // Read from start of cluster to Timecode value
                 const preTcSize = (cluster.timecodeOffset - cluster.offset);
                 const preTcBuf = await readSlice(file, cluster.offset, preTcSize);
@@ -476,6 +536,13 @@ export async function processNativeConcatStream(
         }
     }
 
+    if (writable && cuePoints.length > 0) {
+        onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
+        const cuesBuffer = buildCuesElement(cuePoints, 1);
+        await writable.write(cuesBuffer);
+        totalBytesWritten += cuesBuffer.length;
+    }
+
     onProgress({ percentage: 100, statusText: 'สำเร็จ! (Standard Engine)', speedMBs: 0 });
     return { success: true, totalBytesWritten };
   } catch (error) {
@@ -499,6 +566,8 @@ export async function processNativeTrimStream(
      
      const meta = await parseWebMFile(file);
      let totalBytesWritten = 0;
+     let segmentDataOffset = 0;
+     const cuePoints: { time: number, offset: number }[] = [];
 
      const startMs = startTime * 1000;
      const endMs = endTime * 1000;
@@ -533,6 +602,7 @@ export async function processNativeTrimStream(
         await writable.write(segId);
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
+        segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
         totalBytesWritten += patchedSegmentInfo.length;
@@ -560,6 +630,7 @@ export async function processNativeTrimStream(
          if (newTc < 0) continue; // Safety check
 
          if (writable) {
+             cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
              const preTcSize = (cluster.timecodeOffset - cluster.offset);
              const preTcBuf = await readSlice(file, cluster.offset, preTcSize);
              await writable.write(preTcBuf);
@@ -598,6 +669,13 @@ export async function processNativeTrimStream(
          onProgress({ percentage: prog, statusText: 'กำลังตัดและสตรีมวิดีโอ (Standard Engine)...', speedMBs: 0 });
      }
 
+     if (writable && cuePoints.length > 0) {
+         onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
+         const cuesBuffer = buildCuesElement(cuePoints, 1);
+         await writable.write(cuesBuffer);
+         totalBytesWritten += cuesBuffer.length;
+     }
+
      onProgress({ percentage: 100, statusText: 'ตัดไฟล์สำเร็จ! (Standard Engine)', speedMBs: 0 });
      return { success: true, totalBytesWritten };
   } catch (err) {
@@ -620,6 +698,8 @@ export async function processNativeRemuxStream(
      
      const meta = await parseWebMFile(file);
      let totalBytesWritten = 0;
+     let segmentDataOffset = 0;
+     const cuePoints: { time: number, offset: number }[] = [];
 
      const CHUNK_SIZE = 1024 * 1024;
 
@@ -650,6 +730,7 @@ export async function processNativeRemuxStream(
         await writable.write(segId);
         await writable.write(segSize);
         totalBytesWritten += segId.length + segSize.length;
+        segmentDataOffset = totalBytesWritten;
 
         await writable.write(patchedSegmentInfo);
         totalBytesWritten += patchedSegmentInfo.length;
@@ -671,6 +752,7 @@ export async function processNativeRemuxStream(
          if (newTc < 0) continue; // Safety check
 
          if (writable) {
+             cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
              const preTcSize = (cluster.timecodeOffset - cluster.offset);
              const preTcBuf = await readSlice(file, cluster.offset, preTcSize);
              await writable.write(preTcBuf);
@@ -707,6 +789,13 @@ export async function processNativeRemuxStream(
 
          const prog = (cIdx / meta.clusters.length) * 100;
          onProgress({ percentage: prog, statusText: 'กำลังรีมิกซ์โครงสร้างไฟล์ (Standard Remux)...', speedMBs: 0 });
+     }
+
+     if (writable && cuePoints.length > 0) {
+         onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
+         const cuesBuffer = buildCuesElement(cuePoints, 1);
+         await writable.write(cuesBuffer);
+         totalBytesWritten += cuesBuffer.length;
      }
 
      onProgress({ percentage: 100, statusText: 'รีมิกซ์ไฟล์สำเร็จ! (Standard Remux)', speedMBs: 0 });
