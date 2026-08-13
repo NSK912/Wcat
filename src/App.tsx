@@ -433,7 +433,15 @@ export default function App() {
         }
 
         if (fileHandle && fileHandle.name.endsWith('.ts')) {
-          const CHUNK_DURATION = 60; // 60s per chunk
+          // คำนวณหาขนาด Chunk ที่เหมาะสมกับไฟล์ (ตั้งเป้าไว้ที่ 500MB ต่อ Chunk เพื่อความเร็วและสมดุลกับ RAM)
+          let CHUNK_DURATION = 120; 
+          if (isLocalFile && duration > 0) {
+            const fileSizeBytes = selectedFiles[0].size;
+            const bytesPerSecond = fileSizeBytes / duration;
+            const targetChunkBytes = 500 * 1024 * 1024; // 500 MB
+            CHUNK_DURATION = Math.max(10, Math.min(300, Math.floor(targetChunkBytes / bytesPerSecond)));
+          }
+
           let currentStart = settings.startTime;
           const finalEndTime = (settings.endTime > 0 && settings.endTime < duration) ? settings.endTime : duration;
           const outName = 'chunk.ts';
@@ -459,11 +467,13 @@ export default function App() {
               const ret = await ffmpeg.exec(args);
               if (ret !== 0) throw new Error('FFmpeg error at chunk ' + currentStart);
               
-              const data = await ffmpeg.readFile(outName);
+              let data = await ffmpeg.readFile(outName);
               await writable.write(data);
               
-              // 🔥 หัวใจสำคัญ: ลบไฟล์ออกจาก RAM ทันที!
+              // 🔥 หัวใจสำคัญ: ลบไฟล์ออกจาก RAM ทันที และเคลียร์ตัวแปร
               await ffmpeg.deleteFile(outName);
+              // @ts-ignore
+              data = null; // ช่วย Garbage Collector คืน RAM ไวขึ้น
               
               currentStart = chunkEnd;
               setProcessingProgress((currentStart - settings.startTime) / (finalEndTime - settings.startTime));
