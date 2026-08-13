@@ -243,30 +243,35 @@ async function isMkvOrWebm(file: File): Promise<boolean> {
 }
 
 /**
- * Patch Segment Header in MKV File #1 to Unknown Size (allows streaming beyond File #1 boundaries)
+ * Patch Segment Header in MKV File #1 to an 8-byte Unknown Size VINT
+ * Ensures an exact 8-byte slot exists at segmentSizeFileOffset so that final size patching never corrupts or shifts headers.
  */
 function patchSegmentHeader(headerBuf: Uint8Array): Uint8Array {
-  const patched = new Uint8Array(headerBuf);
   let pos = 0;
-  while (pos < patched.length - 12) {
+  while (pos < headerBuf.length - 12) {
     // Segment ID: 0x18 0x53 0x80 0x67
-    if (patched[pos] === 0x18 && patched[pos + 1] === 0x53 && patched[pos + 2] === 0x80 && patched[pos + 3] === 0x67) {
-      const sizeVint = parseVint(patched, pos + 4);
+    if (headerBuf[pos] === 0x18 && headerBuf[pos + 1] === 0x53 && headerBuf[pos + 2] === 0x80 && headerBuf[pos + 3] === 0x67) {
+      const sizeVint = parseVint(headerBuf, pos + 4);
       if (sizeVint) {
         const vintPos = pos + 4;
-        if (sizeVint.length === 8) {
-          patched[vintPos] = 0x01;
-          for (let i = 1; i < 8; i++) patched[vintPos + i] = 0xFF;
-        } else if (sizeVint.length === 4) {
-          patched[vintPos] = 0x1F;
-          for (let i = 1; i < 4; i++) patched[vintPos + i] = 0xFF;
-        }
+        const origVintLen = sizeVint.length;
+
+        const before = headerBuf.slice(0, vintPos);
+        const vint8 = encodeVint(-1, 8); // 8-byte VINT for unknown size: 0x01FFFFFFFFFFFFFF
+        const after = headerBuf.slice(vintPos + origVintLen);
+
+        const newBuf = new Uint8Array(headerBuf.length + (8 - origVintLen));
+        newBuf.set(before, 0);
+        newBuf.set(vint8, vintPos);
+        newBuf.set(after, vintPos + 8);
+
+        return newBuf;
       }
       break;
     }
     pos++;
   }
-  return patched;
+  return headerBuf;
 }
 
 /**
@@ -1041,6 +1046,7 @@ export async function processNativeConcatStream(
 
       let offset = clusterStartOffset;
       let fileMaxTc = 0;
+      let isFirstClusterInFile = true;
 
       while (offset < file.size - 8) {
         const inspectLen = Math.min(128, file.size - offset);
@@ -1062,16 +1068,17 @@ export async function processNativeConcatStream(
           if (patchedResult) {
             fileMaxTc = Math.max(fileMaxTc, patchedResult.origTimecodeMs);
 
-            // Record CuePoint ONLY for Clusters that contain Video Keyframes
+            // Record CuePoint for Clusters containing Keyframes
             const clusterPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
             const isKeyframe = clusterHasKeyframe(inspectBuf);
 
-            if (isKeyframe && (patchedResult.newTimecodeMs - lastCueTimeMs >= 250 || fIdx > 0 && cuePoints.length === 0)) {
+            if (isKeyframe && (isFirstClusterInFile || patchedResult.newTimecodeMs - lastCueTimeMs >= 250)) {
               cuePoints.push({
                 timeMs: patchedResult.newTimecodeMs,
                 pos: clusterPosInSegment,
               });
               lastCueTimeMs = patchedResult.newTimecodeMs;
+              isFirstClusterInFile = false;
             }
 
             await writeChunkZeroCopy(new Blob([patchedResult.patchedBuf]), writable);
@@ -1214,16 +1221,18 @@ export async function processNativeConcatStream(
       const tagsLen = newTagsElem ? newTagsElem.length : 0;
       const initialCuesPos = initialTagsOffset + tagsLen;
 
-      // First pass: estimate seekHeadElem size
-      let candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: initialCuesPos }];
+      // Convergence loop to calculate exact SeekHead length and Cues position
+      let realCuesPos = initialCuesPos;
+      let candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: realCuesPos }];
       let seekHeadElem = buildSeekHeadElement(candidateSeekEntries);
 
-      // Exact Cues position = offset before SeekHead + SeekHead length
-      const realCuesPos = initialCuesPos + seekHeadElem.length;
-
-      // Second pass: build seekHeadElem with exact Cues position
-      candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: realCuesPos }];
-      seekHeadElem = buildSeekHeadElement(candidateSeekEntries);
+      let prevLen = -1;
+      while (seekHeadElem.length !== prevLen) {
+        prevLen = seekHeadElem.length;
+        realCuesPos = initialCuesPos + seekHeadElem.length;
+        candidateSeekEntries = [...seekEntries, { id: [0x1C, 0x53, 0xBB, 0x6B], pos: realCuesPos }];
+        seekHeadElem = buildSeekHeadElement(candidateSeekEntries);
+      }
 
       // Write Tail Elements: newTagsElem (if created), SeekHead, Cues
       const tailChunks: Uint8Array[] = [];
