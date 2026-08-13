@@ -433,13 +433,13 @@ export default function App() {
         }
 
         if (fileHandle && fileHandle.name.endsWith('.ts')) {
-          // คำนวณหาขนาด Chunk ที่เหมาะสมกับไฟล์ (ตั้งเป้าไว้ที่ 500MB ต่อ Chunk เพื่อความเร็วและสมดุลกับ RAM)
-          let CHUNK_DURATION = 120; 
+          // คำนวณหาขนาด Chunk ที่เหมาะสมกับไฟล์ เพื่อไม่ให้ RAM บวมเกินไป (ตั้งเป้าไว้ที่ 30MB ต่อ Chunk)
+          let CHUNK_DURATION = 60; 
           if (isLocalFile && duration > 0) {
             const fileSizeBytes = selectedFiles[0].size;
             const bytesPerSecond = fileSizeBytes / duration;
-            const targetChunkBytes = 500 * 1024 * 1024; // 500 MB
-            CHUNK_DURATION = Math.max(10, Math.min(300, Math.floor(targetChunkBytes / bytesPerSecond)));
+            const targetChunkBytes = 30 * 1024 * 1024; // 30 MB
+            CHUNK_DURATION = Math.max(2, Math.min(60, Math.floor(targetChunkBytes / bytesPerSecond)));
           }
 
           let currentStart = settings.startTime;
