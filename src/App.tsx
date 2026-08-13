@@ -533,49 +533,110 @@ export default function App() {
         let currentStart = settings.startTime;
         const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
         const totalTrimDuration = finalEndTime - currentStart;
-        const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mp4';
-        const outName = `output_temp.${targetExt}`;
-
-        setProcessingMessage('กำลังประมวลผลวิดีโอแบบ Direct Stream Copy...');
-        
-        let success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, outName, targetExt);
-        let actualOutName = outName;
-
-        if (!success) {
-          // Fallback single-pass: Matroska
-          actualOutName = `output_temp.mkv`;
-          success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, actualOutName, 'mkv');
-        }
-
-        if (!success) {
-          if (isLocalFile) await ffmpeg.unmount('/work');
-          throw new Error(`ไม่สามารถตัด/ประมวลผลวิดีโอได้`);
-        }
-
-        const data = await ffmpeg.readFile(actualOutName);
-        await ffmpeg.deleteFile(actualOutName);
-
-        if (isLocalFile) {
-          await ffmpeg.unmount('/work');
-        } else {
-          await ffmpeg.deleteFile(inputFilename);
-        }
+        const targetExt = targetFilename.split('.').pop()?.toLowerCase() || 'mkv';
 
         if (fileHandle) {
-          setProcessingMessage(`กำลังบันทึกไฟล์ลง SSD (${fileHandle.name})...`);
+          // Stream directly into SSD fileHandle in 10-minute (600s) chunks to keep RAM < 150MB
+          setProcessingMessage('เปิดท่อส่งข้อมูลตรงลง SSD (Low-RAM Streaming Mode)...');
           const writable = await fileHandle.createWritable();
-          await writable.write(data);
+          const CHUNK_DURATION = 600; // 10 minutes
+          let startPos = currentStart;
+          let chunkIndex = 0;
+
+          if (totalTrimDuration <= 600) {
+            // Single chunk process for short videos
+            const outName = `chunk_${chunkIndex}.${targetExt}`;
+            setProcessingMessage('กำลังประมวลผลวิดีโอแบบ Direct Stream Copy...');
+            let chunkOk = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, outName, targetExt);
+            let actualChunk = outName;
+            if (!chunkOk) {
+              actualChunk = `chunk_${chunkIndex}.mkv`;
+              chunkOk = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, actualChunk, 'mkv');
+            }
+
+            if (!chunkOk) {
+              if (isLocalFile) await ffmpeg.unmount('/work');
+              throw new Error('ไม่สามารถประมวลผลวิดีโอได้');
+            }
+
+            const chunkData = await ffmpeg.readFile(actualChunk);
+            await writable.write(chunkData);
+            await ffmpeg.deleteFile(actualChunk);
+          } else {
+            // Multi-chunk 10-minute streaming for huge videos (2h+)
+            while (startPos < finalEndTime) {
+              const chunkDur = Math.min(CHUNK_DURATION, finalEndTime - startPos);
+              if (chunkDur <= 0) break;
+
+              setProcessingMessage(`กำลังสตรีมลง SSD (ช่วงที่ ${chunkIndex + 1}: ${Math.round(startPos)}s - ${Math.round(startPos + chunkDur)}s)...`);
+              const outName = `chunk_${chunkIndex}.${targetExt}`;
+              let chunkOk = await runFFmpegChunk(ffmpeg, inputFilename, startPos, chunkDur, outName, targetExt);
+              let actualChunk = outName;
+
+              if (!chunkOk) {
+                actualChunk = `chunk_${chunkIndex}.mkv`;
+                chunkOk = await runFFmpegChunk(ffmpeg, inputFilename, startPos, chunkDur, actualChunk, 'mkv');
+              }
+
+              if (!chunkOk) {
+                if (isLocalFile) await ffmpeg.unmount('/work');
+                throw new Error(`ไม่สามารถตัดวิดีโอช่วง ${Math.round(startPos)}s ได้`);
+              }
+
+              const chunkData = await ffmpeg.readFile(actualChunk);
+              await writable.write(chunkData);
+              await ffmpeg.deleteFile(actualChunk);
+
+              startPos += chunkDur;
+              chunkIndex++;
+              if (totalTrimDuration > 0) {
+                setProcessingProgress((startPos - currentStart) / totalTrimDuration);
+              }
+            }
+          }
+
           await writable.close();
+          if (isLocalFile) await ffmpeg.unmount('/work');
+          else await ffmpeg.deleteFile(inputFilename);
+
           setProcessingMessage(`บันทึกไฟล์ลง SSD สำเร็จ: ${fileHandle.name}`);
+          setProcessingProgress(1.0);
+          setIsProcessingComplete(true);
         } else {
+          // Fallback when showSaveFilePicker is not available
+          const outName = `output_temp.${targetExt}`;
+          setProcessingMessage('กำลังประมวลผลวิดีโอแบบ Direct Stream Copy...');
+          
+          let success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, outName, targetExt);
+          let actualOutName = outName;
+
+          if (!success) {
+            actualOutName = `output_temp.mkv`;
+            success = await runFFmpegChunk(ffmpeg, inputFilename, currentStart, totalTrimDuration > 0 ? totalTrimDuration : 0, actualOutName, 'mkv');
+          }
+
+          if (!success) {
+            if (isLocalFile) await ffmpeg.unmount('/work');
+            throw new Error(`ไม่สามารถตัด/ประมวลผลวิดีโอได้`);
+          }
+
+          const data = await ffmpeg.readFile(actualOutName);
+          await ffmpeg.deleteFile(actualOutName);
+
+          if (isLocalFile) {
+            await ffmpeg.unmount('/work');
+          } else {
+            await ffmpeg.deleteFile(inputFilename);
+          }
+
           setProcessingMessage('ประมวลผลสำเร็จเรียบร้อย!');
           const blob = new Blob([data], { type: `video/${targetExt}` });
           const url = URL.createObjectURL(blob);
           setOutputUrl(url);
-        }
 
-        setProcessingProgress(1.0);
-        setIsProcessingComplete(true);
+          setProcessingProgress(1.0);
+          setIsProcessingComplete(true);
+        }
       }
     } catch (err: any) {
       console.error('FFmpeg processing error:', err);
