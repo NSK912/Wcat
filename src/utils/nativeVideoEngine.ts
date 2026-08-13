@@ -362,6 +362,84 @@ function patchSegmentInfo(headerBuf: Uint8Array, totalDurationMs: number): Uint8
 }
 
 /**
+ * Formats duration in milliseconds into MKV Tag DURATION string matched to target length
+ */
+function formatMkvDurationTagByLength(durationMs: number, targetLen: number): string {
+  const totalSec = Math.max(0, durationMs / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = Math.floor(totalSec % 60);
+  const millis = Math.floor(durationMs % 1000);
+
+  const hh = String(hours).padStart(2, '0');
+  const mm = String(minutes).padStart(2, '0');
+  const ss = String(seconds).padStart(2, '0');
+
+  if (targetLen <= 8) {
+    return `${hh}:${mm}:${ss}`.slice(0, targetLen);
+  }
+
+  const fractionLen = targetLen - 9; // e.g. 18 - 9 = 9 digits
+  const msPadded = String(millis).padStart(3, '0');
+  const fractionStr = (msPadded + '000000000').slice(0, Math.max(1, fractionLen));
+
+  const result = `${hh}:${mm}:${ss}.${fractionStr}`;
+  if (result.length > targetLen) {
+    return result.slice(0, targetLen);
+  }
+  return result.padEnd(targetLen, '0');
+}
+
+/**
+ * Patches DURATION tags inside Matroska Tags element (0x1254C367)
+ * So media players like VLC read the full combined duration in Media Info / Metadata
+ */
+function patchTagsDuration(headerBuf: Uint8Array, totalDurationMs: number): Uint8Array {
+  const buf = new Uint8Array(headerBuf);
+
+  let pos = 0;
+  while (pos < buf.length - 12) {
+    // Check for "DURATION" or "duration" ASCII
+    let isDurationMatch = false;
+    if (
+      (buf[pos] === 0x44 || buf[pos] === 0x64) && // D or d
+      (buf[pos + 1] === 0x55 || buf[pos + 1] === 0x75) && // U or u
+      (buf[pos + 2] === 0x52 || buf[pos + 2] === 0x72) && // R or r
+      (buf[pos + 3] === 0x41 || buf[pos + 3] === 0x61) && // A or a
+      (buf[pos + 4] === 0x54 || buf[pos + 4] === 0x74) && // T or t
+      (buf[pos + 5] === 0x49 || buf[pos + 5] === 0x69) && // I or i
+      (buf[pos + 6] === 0x4F || buf[pos + 6] === 0x6F) && // O or o
+      (buf[pos + 7] === 0x4E || buf[pos + 7] === 0x6E)    // N or n
+    ) {
+      isDurationMatch = true;
+    }
+
+    if (isDurationMatch) {
+      // Scan forward within 64 bytes for TagString ID (0x44 0x87)
+      for (let sPos = pos; sPos < Math.min(buf.length - 4, pos + 64); sPos++) {
+        if (buf[sPos] === 0x44 && buf[sPos + 1] === 0x87) {
+          const sizeVint = parseVint(buf, sPos + 2);
+          if (sizeVint && sizeVint.value > 0) {
+            const strValOffset = sPos + 2 + sizeVint.length;
+            const strValLen = sizeVint.value;
+            if (strValOffset + strValLen <= buf.length) {
+              const formattedTag = formatMkvDurationTagByLength(totalDurationMs, strValLen);
+              const encoder = new TextEncoder();
+              const tagBytes = encoder.encode(formattedTag);
+              buf.set(tagBytes, strValOffset);
+            }
+          }
+          break;
+        }
+      }
+    }
+    pos++;
+  }
+
+  return buf;
+}
+
+/**
  * Neutralizes Cues (0x1C53BB6B) and SeekHead (0x114D9B74) in Header
  * Replaces them with valid EBML Void elements (0xEC) of matching length.
  * Preserves Tags (0x1254C367) so Media Information / Metadata is retained!
@@ -875,6 +953,7 @@ export async function processNativeConcatStream(
       let patchedHeaderBuf = patchSegmentHeader(origHeaderBuf);
       if (totalDurationMs > 0) {
         patchedHeaderBuf = patchSegmentInfo(patchedHeaderBuf, totalDurationMs);
+        patchedHeaderBuf = patchTagsDuration(patchedHeaderBuf, totalDurationMs);
       }
       patchedHeaderBuf = neutralizeEbmlElementsInHeader(patchedHeaderBuf);
 
