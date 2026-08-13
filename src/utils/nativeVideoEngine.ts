@@ -362,8 +362,9 @@ function patchSegmentInfo(headerBuf: Uint8Array, totalDurationMs: number): Uint8
 }
 
 /**
- * Neutralizes Cues (0x1C53BB6B), SeekHead (0x114D9B74), and Tags (0x1254C367) in Header
- * Replaces them with valid EBML Void elements (0xEC) of matching length
+ * Neutralizes Cues (0x1C53BB6B) and SeekHead (0x114D9B74) in Header
+ * Replaces them with valid EBML Void elements (0xEC) of matching length.
+ * Preserves Tags (0x1254C367) so Media Information / Metadata is retained!
  */
 function neutralizeEbmlElementsInHeader(headerBuf: Uint8Array): Uint8Array {
   const buf = new Uint8Array(headerBuf);
@@ -372,9 +373,8 @@ function neutralizeEbmlElementsInHeader(headerBuf: Uint8Array): Uint8Array {
   while (pos < buf.length - 8) {
     const isCues = buf[pos] === 0x1C && buf[pos + 1] === 0x53 && buf[pos + 2] === 0xBB && buf[pos + 3] === 0x6B;
     const isSeekHead = buf[pos] === 0x11 && buf[pos + 1] === 0x4D && buf[pos + 2] === 0x9B && buf[pos + 3] === 0x74;
-    const isTags = buf[pos] === 0x12 && buf[pos + 1] === 0x54 && buf[pos + 2] === 0xC3 && buf[pos + 3] === 0x67;
 
-    if (isCues || isSeekHead || isTags) {
+    if (isCues || isSeekHead) {
       const sizeVint = parseVint(buf, pos + 4);
       if (sizeVint && sizeVint.value >= 0) {
         const totalElemLen = 4 + sizeVint.length + sizeVint.value;
@@ -657,6 +657,23 @@ export function buildSeekHeadElement(seeks: { id: number[]; pos: number }[]): Ui
 }
 
 /**
+ * Helper to find element ID offset in header buffer
+ */
+function findElemOffsetInBuf(buf: Uint8Array, idBytes: number[], startPos: number = 0): number {
+  for (let p = startPos; p <= buf.length - idBytes.length; p++) {
+    let match = true;
+    for (let k = 0; k < idBytes.length; k++) {
+      if (buf[p + k] !== idBytes[k]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return p;
+  }
+  return -1;
+}
+
+/**
  * Checks if a Cluster payload contains a Video Keyframe (SimpleBlock with bit 0x80 set or BlockGroup)
  */
 function clusterHasKeyframe(inspectBuf: Uint8Array): boolean {
@@ -734,6 +751,11 @@ export async function processNativeConcatStream(
     let seekHeadLen = 0;
     let segmentSizeFileOffset = -1;
 
+    let infoPosInSegment = -1;
+    let tracksPosInSegment = -1;
+    let tagsPosInSegment = -1;
+    let chaptersPosInSegment = -1;
+
     if (headerLength > 0) {
       const origHeaderBlob = files[0].slice(0, headerLength);
       const origHeaderBuf = new Uint8Array(await origHeaderBlob.arrayBuffer());
@@ -754,6 +776,21 @@ export async function processNativeConcatStream(
           }
           break;
         }
+      }
+
+      // Record offsets of top-level header elements relative to segmentDataStartOffset
+      if (segmentDataStartOffset > 0) {
+        const infoOff = findElemOffsetInBuf(patchedHeaderBuf, [0x15, 0x49, 0xA9, 0x66], segmentDataStartOffset);
+        if (infoOff >= 0) infoPosInSegment = infoOff - segmentDataStartOffset;
+
+        const tracksOff = findElemOffsetInBuf(patchedHeaderBuf, [0x16, 0x54, 0xAE, 0x6B], segmentDataStartOffset);
+        if (tracksOff >= 0) tracksPosInSegment = tracksOff - segmentDataStartOffset;
+
+        const tagsOff = findElemOffsetInBuf(patchedHeaderBuf, [0x12, 0x54, 0xC3, 0x67], segmentDataStartOffset);
+        if (tagsOff >= 0) tagsPosInSegment = tagsOff - segmentDataStartOffset;
+
+        const chapOff = findElemOffsetInBuf(patchedHeaderBuf, [0x10, 0x43, 0xA7, 0x70], segmentDataStartOffset);
+        if (chapOff >= 0) chaptersPosInSegment = chapOff - segmentDataStartOffset;
       }
 
       // Find first Void element in header to place initial SeekHead placeholder
@@ -941,10 +978,15 @@ export async function processNativeConcatStream(
       const cuesPosInSegment = Math.max(0, totalBytesWritten - segmentDataStartOffset);
       const cuesElem = buildCuesElement(cuePoints);
 
-      // Build SeekHead pointing to Cues position
-      const seekHeadElem = buildSeekHeadElement([
-        { id: [0x1C, 0x53, 0xBB, 0x6B], pos: cuesPosInSegment }
-      ]);
+      // Build complete SeekHead pointing to Info, Tracks, Tags, Chapters, and Cues
+      const seekEntries: { id: number[]; pos: number }[] = [];
+      if (infoPosInSegment >= 0) seekEntries.push({ id: [0x15, 0x49, 0xA9, 0x66], pos: infoPosInSegment });
+      if (tracksPosInSegment >= 0) seekEntries.push({ id: [0x16, 0x54, 0xAE, 0x6B], pos: tracksPosInSegment });
+      if (tagsPosInSegment >= 0) seekEntries.push({ id: [0x12, 0x54, 0xC3, 0x67], pos: tagsPosInSegment });
+      if (chaptersPosInSegment >= 0) seekEntries.push({ id: [0x10, 0x43, 0xA7, 0x70], pos: chaptersPosInSegment });
+      seekEntries.push({ id: [0x1C, 0x53, 0xBB, 0x6B], pos: cuesPosInSegment });
+
+      const seekHeadElem = buildSeekHeadElement(seekEntries);
 
       // Write Tail SeekHead + Cues Element at end of file
       await writeChunkZeroCopy(new Blob([seekHeadElem, cuesElem]), writable);
