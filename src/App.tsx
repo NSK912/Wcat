@@ -336,10 +336,12 @@ export default function App() {
 
     // 1. Prompt user to choose destination folder & file name before starting export/remux
     let fileHandle: any = null;
+    const detectedExt = (videoName ? videoName.split('.').pop()?.toLowerCase() : 'mkv') || 'mkv';
+    const sourceExt = ['mkv', 'mp4', 'webm', 'ts', 'mov', 'avi'].includes(detectedExt) ? detectedExt : 'mkv';
+
     const defaultOutputName = selectedFiles.length > 1 
-      ? 'merged_output.ts' 
-      : `trimmed_${videoName ? videoName.split('.')[0] : 'video'}.ts`;
-    const outputExt = defaultOutputName.split('.').pop() || 'ts';
+      ? `merged_output.${sourceExt}` 
+      : `trimmed_${videoName ? videoName.split('.')[0] : 'video'}.${sourceExt}`;
 
     if ('showSaveFilePicker' in window) {
       try {
@@ -347,10 +349,16 @@ export default function App() {
           suggestedName: defaultOutputName,
           types: [
             {
-              description: 'Video File',
-              accept: {
-                'video/mp2t': ['.ts'],
-              },
+              description: 'Matroska Video (.mkv)',
+              accept: { 'video/x-matroska': ['.mkv'] },
+            },
+            {
+              description: 'MP4 Video (.mp4)',
+              accept: { 'video/mp4': ['.mp4'] },
+            },
+            {
+              description: 'MPEG-TS Video (.ts)',
+              accept: { 'video/mp2t': ['.ts'] },
             },
           ],
         });
