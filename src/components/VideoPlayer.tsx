@@ -1,6 +1,6 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { EditSettings } from '../types';
-import { Play, Pause, RotateCcw, Volume2, VolumeX, Maximize2 } from 'lucide-react';
+import { Play, Pause, StepForward, StepBack, Cpu, Layers } from 'lucide-react';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
@@ -28,71 +28,268 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   selectedFile,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animFrameIdRef = useRef<number | null>(null);
+  const isSeekingRef = useRef<boolean>(false);
 
-  useEffect(() => {
-    if (videoRef.current) {
-      if (isPlaying) {
-        videoRef.current.play().catch(() => {});
-      } else {
-        videoRef.current.pause();
-      }
-    }
-  }, [isPlaying]);
+  const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
+    width: 1280,
+    height: 720,
+  });
+  const [fps, setFps] = useState<number>(30);
+  const fpsCountRef = useRef<number>(0);
+  const lastFpsTimeRef = useRef<number>(performance.now());
 
-  useEffect(() => {
-    if (videoRef.current && Math.abs(videoRef.current.currentTime - currentTime) > 0.3) {
-      videoRef.current.currentTime = currentTime;
-    }
-  }, [currentTime]);
+  // ฟังก์ชันวาดเฟรมปัจจุบันลงบน Canvas ในระดับพิกเซล
+  const drawFrameToCanvas = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!canvas || !video) return;
 
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = settings.speed;
-      videoRef.current.volume = settings.muteAudio ? 0 : settings.volume;
-    }
-  }, [settings.speed, settings.volume, settings.muteAudio]);
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) return;
 
-  // Compute CSS filter string for live preview
-  const getCssFilter = () => {
-    if (settings.brightness === 1.0 && settings.contrast === 1.0 && settings.filter === 'none') {
-      return undefined;
+    const vw = video.videoWidth || 1280;
+    const vh = video.videoHeight || 720;
+
+    if (canvas.width !== vw || canvas.height !== vh) {
+      canvas.width = vw;
+      canvas.height = vh;
     }
-    let f = `brightness(${settings.brightness}) contrast(${settings.contrast})`;
+
+    ctx.save();
+    ctx.clearRect(0, 0, vw, vh);
+
+    // เลื่อนแกนไปกึ่งกลางสำหรับการแปลงภาพ (Transformations)
+    ctx.translate(vw / 2, vh / 2);
+
+    // การหมุน (Rotation)
+    if (settings.rotation !== 0) {
+      ctx.rotate((settings.rotation * Math.PI) / 180);
+    }
+
+    // การกลับด้านภาพ (Flip Horizontal / Vertical)
+    const scaleX = settings.flipH ? -1 : 1;
+    const scaleY = settings.flipV ? -1 : 1;
+    if (scaleX !== 1 || scaleY !== 1) {
+      ctx.scale(scaleX, scaleY);
+    }
+
+    // การปรับสีและฟิลเตอร์ (Color & Effects Filters)
+    let filterStr = `brightness(${settings.brightness}) contrast(${settings.contrast})`;
     switch (settings.filter) {
       case 'grayscale':
-        f += ' grayscale(100%)';
+        filterStr += ' grayscale(100%)';
         break;
       case 'sepia':
-        f += ' sepia(100%)';
+        filterStr += ' sepia(100%)';
         break;
       case 'negative':
-        f += ' invert(100%)';
+        filterStr += ' invert(100%)';
         break;
       case 'blur':
-        f += ' blur(3px)';
+        filterStr += ' blur(3px)';
         break;
       case 'vignette':
-        f += ' contrast(120%) brightness(90%)';
+        filterStr += ' contrast(120%) brightness(90%)';
         break;
       default:
         break;
     }
-    return f;
-  };
+    ctx.filter = filterStr;
 
-  // Compute transform
-  const getTransform = () => {
-    if (!settings.rotation && !settings.flipH && !settings.flipV) {
-      return undefined;
+    // วาดเฟรมจริงจาก Video เข้าสู่ Canvas พิกเซลต่อพิกเซล
+    if (video.readyState >= 1) {
+      try {
+        ctx.drawImage(video, -vw / 2, -vh / 2, vw, vh);
+      } catch (err) {
+        console.warn('Canvas draw error:', err);
+      }
     }
-    const transforms = [];
-    if (settings.rotation) transforms.push(`rotate(${settings.rotation}deg)`);
-    if (settings.flipH) transforms.push('scaleX(-1)');
-    if (settings.flipV) transforms.push('scaleY(-1)');
-    return transforms.join(' ');
+
+    // ล้าง filter ก่อนวาดลายน้ำ
+    ctx.filter = 'none';
+
+    // วาดลายน้ำลงบน Canvas โดยตรง (Direct Canvas Watermark)
+    if (settings.watermarkText) {
+      ctx.restore();
+      ctx.save();
+      ctx.fillStyle = settings.watermarkColor || '#ffffff';
+      ctx.font = `bold ${settings.watermarkSize || 24}px sans-serif`;
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 6;
+
+      const text = settings.watermarkText;
+      const metrics = ctx.measureText(text);
+      const padding = 20;
+
+      let wx = padding;
+      let wy = padding + (settings.watermarkSize || 24);
+
+      switch (settings.watermarkPosition) {
+        case 'top-left':
+          wx = padding;
+          wy = padding + (settings.watermarkSize || 24);
+          ctx.textAlign = 'left';
+          break;
+        case 'top-right':
+          wx = vw - padding;
+          wy = padding + (settings.watermarkSize || 24);
+          ctx.textAlign = 'right';
+          break;
+        case 'bottom-left':
+          wx = padding;
+          wy = vh - padding;
+          ctx.textAlign = 'left';
+          break;
+        case 'bottom-right':
+          wx = vw - padding;
+          wy = vh - padding;
+          ctx.textAlign = 'right';
+          break;
+        case 'center':
+        default:
+          wx = vw / 2;
+          wy = vh / 2;
+          ctx.textAlign = 'center';
+          break;
+      }
+
+      ctx.fillText(text, wx, wy);
+    }
+
+    ctx.restore();
+
+    // คำนวณ FPS
+    fpsCountRef.current++;
+    const now = performance.now();
+    if (now - lastFpsTimeRef.current >= 1000) {
+      setFps(Math.round((fpsCountRef.current * 1000) / (now - lastFpsTimeRef.current)));
+      fpsCountRef.current = 0;
+      lastFpsTimeRef.current = now;
+    }
+  }, [
+    settings.brightness,
+    settings.contrast,
+    settings.filter,
+    settings.rotation,
+    settings.flipH,
+    settings.flipV,
+    settings.watermarkText,
+    settings.watermarkPosition,
+    settings.watermarkColor,
+    settings.watermarkSize,
+  ]);
+
+  // RequestAnimationFrame Render Loop ขณะเล่นวิดีโอ
+  useEffect(() => {
+    let isActive = true;
+
+    const loop = () => {
+      if (!isActive) return;
+      if (videoRef.current && !videoRef.current.paused && !videoRef.current.ended) {
+        drawFrameToCanvas();
+        onTimeUpdate(videoRef.current.currentTime);
+      }
+      animFrameIdRef.current = requestAnimationFrame(loop);
+    };
+
+    if (isPlaying) {
+      animFrameIdRef.current = requestAnimationFrame(loop);
+    } else {
+      if (animFrameIdRef.current) {
+        cancelAnimationFrame(animFrameIdRef.current);
+        animFrameIdRef.current = null;
+      }
+      // วาดเฟรมหยุดนิ่ง
+      drawFrameToCanvas();
+    }
+
+    return () => {
+      isActive = false;
+      if (animFrameIdRef.current) {
+        cancelAnimationFrame(animFrameIdRef.current);
+        animFrameIdRef.current = null;
+      }
+    };
+  }, [isPlaying, drawFrameToCanvas, onTimeUpdate]);
+
+  // วาดเฟรมใหม่ทุกครั้งที่มีการเปลี่ยน Settings (Filters / Transforms)
+  useEffect(() => {
+    drawFrameToCanvas();
+  }, [drawFrameToCanvas]);
+
+  // จัดการการเล่น/หยุดของ Video Element
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (isPlaying) {
+      video.play().catch((err) => {
+        console.warn('Autoplay prevented or playback issue:', err);
+      });
+    } else {
+      video.pause();
+    }
+  }, [isPlaying]);
+
+  // ซิงค์ตำแหน่งเวลาจาก Timeline
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || isSeekingRef.current) return;
+
+    if (Math.abs(video.currentTime - currentTime) > 0.2) {
+      video.currentTime = currentTime;
+      drawFrameToCanvas();
+    }
+  }, [currentTime, drawFrameToCanvas]);
+
+  // ซิงค์ Speed และ Volume
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = settings.speed || 1.0;
+    video.volume = settings.muteAudio ? 0 : settings.volume;
+    video.muted = !!settings.muteAudio;
+  }, [settings.speed, settings.volume, settings.muteAudio]);
+
+  const handleLoadedMetadata = () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const w = video.videoWidth || 1280;
+    const h = video.videoHeight || 720;
+    setDimensions({ width: w, height: h });
+
+    const canvas = canvasRef.current;
+    if (canvas) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+
+    if (video.duration && !isNaN(video.duration) && isFinite(video.duration)) {
+      onDurationLoaded(video.duration);
+    }
+
+    // Force frame display
+    if (video.currentTime === 0) {
+      video.currentTime = 0.001;
+    }
+    setTimeout(() => {
+      drawFrameToCanvas();
+    }, 50);
   };
 
-  // Aspect ratio class container
+  const handleStep = (forward: boolean) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const step = 1 / 30;
+    const target = forward ? video.currentTime + step : video.currentTime - step;
+    video.currentTime = Math.max(0, Math.min(target, video.duration || 1000));
+    onTimeUpdate(video.currentTime);
+    drawFrameToCanvas();
+  };
+
   const getAspectClass = () => {
     switch (settings.cropAspect) {
       case '16:9':
@@ -105,22 +302,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         return 'aspect-[4/3] max-h-[450px]';
       default:
         return 'max-h-[480px] w-auto';
-    }
-  };
-
-  const getWatermarkPositionStyle = (): React.CSSProperties => {
-    switch (settings.watermarkPosition) {
-      case 'top-left':
-        return { top: '16px', left: '16px' };
-      case 'top-right':
-        return { top: '16px', right: '16px' };
-      case 'bottom-left':
-        return { bottom: '16px', left: '16px' };
-      case 'bottom-right':
-        return { bottom: '16px', right: '16px' };
-      case 'center':
-      default:
-        return { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' };
     }
   };
 
@@ -175,48 +356,64 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       ) : (
         <div className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}>
+          {/* Main Direct Pixel Canvas Surface */}
+          <canvas
+            ref={canvasRef}
+            width={dimensions.width}
+            height={dimensions.height}
+            className="max-h-full max-w-full object-contain transition-all duration-150"
+          />
+
+          {/* In-DOM Video Source Stream Decoder (อยู่ใน DOM เสมอ ป้องกัน Offscreen Viewport culling) */}
           <video
             ref={videoRef}
             src={videoUrl}
-            className="max-h-full max-w-full object-contain transition-all duration-200"
-            style={{
-              filter: getCssFilter(),
-              transform: getTransform(),
-            }}
-            onTimeUpdate={() => {
-              if (videoRef.current) {
-                onTimeUpdate(videoRef.current.currentTime);
-              }
-            }}
-            onLoadedMetadata={(e) => {
-              const video = e.target as HTMLVideoElement;
-              const dur = video.duration;
-              onDurationLoaded(dur);
-              // Force mobile browsers to render the first frame
-              if (video.currentTime === 0) {
-                video.currentTime = 0.001;
-              }
-            }}
-            onEnded={() => onTogglePlay()}
             playsInline
             preload="auto"
             crossOrigin="anonymous"
             muted={settings.muteAudio}
+            onLoadedMetadata={handleLoadedMetadata}
+            onLoadedData={() => drawFrameToCanvas()}
+            onSeeked={() => drawFrameToCanvas()}
+            onTimeUpdate={() => {
+              if (videoRef.current) {
+                onTimeUpdate(videoRef.current.currentTime);
+                drawFrameToCanvas();
+              }
+            }}
+            onEnded={() => onTogglePlay()}
+            className="absolute inset-0 w-full h-full opacity-0 pointer-events-none -z-10"
           />
 
-          {/* Live Watermark Overlay */}
-          {settings.watermarkText && (
-            <div
-              className="absolute pointer-events-none font-bold drop-shadow-md px-3 py-1 rounded bg-black/40 backdrop-blur-xs"
-              style={{
-                ...getWatermarkPositionStyle(),
-                color: settings.watermarkColor || '#ffffff',
-                fontSize: `${settings.watermarkSize}px`,
-              }}
-            >
-              {settings.watermarkText}
+          {/* Badge แสดงสถานะ Direct Pixel Canvas Engine */}
+          <div className="absolute top-3 left-3 z-30 flex items-center space-x-2 pointer-events-none">
+            <div className="flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md px-2.5 py-1 rounded-lg border border-cyan-500/30 text-[11px] text-cyan-300 font-mono shadow-md select-none">
+              <Layers className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-slate-200 font-medium">Pixel Canvas Surface</span>
+              <span className="text-slate-500">|</span>
+              <span className={isPlaying ? 'text-emerald-400 font-bold' : 'text-slate-400'}>{fps} FPS</span>
+              <span className="text-slate-500">|</span>
+              <span className="text-slate-400">{dimensions.width}x{dimensions.height}</span>
             </div>
-          )}
+          </div>
+
+          {/* Quick Frame Step Controls (มุมขวาบน) */}
+          <div className="absolute top-3 right-3 z-30 flex items-center space-x-1 bg-slate-900/80 backdrop-blur-md p-1 rounded-lg border border-slate-800 text-slate-300">
+            <button
+              onClick={() => handleStep(false)}
+              title="Step 1 Frame Back"
+              className="p-1 hover:bg-white/10 rounded transition active:scale-95 text-xs flex items-center"
+            >
+              <StepBack className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => handleStep(true)}
+              title="Step 1 Frame Forward"
+              className="p-1 hover:bg-white/10 rounded transition active:scale-95 text-xs flex items-center"
+            >
+              <StepForward className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
           {/* Floating play/pause overlay button on click */}
           <div
@@ -230,12 +427,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               }
               onTogglePlay();
             }}
-            className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group ${
+            className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group z-20 ${
               isPlaying ? 'opacity-0 hover:opacity-100 bg-black/20' : 'opacity-100 bg-black/30'
             }`}
           >
-            <div className="h-9 w-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-600/30 border border-white/10 transform group-hover:scale-110 transition">
-              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+            <div className="h-10 w-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-lg shadow-indigo-600/40 border border-white/20 transform group-hover:scale-110 transition">
+              {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
             </div>
           </div>
         </div>
