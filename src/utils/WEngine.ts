@@ -60,7 +60,20 @@ function createMediabunnyTarget(writable: FileSystemWritableFileStream | null): 
   const customWritable = new WritableStream<StreamTargetChunk>({
     async write(chunk) {
       if (writable && typeof writable.write === 'function') {
-        await writable.write(chunk);
+        try {
+          await writable.write(chunk);
+        } catch (err) {
+          // Direct fallback if chunk structure isn't directly unwrapped
+          try {
+            if (typeof (writable as any).seek === 'function' && typeof chunk.position === 'number') {
+              await (writable as any).seek(chunk.position);
+            }
+            await writable.write(chunk.data);
+          } catch (innerErr) {
+            console.error('Writable write failure:', innerErr);
+            throw innerErr;
+          }
+        }
       }
     },
     async close() {
@@ -573,9 +586,16 @@ async function processMediabunnyTrimStream(
   startTime: number,
   endTime: number,
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
+    onProgress({
+      percentage: 2,
+      statusText: 'กำลังเตรียม Input และสร้าง Pipeline การตัดต่อ...',
+      speedMBs: 0,
+      log: `[INIT] Starting Trim: ${file.name}, Range: ${startTime.toFixed(2)}s -> ${endTime.toFixed(2)}s`
+    });
+
     const input = new Input({
       source: new BlobSource(file),
       formats: ALL_FORMATS,
@@ -615,6 +635,7 @@ async function processMediabunnyTrimStream(
         percentage: Math.min(99, Math.round(prog * 100)),
         statusText: `กำลังตัดวิดีโอ (${Math.round(prog * 100)}%)...`,
         speedMBs,
+        log: `[TRIM PROGRESS] ${(prog * 100).toFixed(1)}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
       });
     };
 
@@ -628,10 +649,21 @@ async function processMediabunnyTrimStream(
       totalWritten = target.buffer.byteLength;
     }
 
-    onProgress({ percentage: 100, statusText: 'ตัดไฟล์วิดีโอสำเร็จเรียบร้อย!', speedMBs: 0 });
+    onProgress({
+      percentage: 100,
+      statusText: 'ตัดไฟล์วิดีโอสำเร็จเรียบร้อย!',
+      speedMBs: 0,
+      log: `[DONE] Trim finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+    });
     return { success: true, totalBytesWritten: totalWritten, blobUrl };
-  } catch (err) {
+  } catch (err: any) {
     console.error('Mediabunny Trim Error:', err);
+    onProgress({
+      percentage: 0,
+      statusText: `เกิดข้อผิดพลาด: ${err?.message || err}`,
+      speedMBs: 0,
+      log: `[ERROR] Trim failed: ${err?.message || err}\n${err?.stack || ''}`
+    });
     throw err;
   }
 }
@@ -642,9 +674,16 @@ async function processMediabunnyTrimStream(
 async function processMediabunnyRemuxStream(
   file: File,
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
+    onProgress({
+      percentage: 2,
+      statusText: 'กำลังเตรียม Input และสร้าง Pipeline การรีมิกซ์...',
+      speedMBs: 0,
+      log: `[INIT] Starting Remux/FastStart: ${file.name}`
+    });
+
     const input = new Input({
       source: new BlobSource(file),
       formats: ALL_FORMATS,
@@ -680,6 +719,7 @@ async function processMediabunnyRemuxStream(
         percentage: Math.min(99, Math.round(prog * 100)),
         statusText: `กำลังรีมิกซ์และซ่อมแซมโครงสร้างไฟล์ (${Math.round(prog * 100)}%)...`,
         speedMBs,
+        log: `[REMUX PROGRESS] ${(prog * 100).toFixed(1)}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
       });
     };
 
@@ -693,10 +733,21 @@ async function processMediabunnyRemuxStream(
       totalWritten = target.buffer.byteLength;
     }
 
-    onProgress({ percentage: 100, statusText: 'รีมิกซ์โครงสร้างไฟล์สำเร็จเรียบร้อย!', speedMBs: 0 });
+    onProgress({
+      percentage: 100,
+      statusText: 'รีมิกซ์โครงสร้างไฟล์สำเร็จเรียบร้อย!',
+      speedMBs: 0,
+      log: `[DONE] Remux finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+    });
     return { success: true, totalBytesWritten: totalWritten, blobUrl };
-  } catch (err) {
+  } catch (err: any) {
     console.error('Mediabunny Remux Error:', err);
+    onProgress({
+      percentage: 0,
+      statusText: `เกิดข้อผิดพลาด: ${err?.message || err}`,
+      speedMBs: 0,
+      log: `[ERROR] Remux failed: ${err?.message || err}\n${err?.stack || ''}`
+    });
     throw err;
   }
 }
@@ -707,10 +758,17 @@ async function processMediabunnyRemuxStream(
 async function processMediabunnyConcatStream(
   files: File[],
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
     if (!files.length) return { success: false };
+
+    onProgress({
+      percentage: 2,
+      statusText: `กำลังเตรียมและตรวจสอบโครงสร้าง ${files.length} ไฟล์...`,
+      speedMBs: 0,
+      log: `[INIT] Starting multi-file concatenation for ${files.length} files.`
+    });
 
     const firstFile = files[0];
     const input0 = new Input({ source: new BlobSource(firstFile), formats: ALL_FORMATS });
@@ -723,24 +781,54 @@ async function processMediabunnyConcatStream(
 
     let vSource: EncodedVideoPacketSource | null = null;
     let aSource: EncodedAudioPacketSource | null = null;
+    let vDecConfig: any = null;
+    let aDecConfig: any = null;
 
     if (vTracks.length > 0) {
       const vCodec = await vTracks[0].getCodec();
       if (vCodec) {
+        vDecConfig = await vTracks[0].getDecoderConfig();
         vSource = new EncodedVideoPacketSource(vCodec);
-        output.addVideoTrack(vSource);
+        output.addVideoTrack(vSource, {
+          decoderConfig: vDecConfig ?? undefined,
+        });
+        onProgress({
+          percentage: 4,
+          statusText: `พบวิดีโอแทร็ก: ${vCodec}`,
+          speedMBs: 0,
+          log: `[TRACK] Video track added: codec=${vCodec}, width=${vDecConfig?.codedWidth || 'auto'}, height=${vDecConfig?.codedHeight || 'auto'}`
+        });
       }
     }
 
     if (aTracks.length > 0) {
       const aCodec = await aTracks[0].getCodec();
       if (aCodec) {
+        aDecConfig = await aTracks[0].getDecoderConfig();
         aSource = new EncodedAudioPacketSource(aCodec);
-        output.addAudioTrack(aSource);
+        output.addAudioTrack(aSource, {
+          decoderConfig: aDecConfig ?? undefined,
+        });
+        onProgress({
+          percentage: 6,
+          statusText: `พบออดิโอแทร็ก: ${aCodec}`,
+          speedMBs: 0,
+          log: `[TRACK] Audio track added: codec=${aCodec}, channels=${aDecConfig?.numberOfChannels || 'auto'}, rate=${aDecConfig?.sampleRate || 'auto'}`
+        });
       }
     }
 
+    if (!vSource && !aSource) {
+      throw new Error(`ไม่พบแทร็กวิดีโอหรือเสียงที่รองรับในไฟล์ ${firstFile.name}`);
+    }
+
     await output.start();
+    onProgress({
+      percentage: 8,
+      statusText: `เริ่มสตรีมและรวมวิดีโอแบบ Lossless...`,
+      speedMBs: 0,
+      log: `[STREAM] Output container started successfully.`
+    });
 
     let timeOffset = 0;
     let totalWritten = 0;
@@ -753,18 +841,25 @@ async function processMediabunnyConcatStream(
 
     for (let fIdx = 0; fIdx < files.length; fIdx++) {
       const file = files[fIdx];
-      const input = fIdx === 0 ? input0 : new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+      onProgress({
+        percentage: Math.round(((fIdx) / files.length) * 90) + 8,
+        statusText: `กำลังสตรีมไฟล์ ${fIdx + 1}/${files.length} (${file.name})...`,
+        speedMBs: 0,
+        log: `[PROCESS] Processing input file ${fIdx + 1}/${files.length}: ${file.name} (size: ${(file.size / (1024 * 1024)).toFixed(2)} MB, base offset: ${timeOffset.toFixed(3)}s)`
+      });
 
+      const input = fIdx === 0 ? input0 : new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
       const curVTracks = await input.getVideoTracks();
       const curATracks = await input.getAudioTracks();
 
-      let fileDuration = await input.computeDuration();
-      if (!fileDuration || fileDuration <= 0) {
-        fileDuration = (await input.getDurationFromMetadata()) || 5;
-      }
+      let fileMaxTime = 0;
+      let vPktCount = 0;
+      let aPktCount = 0;
 
       if (vSource && curVTracks.length > 0) {
+        const curVDecConfig = await curVTracks[0].getDecoderConfig();
         const sink = new EncodedPacketSink(curVTracks[0]);
+        let isFirstInTrack = true;
         for await (const pkt of sink.packets()) {
           const shifted = new EncodedPacket(
             pkt.data,
@@ -775,12 +870,22 @@ async function processMediabunnyConcatStream(
             pkt.byteLength,
             pkt.sideData
           );
-          await vSource.add(shifted);
+          if (isFirstInTrack && (curVDecConfig || vDecConfig)) {
+            await vSource.add(shifted, { decoderConfig: (curVDecConfig || vDecConfig) });
+            isFirstInTrack = false;
+          } else {
+            await vSource.add(shifted);
+          }
+          vPktCount++;
+          const pktEnd = pkt.timestamp + (pkt.duration || 0);
+          if (pktEnd > fileMaxTime) fileMaxTime = pktEnd;
         }
       }
 
       if (aSource && curATracks.length > 0) {
+        const curADecConfig = await curATracks[0].getDecoderConfig();
         const sink = new EncodedPacketSink(curATracks[0]);
+        let isFirstInTrack = true;
         for await (const pkt of sink.packets()) {
           const shifted = new EncodedPacket(
             pkt.data,
@@ -791,11 +896,17 @@ async function processMediabunnyConcatStream(
             pkt.byteLength,
             pkt.sideData
           );
-          await aSource.add(shifted);
+          if (isFirstInTrack && (curADecConfig || aDecConfig)) {
+            await aSource.add(shifted, { decoderConfig: (curADecConfig || aDecConfig) });
+            isFirstInTrack = false;
+          } else {
+            await aSource.add(shifted);
+          }
+          aPktCount++;
+          const pktEnd = pkt.timestamp + (pkt.duration || 0);
+          if (pktEnd > fileMaxTime) fileMaxTime = pktEnd;
         }
       }
-
-      timeOffset += fileDuration;
 
       const now = performance.now();
       const elapsed = (now - lastTime) / 1000;
@@ -806,12 +917,14 @@ async function processMediabunnyConcatStream(
         lastBytes = totalWritten;
       }
 
-      const prog = Math.round(((fIdx + 1) / files.length) * 98);
       onProgress({
-        percentage: prog,
-        statusText: `กำลังรวมไฟล์ที่ ${fIdx + 1}/${files.length} (${prog}%)...`,
+        percentage: Math.round(((fIdx + 1) / files.length) * 90) + 8,
+        statusText: `รวมไฟล์ที่ ${fIdx + 1}/${files.length} เสร็จ (${file.name})`,
         speedMBs,
+        log: `[DONE FILE] ${file.name}: ${vPktCount} video packets, ${aPktCount} audio packets, duration: ${fileMaxTime.toFixed(3)}s`
       });
+
+      timeOffset += fileMaxTime > 0 ? fileMaxTime : 5;
     }
 
     if (vSource) vSource.close();
@@ -826,10 +939,22 @@ async function processMediabunnyConcatStream(
       totalWritten = target.buffer.byteLength;
     }
 
-    onProgress({ percentage: 100, statusText: 'รวมไฟล์วิดีโอสำเร็จเรียบร้อย!', speedMBs: 0 });
-    return { success: true, totalBytesWritten: totalWritten, blobUrl };
-  } catch (err) {
+    onProgress({
+      percentage: 100,
+      statusText: 'รวมไฟล์วิดีโอสำเร็จเรียบร้อย!',
+      speedMBs: 0,
+      log: `[COMPLETE] Concat finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB, total duration: ${timeOffset.toFixed(3)}s`
+    });
+
+    return { success: true, totalBytesWritten: totalWritten || 1, blobUrl };
+  } catch (err: any) {
     console.error('Mediabunny Concat Error:', err);
+    onProgress({
+      percentage: 0,
+      statusText: `เกิดข้อผิดพลาด: ${err?.message || err}`,
+      speedMBs: 0,
+      log: `[ERROR] Concat failed: ${err?.message || err}\n${err?.stack || ''}`
+    });
     throw err;
   }
 }
@@ -840,13 +965,19 @@ async function processMediabunnyConcatStream(
 export async function processNativeConcatStream(
   files: File[],
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
     if (!files.length) return { success: false };
 
     // Detect format of first file
     const firstFormat = await detectMediaFormat(files[0]);
+    onProgress({
+      percentage: 1,
+      statusText: `ตรวจพบฟอร์แมตไฟล์: ${firstFormat.toUpperCase()}`,
+      speedMBs: 0,
+      log: `[DETECT] Detected input container format: ${firstFormat.toUpperCase()}`
+    });
 
     if (firstFormat === 'mp4') {
       return await processMediabunnyConcatStream(files, writable, onProgress);
@@ -857,6 +988,12 @@ export async function processNativeConcatStream(
       return await processMediabunnyConcatStream(files, writable, onProgress);
     } catch (mbErr) {
       console.warn("Mediabunny concat failed, falling back to Native EBML Engine:", mbErr);
+      onProgress({
+        percentage: 5,
+        statusText: 'สลับไปยัง Native EBML Concatenation Engine...',
+        speedMBs: 0,
+        log: `[FALLBACK] Mediabunny stream error, switching to Native EBML parser: ${mbErr}`
+      });
     }
     
     onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์ (Standard EBML)...', speedMBs: 0 });
@@ -1040,7 +1177,7 @@ export async function processNativeTrimStream(
   startTime: number,
   endTime: number,
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
      const format = await detectMediaFormat(file);
@@ -1216,7 +1353,7 @@ export async function processNativeTrimStream(
 export async function processNativeRemuxStream(
   file: File,
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
      const format = await detectMediaFormat(file);
