@@ -208,6 +208,7 @@ interface FileMeta {
   segmentHeaderLen: number;
   fileDurationMs: number;
   timecodeScale: number;
+  videoTrackNum: number;
 }
 
 const ID_EBML = '1a45dfa3';
@@ -232,7 +233,8 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
     segmentOffset: 0,
     segmentHeaderLen: 0,
     fileDurationMs: 0,
-    timecodeScale: 1000000
+    timecodeScale: 1000000,
+    videoTrackNum: 1 // default
   };
 
   let timecodeScale = 1000000; // default 1ms
@@ -296,6 +298,37 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
       filePos += el.totalHeaderLen + el.size;
     } else if (el.idHex === ID_TRACKS) {
       meta.segmentTracks = await readSlice(file, filePos, el.totalHeaderLen + el.size);
+      
+      // Parse Tracks to find Video Track Number
+      let trackPos = el.totalHeaderLen; // skip Tracks header
+      while (trackPos < meta.segmentTracks.length) {
+          const trackEntryEl = readElementHeader(meta.segmentTracks, trackPos);
+          if (!trackEntryEl) break;
+          if (trackEntryEl.idHex === 'ae') { // TrackEntry
+              let entryPos = trackPos + trackEntryEl.totalHeaderLen;
+              const entryEnd = entryPos + trackEntryEl.size;
+              let currentTrackNum = 1;
+              while (entryPos < entryEnd) {
+                  const propEl = readElementHeader(meta.segmentTracks, entryPos);
+                  if (!propEl) break;
+                  if (propEl.idHex === 'd7') { // TrackNumber
+                      let num = 0;
+                      for (let i = 0; i < propEl.size; i++) {
+                          num = (num * 256) + meta.segmentTracks[entryPos + propEl.totalHeaderLen + i];
+                      }
+                      currentTrackNum = num;
+                  } else if (propEl.idHex === '83') { // TrackType
+                      let tType = meta.segmentTracks[entryPos + propEl.totalHeaderLen];
+                      if (tType === 1) { // 1 = Video
+                          meta.videoTrackNum = currentTrackNum;
+                      }
+                  }
+                  entryPos += propEl.totalHeaderLen + propEl.size;
+              }
+          }
+          trackPos += trackEntryEl.totalHeaderLen + trackEntryEl.size;
+      }
+
       filePos += el.totalHeaderLen + el.size;
     } else if (el.idHex === ID_CLUSTER) {
       // It's a cluster. We read its Timecode.
@@ -604,8 +637,12 @@ export async function processNativeConcatStream(
         try {
             const actualSeekHead = buildSeekHead(cuesOffset);
             await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+
+            const totalSegmentSize = totalBytesWritten - segmentDataOffset;
+            const actualSegmentSize = writeVint(totalSegmentSize, 8);
+            await writable.write({ type: 'write', position: firstMeta.ebmlHeader.length + 4, data: actualSegmentSize });
         } catch (seekErr) {
-            console.warn("SeekHead update failed:", seekErr);
+            console.warn("SeekHead or SegmentSize update failed:", seekErr);
         }
     }
 
@@ -754,6 +791,10 @@ export async function processNativeTrimStream(
          try {
              const actualSeekHead = buildSeekHead(cuesOffset);
              await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+
+             const totalSegmentSize = totalBytesWritten - segmentDataOffset;
+             const actualSegmentSize = writeVint(totalSegmentSize, 8);
+             await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
          } catch (seekErr) {
              console.warn("SeekHead update failed:", seekErr);
          }
@@ -893,6 +934,10 @@ export async function processNativeRemuxStream(
          try {
              const actualSeekHead = buildSeekHead(cuesOffset);
              await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+
+             const totalSegmentSize = totalBytesWritten - segmentDataOffset;
+             const actualSegmentSize = writeVint(totalSegmentSize, 8);
+             await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
          } catch (seekErr) {
              console.warn("SeekHead update failed:", seekErr);
          }
