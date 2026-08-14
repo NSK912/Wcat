@@ -278,26 +278,30 @@ export default function App() {
 
     if ('showSaveFilePicker' in window) {
       try {
+        const types: any[] = [];
+        
+        // Add AV1 as an option, but default to the source format first
+        if (sourceExt === 'webm') {
+            types.push({ description: 'WebM Video (.webm)', accept: { 'video/webm': ['.webm'] } });
+            types.push({ description: 'AV1 Video (.av1 / .mp4)', accept: { 'video/mp4': ['.mp4', '.av1'] } });
+            types.push({ description: 'MP4 Video (.mp4)', accept: { 'video/mp4': ['.mp4'] } });
+            types.push({ description: 'Matroska Video (.mkv)', accept: { 'video/x-matroska': ['.mkv'] } });
+        } else if (sourceExt === 'mkv') {
+            types.push({ description: 'Matroska Video (.mkv)', accept: { 'video/x-matroska': ['.mkv'] } });
+            types.push({ description: 'AV1 Video (.av1 / .mp4)', accept: { 'video/mp4': ['.mp4', '.av1'] } });
+            types.push({ description: 'MP4 Video (.mp4)', accept: { 'video/mp4': ['.mp4'] } });
+            types.push({ description: 'WebM Video (.webm)', accept: { 'video/webm': ['.webm'] } });
+        } else { // Default to MP4 first
+            types.push({ description: 'MP4 Video (.mp4)', accept: { 'video/mp4': ['.mp4'] } });
+            types.push({ description: 'AV1 Video (.av1 / .mp4)', accept: { 'video/mp4': ['.mp4', '.av1'] } });
+            types.push({ description: 'Matroska Video (.mkv)', accept: { 'video/x-matroska': ['.mkv'] } });
+            types.push({ description: 'WebM Video (.webm)', accept: { 'video/webm': ['.webm'] } });
+        }
+        types.push({ description: 'MPEG-TS Video (.ts)', accept: { 'video/mp2t': ['.ts'] } });
+
         fileHandle = await (window as any).showSaveFilePicker({
           suggestedName: defaultOutputName,
-          types: [
-            {
-              description: 'MP4 Video (.mp4)',
-              accept: { 'video/mp4': ['.mp4'] },
-            },
-            {
-              description: 'Matroska Video (.mkv)',
-              accept: { 'video/x-matroska': ['.mkv'] },
-            },
-            {
-              description: 'WebM Video (.webm)',
-              accept: { 'video/webm': ['.webm'] },
-            },
-            {
-              description: 'MPEG-TS Video (.ts)',
-              accept: { 'video/mp2t': ['.ts'] },
-            },
-          ],
+          types: types,
         });
       } catch (err: any) {
         if (err.name === 'AbortError') {
