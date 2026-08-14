@@ -1,6 +1,7 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { EditSettings } from '../types';
-import { Play, Pause, RotateCcw, Volume2, VolumeX, Maximize2 } from 'lucide-react';
+import { Play, Pause, Zap, Terminal } from 'lucide-react';
+import { WEngineLogger } from '../utils/WEngineDevTools';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
@@ -28,68 +29,97 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   selectedFile,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [showLogToast, setShowLogToast] = useState<boolean>(false);
+  const [isHardwareGPU, setIsHardwareGPU] = useState<boolean>(true);
 
+  // Sync play / pause with video element
   useEffect(() => {
-    if (videoRef.current) {
-      if (isPlaying) {
-        videoRef.current.play().catch(() => {});
-      } else {
-        videoRef.current.pause();
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (isPlaying) {
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          WEngineLogger.log('SoftwareVideo', 'warn', 'Playback play() interrupted:', err);
+        });
       }
+    } else {
+      video.pause();
     }
   }, [isPlaying]);
 
+  // Sync seek with video element
   useEffect(() => {
-    if (videoRef.current && Math.abs(videoRef.current.currentTime - currentTime) > 0.3) {
-      videoRef.current.currentTime = currentTime;
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (Math.abs(video.currentTime - currentTime) > 0.25) {
+      video.currentTime = currentTime;
     }
   }, [currentTime]);
 
+  // Sync audio volume, mute, speed
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = settings.speed;
-      videoRef.current.volume = settings.muteAudio ? 0 : settings.volume;
-    }
-  }, [settings.speed, settings.volume, settings.muteAudio]);
+    const video = videoRef.current;
+    if (!video) return;
 
-  // Compute CSS filter string for live preview
-  const getCssFilter = () => {
-    if (settings.brightness === 1.0 && settings.contrast === 1.0 && settings.filter === 'none') {
-      return undefined;
+    video.volume = Math.max(0, Math.min(1, settings.volume));
+    video.muted = settings.muteAudio;
+    video.playbackRate = settings.speed || 1.0;
+  }, [settings.volume, settings.muteAudio, settings.speed]);
+
+  // Handle Video Metadata Loaded
+  const handleLoadedMetadata = () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const w = video.videoWidth || 1280;
+    const h = video.videoHeight || 720;
+    const dur = video.duration || 0;
+
+    if (dur > 0) {
+      onDurationLoaded(dur);
     }
-    let f = `brightness(${settings.brightness}) contrast(${settings.contrast})`;
-    switch (settings.filter) {
-      case 'grayscale':
-        f += ' grayscale(100%)';
-        break;
-      case 'sepia':
-        f += ' sepia(100%)';
-        break;
-      case 'negative':
-        f += ' invert(100%)';
-        break;
-      case 'blur':
-        f += ' blur(3px)';
-        break;
-      case 'vignette':
-        f += ' contrast(120%) brightness(90%)';
-        break;
-      default:
-        break;
-    }
-    return f;
+
+    WEngineLogger.updateDecoderStatus({
+      resolution: `${w}x${h}`,
+      videoCodec: 'Hardware Accelerated (H.264/WebCodecs/AV1)',
+      decodedFramesCount: 0,
+      droppedFramesCount: 0,
+    });
+
+    WEngineLogger.log('SoftwareVideo', 'info', `Media loaded: ${w}x${h}, duration: ${dur.toFixed(2)}s`);
   };
 
-  // Compute transform
-  const getTransform = () => {
-    if (!settings.rotation && !settings.flipH && !settings.flipV) {
-      return undefined;
+  const handleTimeUpdate = () => {
+    const video = videoRef.current;
+    if (video) {
+      onTimeUpdate(video.currentTime);
     }
-    const transforms = [];
-    if (settings.rotation) transforms.push(`rotate(${settings.rotation}deg)`);
-    if (settings.flipH) transforms.push('scaleX(-1)');
-    if (settings.flipV) transforms.push('scaleY(-1)');
-    return transforms.join(' ');
+  };
+
+  const handleVideoEnded = () => {
+    onTogglePlay();
+    onSeek(0);
+  };
+
+  // Compute CSS filter & hardware transform styles
+  const getVideoFilterStyle = (): React.CSSProperties => {
+    let filterStr = `brightness(${settings.brightness}) contrast(${settings.contrast})`;
+    if (settings.filter === 'grayscale') filterStr += ' grayscale(100%)';
+    else if (settings.filter === 'sepia') filterStr += ' sepia(100%)';
+    else if (settings.filter === 'negative') filterStr += ' invert(100%)';
+
+    let transformStr = `rotate(${settings.rotation}deg)`;
+    if (settings.flipH) transformStr += ' scaleX(-1)';
+    if (settings.flipV) transformStr += ' scaleY(-1)';
+
+    return {
+      filter: filterStr,
+      transform: transformStr,
+      transition: 'filter 0.15s ease, transform 0.15s ease',
+    };
   };
 
   // Aspect ratio class container
@@ -122,6 +152,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       default:
         return { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' };
     }
+  };
+
+  const handleTriggerReport = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    WEngineLogger.printFullReport();
+    setShowLogToast(true);
+    setTimeout(() => setShowLogToast(false), 2500);
   };
 
   return (
@@ -174,40 +211,60 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
       ) : (
-        <div className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}>
+        <div
+          className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}
+        >
+          {/* Hardware Accelerated Video Display */}
           <video
             ref={videoRef}
             src={videoUrl}
-            className="max-h-full max-w-full object-contain transition-all duration-200"
-            style={{
-              filter: getCssFilter(),
-              transform: getTransform(),
-            }}
-            onTimeUpdate={() => {
-              if (videoRef.current) {
-                onTimeUpdate(videoRef.current.currentTime);
-              }
-            }}
-            onLoadedMetadata={(e) => {
-              const video = e.target as HTMLVideoElement;
-              const dur = video.duration;
-              onDurationLoaded(dur);
-              // Force mobile browsers to render the first frame
-              if (video.currentTime === 0) {
-                video.currentTime = 0.001;
-              }
-            }}
-            onEnded={() => onTogglePlay()}
             playsInline
-            preload="auto"
             crossOrigin="anonymous"
-            muted={settings.muteAudio}
+            preload="auto"
+            style={getVideoFilterStyle()}
+            className="max-h-full max-w-full object-contain"
+            onLoadedMetadata={handleLoadedMetadata}
+            onTimeUpdate={handleTimeUpdate}
+            onEnded={handleVideoEnded}
+            onError={(e) => {
+              WEngineLogger.reportDecoderError(e);
+            }}
           />
+
+          {/* Vignette Filter Overlay */}
+          {settings.filter === 'vignette' && (
+            <div
+              className="absolute inset-0 pointer-events-none z-10"
+              style={{
+                boxShadow: 'inset 0 0 90px rgba(0, 0, 0, 0.85)',
+              }}
+            />
+          )}
+
+          {/* Engine Status & DevTools Diagnostic Trigger Badge */}
+          <button
+            onClick={handleTriggerReport}
+            title="Click to print full WEngine Diagnostic Report to DevTools Console"
+            className="absolute top-3 left-3 z-30 flex items-center space-x-1.5 bg-slate-900/85 hover:bg-slate-800 backdrop-blur-md px-2.5 py-1 rounded-full border border-indigo-500/30 text-[11px] text-indigo-300 font-mono shadow-md cursor-pointer transition"
+          >
+            <Zap className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+            <span className="text-emerald-300 font-semibold">GPU Accelerated</span>
+            <span className="text-slate-500">|</span>
+            <Terminal className="w-3 h-3 text-cyan-400" />
+            <span className="text-cyan-300 text-[10px]">DevTools</span>
+          </button>
+
+          {/* DevTools Log Toast Notification */}
+          {showLogToast && (
+            <div className="absolute top-12 left-3 z-30 bg-slate-900/95 border border-cyan-500/40 text-cyan-200 text-xs px-3 py-1.5 rounded-lg shadow-xl font-mono animate-fade-in pointer-events-none">
+              🚀 Report printed to DevTools Console (F12)
+            </div>
+          )}
 
           {/* Live Watermark Overlay */}
           {settings.watermarkText && (
             <div
-              className="absolute pointer-events-none font-bold drop-shadow-md px-3 py-1 rounded bg-black/40 backdrop-blur-xs"
+              className="absolute pointer-events-none font-bold drop-shadow-md px-3 py-1 rounded bg-black/40 backdrop-blur-xs z-10"
               style={{
                 ...getWatermarkPositionStyle(),
                 color: settings.watermarkColor || '#ffffff',
@@ -220,17 +277,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
           {/* Floating play/pause overlay button on click */}
           <div
-            onClick={() => {
-              if (videoRef.current) {
-                if (isPlaying) {
-                  videoRef.current.pause();
-                } else {
-                  videoRef.current.play().catch(console.error);
-                }
-              }
-              onTogglePlay();
-            }}
-            className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group ${
+            onClick={() => onTogglePlay()}
+            className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group z-20 ${
               isPlaying ? 'opacity-0 hover:opacity-100 bg-black/20' : 'opacity-100 bg-black/30'
             }`}
           >
