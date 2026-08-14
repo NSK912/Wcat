@@ -108,11 +108,13 @@ export function buildSeekHead(cuesOffset: number): Uint8Array {
 }
 
 function encodeVintSize(value: number): Uint8Array {
+   if (value === -1) return new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
    if (value < 127) return writeVint(value, 1);
    if (value < 16383) return writeVint(value, 2);
    if (value < 2097151) return writeVint(value, 3);
    if (value < 268435455) return writeVint(value, 4);
-   return writeVint(value, 5);
+   if (value < 34359738367) return writeVint(value, 5); // 5 bytes max usually sufficient for JS numbers, but just in case
+   return writeVint(value, 8); // Need larger for very big values, but for safety
 }
 
 function encodeUint(value: number): Uint8Array {
@@ -574,28 +576,35 @@ export async function processNativeConcatStream(
             if (writable) {
                 cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
                 
-                // Read from start of cluster to Timecode value
-                const preTcSize = (cluster.timecodeOffset - cluster.offset);
-                const preTcBuf = await readSlice(file, cluster.offset, preTcSize);
-                await writable.write(preTcBuf);
-                totalBytesWritten += preTcBuf.length;
+                // Encode new Timecode value dynamically to avoid byte overflow
+                const newTcValBuf = encodeUint(newTc);
+                const newTcSizeVint = encodeVintSize(newTcValBuf.length);
+                const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-                // Write new Timecode
-                // ID_TIMECODE is E7. Size is cluster.timecodeValueLength
-                const tcHdr = new Uint8Array([0xE7]);
-                const tcSizeVint = writeVint(cluster.timecodeValueLength, cluster.timecodeLength - cluster.timecodeValueLength - 1);
-                
-                const tcValBuf = new Uint8Array(cluster.timecodeValueLength);
-                let remaining = newTc;
-                for (let k = cluster.timecodeValueLength - 1; k >= 0; k--) {
-                   tcValBuf[k] = remaining & 0xFF;
-                   remaining = Math.floor(remaining / 256);
+                // Calculate the new Cluster Size
+                const sizeDiff = newTcElementLength - cluster.timecodeLength;
+                const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
+
+                // Write patched Cluster Header
+                const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
+                const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
+                await writable.write(clusterId);
+                await writable.write(clusterSizeVint);
+                totalBytesWritten += clusterId.length + clusterSizeVint.length;
+
+                // Write from after cluster header up to timecode offset
+                const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
+                if (preTcSize > 0) {
+                    const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
+                    await writable.write(preTcBuf);
+                    totalBytesWritten += preTcBuf.length;
                 }
 
-                await writable.write(tcHdr);
-                await writable.write(tcSizeVint);
-                await writable.write(tcValBuf);
-                totalBytesWritten += tcHdr.length + tcSizeVint.length + tcValBuf.length;
+                // Write the new Timecode element
+                await writable.write(new Uint8Array([0xE7]));
+                await writable.write(newTcSizeVint);
+                await writable.write(newTcValBuf);
+                totalBytesWritten += 1 + newTcSizeVint.length + newTcValBuf.length;
 
                 // Stream the rest of the cluster
                 const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
@@ -743,24 +752,35 @@ export async function processNativeTrimStream(
 
          if (writable) {
              cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
-             const preTcSize = (cluster.timecodeOffset - cluster.offset);
-             const preTcBuf = await readSlice(file, cluster.offset, preTcSize);
-             await writable.write(preTcBuf);
-             totalBytesWritten += preTcBuf.length;
+             // Encode new Timecode value dynamically to avoid byte overflow
+             const newTcValBuf = encodeUint(newTc);
+             const newTcSizeVint = encodeVintSize(newTcValBuf.length);
+             const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-             const tcHdr = new Uint8Array([0xE7]);
-             const tcSizeVint = writeVint(cluster.timecodeValueLength, cluster.timecodeLength - cluster.timecodeValueLength - 1);
-             const tcValBuf = new Uint8Array(cluster.timecodeValueLength);
-             let remaining = newTc;
-             for (let k = cluster.timecodeValueLength - 1; k >= 0; k--) {
-                tcValBuf[k] = remaining & 0xFF;
-                remaining = Math.floor(remaining / 256);
+             // Calculate the new Cluster Size
+             const sizeDiff = newTcElementLength - cluster.timecodeLength;
+             const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
+
+             // Write patched Cluster Header
+             const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
+             const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
+             await writable.write(clusterId);
+             await writable.write(clusterSizeVint);
+             totalBytesWritten += clusterId.length + clusterSizeVint.length;
+
+             // Write from after cluster header up to timecode offset
+             const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
+             if (preTcSize > 0) {
+                 const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
+                 await writable.write(preTcBuf);
+                 totalBytesWritten += preTcBuf.length;
              }
 
-             await writable.write(tcHdr);
-             await writable.write(tcSizeVint);
-             await writable.write(tcValBuf);
-             totalBytesWritten += tcHdr.length + tcSizeVint.length + tcValBuf.length;
+             // Write the new Timecode element
+             await writable.write(new Uint8Array([0xE7]));
+             await writable.write(newTcSizeVint);
+             await writable.write(newTcValBuf);
+             totalBytesWritten += 1 + newTcSizeVint.length + newTcValBuf.length;
 
              const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
              const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
@@ -886,24 +906,35 @@ export async function processNativeRemuxStream(
 
          if (writable) {
              cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
-             const preTcSize = (cluster.timecodeOffset - cluster.offset);
-             const preTcBuf = await readSlice(file, cluster.offset, preTcSize);
-             await writable.write(preTcBuf);
-             totalBytesWritten += preTcBuf.length;
+             // Encode new Timecode value dynamically to avoid byte overflow
+             const newTcValBuf = encodeUint(newTc);
+             const newTcSizeVint = encodeVintSize(newTcValBuf.length);
+             const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-             const tcHdr = new Uint8Array([0xE7]);
-             const tcSizeVint = writeVint(cluster.timecodeValueLength, cluster.timecodeLength - cluster.timecodeValueLength - 1);
-             const tcValBuf = new Uint8Array(cluster.timecodeValueLength);
-             let remaining = newTc;
-             for (let k = cluster.timecodeValueLength - 1; k >= 0; k--) {
-                tcValBuf[k] = remaining & 0xFF;
-                remaining = Math.floor(remaining / 256);
+             // Calculate the new Cluster Size
+             const sizeDiff = newTcElementLength - cluster.timecodeLength;
+             const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
+
+             // Write patched Cluster Header
+             const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
+             const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
+             await writable.write(clusterId);
+             await writable.write(clusterSizeVint);
+             totalBytesWritten += clusterId.length + clusterSizeVint.length;
+
+             // Write from after cluster header up to timecode offset
+             const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
+             if (preTcSize > 0) {
+                 const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
+                 await writable.write(preTcBuf);
+                 totalBytesWritten += preTcBuf.length;
              }
 
-             await writable.write(tcHdr);
-             await writable.write(tcSizeVint);
-             await writable.write(tcValBuf);
-             totalBytesWritten += tcHdr.length + tcSizeVint.length + tcValBuf.length;
+             // Write the new Timecode element
+             await writable.write(new Uint8Array([0xE7]));
+             await writable.write(newTcSizeVint);
+             await writable.write(newTcValBuf);
+             totalBytesWritten += 1 + newTcSizeVint.length + newTcValBuf.length;
 
              const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
              const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
