@@ -1,4 +1,90 @@
 import { SampleVideo } from '../types';
+import {
+  Input,
+  Output,
+  BlobSource,
+  StreamTarget,
+  BufferTarget,
+  Mp4OutputFormat,
+  WebMOutputFormat,
+  MkvOutputFormat,
+  Conversion,
+  ALL_FORMATS,
+  EncodedVideoPacketSource,
+  EncodedAudioPacketSource,
+  EncodedPacketSink,
+  EncodedPacket,
+  type StreamTargetChunk
+} from 'mediabunny';
+
+/**
+ * Detect media container format by extension and magic bytes (MP4 ISOBMFF vs WebM/MKV EBML)
+ */
+export async function detectMediaFormat(file: File): Promise<'mp4' | 'webm' | 'mkv' | 'unknown'> {
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  if (['mp4', 'm4v', 'mov'].includes(ext)) return 'mp4';
+  if (ext === 'webm') return 'webm';
+  if (ext === 'mkv') return 'mkv';
+
+  try {
+    const slice = await file.slice(0, 32).arrayBuffer();
+    const bytes = new Uint8Array(slice);
+    
+    // Check EBML header: 0x1A 0x45 0xDF 0xA3
+    if (bytes[0] === 0x1A && bytes[1] === 0x45 && bytes[2] === 0xDF && bytes[3] === 0xA3) {
+      return ext === 'mkv' ? 'mkv' : 'webm';
+    }
+
+    // Check MP4 ISOBMFF box (ftyp, moov, mdat, free, etc.)
+    if (bytes.length >= 8) {
+      const tag = String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7]);
+      if (['ftyp', 'moov', 'mdat', 'wide', 'free', 'skip', 'isom', 'mp41', 'mp42'].includes(tag)) {
+        return 'mp4';
+      }
+    }
+  } catch (e) {
+    console.warn('Format detection fallback:', e);
+  }
+
+  return ext === 'webm' ? 'webm' : 'mp4';
+}
+
+/**
+ * Creates a Mediabunny Target connected to a FileSystemWritableFileStream or in-memory BufferTarget
+ */
+function createMediabunnyTarget(writable: FileSystemWritableFileStream | null): StreamTarget | BufferTarget {
+  if (!writable) {
+    return new BufferTarget();
+  }
+
+  const customWritable = new WritableStream<StreamTargetChunk>({
+    async write(chunk) {
+      if (writable && typeof writable.write === 'function') {
+        await writable.write(chunk);
+      }
+    },
+    async close() {
+      // Handled by outer caller
+    }
+  });
+
+  return new StreamTarget(customWritable, { chunked: true });
+}
+
+/**
+ * Determines output format instance for mediabunny based on filename or format
+ */
+function getOutputFormatForFile(filename: string): Mp4OutputFormat | WebMOutputFormat | MkvOutputFormat {
+  const ext = filename.split('.').pop()?.toLowerCase() || 'mp4';
+  if (ext === 'webm') {
+    return new WebMOutputFormat();
+  }
+  if (ext === 'mkv') {
+    return new MkvOutputFormat();
+  }
+  // Default to MP4 with fragmented fast start for seamless Zero-RAM streaming
+  return new Mp4OutputFormat({ fastStart: 'fragmented' });
+}
 
 /**
  * Standard EBML VINT Reader
@@ -480,7 +566,276 @@ async function getClusterMaxFrameTimecode(file: File, cluster: ClusterMeta): Pro
 }
 
 /**
- * Standard Process Concat Stream
+ * Mediabunny Stream Trim Engine (Handles MP4, MOV, MKV, WebM, TS)
+ */
+async function processMediabunnyTrimStream(
+  file: File,
+  startTime: number,
+  endTime: number,
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  try {
+    const input = new Input({
+      source: new BlobSource(file),
+      formats: ALL_FORMATS,
+    });
+
+    const format = getOutputFormatForFile(file.name);
+    const target = createMediabunnyTarget(writable);
+    const output = new Output({ format, target });
+
+    const conversion = await Conversion.init({
+      input,
+      output,
+      trim: {
+        start: startTime > 0 ? startTime : undefined,
+        end: endTime > 0 ? endTime : undefined,
+      },
+    });
+
+    let lastTime = performance.now();
+    let lastBytes = 0;
+    let totalWritten = 0;
+
+    target.on('write', ({ end }) => {
+      totalWritten = Math.max(totalWritten, end);
+    });
+
+    conversion.onProgress = (prog) => {
+      const now = performance.now();
+      const elapsed = (now - lastTime) / 1000;
+      let speedMBs = 0;
+      if (elapsed > 0.5) {
+        speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
+        lastTime = now;
+        lastBytes = totalWritten;
+      }
+      onProgress({
+        percentage: Math.min(99, Math.round(prog * 100)),
+        statusText: `กำลังตัดวิดีโอ (${Math.round(prog * 100)}%)...`,
+        speedMBs,
+      });
+    };
+
+    await conversion.execute();
+
+    let blobUrl: string | undefined;
+    if (target instanceof BufferTarget && target.buffer) {
+      const isMp4 = file.name.toLowerCase().endsWith('.mp4');
+      const blob = new Blob([target.buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
+      blobUrl = URL.createObjectURL(blob);
+      totalWritten = target.buffer.byteLength;
+    }
+
+    onProgress({ percentage: 100, statusText: 'ตัดไฟล์วิดีโอสำเร็จเรียบร้อย!', speedMBs: 0 });
+    return { success: true, totalBytesWritten: totalWritten, blobUrl };
+  } catch (err) {
+    console.error('Mediabunny Trim Error:', err);
+    throw err;
+  }
+}
+
+/**
+ * Mediabunny Stream Remux Engine (Repairs containers, fixes moov/cues/faststart without transcode)
+ */
+async function processMediabunnyRemuxStream(
+  file: File,
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  try {
+    const input = new Input({
+      source: new BlobSource(file),
+      formats: ALL_FORMATS,
+    });
+
+    const format = getOutputFormatForFile(file.name);
+    const target = createMediabunnyTarget(writable);
+    const output = new Output({ format, target });
+
+    const conversion = await Conversion.init({
+      input,
+      output,
+    });
+
+    let lastTime = performance.now();
+    let lastBytes = 0;
+    let totalWritten = 0;
+
+    target.on('write', ({ end }) => {
+      totalWritten = Math.max(totalWritten, end);
+    });
+
+    conversion.onProgress = (prog) => {
+      const now = performance.now();
+      const elapsed = (now - lastTime) / 1000;
+      let speedMBs = 0;
+      if (elapsed > 0.5) {
+        speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
+        lastTime = now;
+        lastBytes = totalWritten;
+      }
+      onProgress({
+        percentage: Math.min(99, Math.round(prog * 100)),
+        statusText: `กำลังรีมิกซ์และซ่อมแซมโครงสร้างไฟล์ (${Math.round(prog * 100)}%)...`,
+        speedMBs,
+      });
+    };
+
+    await conversion.execute();
+
+    let blobUrl: string | undefined;
+    if (target instanceof BufferTarget && target.buffer) {
+      const isMp4 = file.name.toLowerCase().endsWith('.mp4');
+      const blob = new Blob([target.buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
+      blobUrl = URL.createObjectURL(blob);
+      totalWritten = target.buffer.byteLength;
+    }
+
+    onProgress({ percentage: 100, statusText: 'รีมิกซ์โครงสร้างไฟล์สำเร็จเรียบร้อย!', speedMBs: 0 });
+    return { success: true, totalBytesWritten: totalWritten, blobUrl };
+  } catch (err) {
+    console.error('Mediabunny Remux Error:', err);
+    throw err;
+  }
+}
+
+/**
+ * Mediabunny Multi-File Packet Concat Stream
+ */
+async function processMediabunnyConcatStream(
+  files: File[],
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  try {
+    if (!files.length) return { success: false };
+
+    const firstFile = files[0];
+    const input0 = new Input({ source: new BlobSource(firstFile), formats: ALL_FORMATS });
+    const format = getOutputFormatForFile(firstFile.name);
+    const target = createMediabunnyTarget(writable);
+    const output = new Output({ format, target });
+
+    const vTracks = await input0.getVideoTracks();
+    const aTracks = await input0.getAudioTracks();
+
+    let vSource: EncodedVideoPacketSource | null = null;
+    let aSource: EncodedAudioPacketSource | null = null;
+
+    if (vTracks.length > 0) {
+      const vCodec = await vTracks[0].getCodec();
+      if (vCodec) {
+        vSource = new EncodedVideoPacketSource(vCodec);
+        output.addVideoTrack(vSource);
+      }
+    }
+
+    if (aTracks.length > 0) {
+      const aCodec = await aTracks[0].getCodec();
+      if (aCodec) {
+        aSource = new EncodedAudioPacketSource(aCodec);
+        output.addAudioTrack(aSource);
+      }
+    }
+
+    await output.start();
+
+    let timeOffset = 0;
+    let totalWritten = 0;
+    target.on('write', ({ end }) => {
+      totalWritten = Math.max(totalWritten, end);
+    });
+
+    let lastTime = performance.now();
+    let lastBytes = 0;
+
+    for (let fIdx = 0; fIdx < files.length; fIdx++) {
+      const file = files[fIdx];
+      const input = fIdx === 0 ? input0 : new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+
+      const curVTracks = await input.getVideoTracks();
+      const curATracks = await input.getAudioTracks();
+
+      let fileDuration = await input.computeDuration();
+      if (!fileDuration || fileDuration <= 0) {
+        fileDuration = (await input.getDurationFromMetadata()) || 5;
+      }
+
+      if (vSource && curVTracks.length > 0) {
+        const sink = new EncodedPacketSink(curVTracks[0]);
+        for await (const pkt of sink.packets()) {
+          const shifted = new EncodedPacket(
+            pkt.data,
+            pkt.type,
+            pkt.timestamp + timeOffset,
+            pkt.duration,
+            pkt.sequenceNumber,
+            pkt.byteLength,
+            pkt.sideData
+          );
+          await vSource.add(shifted);
+        }
+      }
+
+      if (aSource && curATracks.length > 0) {
+        const sink = new EncodedPacketSink(curATracks[0]);
+        for await (const pkt of sink.packets()) {
+          const shifted = new EncodedPacket(
+            pkt.data,
+            pkt.type,
+            pkt.timestamp + timeOffset,
+            pkt.duration,
+            pkt.sequenceNumber,
+            pkt.byteLength,
+            pkt.sideData
+          );
+          await aSource.add(shifted);
+        }
+      }
+
+      timeOffset += fileDuration;
+
+      const now = performance.now();
+      const elapsed = (now - lastTime) / 1000;
+      let speedMBs = 0;
+      if (elapsed > 0.5) {
+        speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
+        lastTime = now;
+        lastBytes = totalWritten;
+      }
+
+      const prog = Math.round(((fIdx + 1) / files.length) * 98);
+      onProgress({
+        percentage: prog,
+        statusText: `กำลังรวมไฟล์ที่ ${fIdx + 1}/${files.length} (${prog}%)...`,
+        speedMBs,
+      });
+    }
+
+    if (vSource) vSource.close();
+    if (aSource) aSource.close();
+    await output.finalize();
+
+    let blobUrl: string | undefined;
+    if (target instanceof BufferTarget && target.buffer) {
+      const isMp4 = firstFile.name.toLowerCase().endsWith('.mp4');
+      const blob = new Blob([target.buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
+      blobUrl = URL.createObjectURL(blob);
+      totalWritten = target.buffer.byteLength;
+    }
+
+    onProgress({ percentage: 100, statusText: 'รวมไฟล์วิดีโอสำเร็จเรียบร้อย!', speedMBs: 0 });
+    return { success: true, totalBytesWritten: totalWritten, blobUrl };
+  } catch (err) {
+    console.error('Mediabunny Concat Error:', err);
+    throw err;
+  }
+}
+
+/**
+ * Standard Process Concat Stream - Unified router for MP4, WebM, MKV
  */
 export async function processNativeConcatStream(
   files: File[],
@@ -489,6 +844,20 @@ export async function processNativeConcatStream(
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
     if (!files.length) return { success: false };
+
+    // Detect format of first file
+    const firstFormat = await detectMediaFormat(files[0]);
+
+    if (firstFormat === 'mp4') {
+      return await processMediabunnyConcatStream(files, writable, onProgress);
+    }
+
+    // For WebM/MKV, attempt mediabunny first, fallback to native EBML parser if needed
+    try {
+      return await processMediabunnyConcatStream(files, writable, onProgress);
+    } catch (mbErr) {
+      console.warn("Mediabunny concat failed, falling back to Native EBML Engine:", mbErr);
+    }
     
     onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์ (Standard EBML)...', speedMBs: 0 });
 
@@ -664,7 +1033,7 @@ export async function processNativeConcatStream(
 }
 
 /**
- * Standard Process Trim Stream
+ * Standard Process Trim Stream - Unified router for MP4, WebM, MKV
  */
 export async function processNativeTrimStream(
   file: File,
@@ -674,6 +1043,19 @@ export async function processNativeTrimStream(
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
+     const format = await detectMediaFormat(file);
+
+     if (format === 'mp4') {
+       return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
+     }
+
+     // For WebM/MKV, attempt mediabunny first, fallback to native EBML if needed
+     try {
+       return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
+     } catch (mbErr) {
+       console.warn("Mediabunny trim failed, falling back to Native EBML Engine:", mbErr);
+     }
+
      onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์เพื่อตัดวิดีโอ (Standard Engine)...', speedMBs: 0 });
      
      const meta = await parseWebMFile(file);
@@ -829,8 +1211,7 @@ export async function processNativeTrimStream(
 }
 
 /**
- * Standard Process Remux Stream
- * Rebuilds the Matroska/WebM container strictly to standard, fixing timecodes and dropping junk.
+ * Standard Process Remux Stream - Unified router for MP4, WebM, MKV
  */
 export async function processNativeRemuxStream(
   file: File,
@@ -838,6 +1219,18 @@ export async function processNativeRemuxStream(
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
+     const format = await detectMediaFormat(file);
+
+     if (format === 'mp4') {
+       return await processMediabunnyRemuxStream(file, writable, onProgress);
+     }
+
+     try {
+       return await processMediabunnyRemuxStream(file, writable, onProgress);
+     } catch (mbErr) {
+       console.warn("Mediabunny remux failed, falling back to Native EBML Engine:", mbErr);
+     }
+
      onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์เพื่อซ่อมแซม (Standard Remux Engine)...', speedMBs: 0 });
      
      const meta = await parseWebMFile(file);
