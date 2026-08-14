@@ -905,9 +905,12 @@ async function processMediabunnyConcatStream(
           nextV = await vIterator!.next();
         } else if (!nextA.done && nextA.value) {
           const pkt = nextA.value;
+          // In audio tracks, the first packet must be 'key', but subsequent audio packets should be 'delta'
+          // so Muxer doesn't treat every audio frame as a new GOP boundary causing timestamp validation errors.
+          const audioPktType = (fIdx === 0 && isFirstAInFile) ? 'key' : 'delta';
           const shifted = new EncodedPacket(
             pkt.data,
-            pkt.type,
+            audioPktType,
             aTime,
             pkt.duration,
             pkt.sequenceNumber,
