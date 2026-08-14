@@ -830,7 +830,8 @@ async function processMediabunnyConcatStream(
       log: `[STREAM] Output container started successfully.`
     });
 
-    let timeOffset = 0;
+    let vOffset = 0;
+    let aOffset = 0;
     let totalWritten = 0;
     target.on('write', ({ end }) => {
       totalWritten = Math.max(totalWritten, end);
@@ -843,68 +844,87 @@ async function processMediabunnyConcatStream(
       const file = files[fIdx];
       onProgress({
         percentage: Math.round(((fIdx) / files.length) * 90) + 8,
-        statusText: `กำลังสตรีมไฟล์ ${fIdx + 1}/${files.length} (${file.name})...`,
+        statusText: `กำลังรวมไฟล์ ${fIdx + 1}/${files.length} (${file.name})...`,
         speedMBs: 0,
-        log: `[PROCESS] Processing input file ${fIdx + 1}/${files.length}: ${file.name} (size: ${(file.size / (1024 * 1024)).toFixed(2)} MB, base offset: ${timeOffset.toFixed(3)}s)`
+        log: `[PROCESS] Processing input file ${fIdx + 1}/${files.length}: ${file.name} (size: ${(file.size / (1024 * 1024)).toFixed(2)} MB, base offsets: V=${vOffset.toFixed(3)}s, A=${aOffset.toFixed(3)}s)`
       });
 
       const input = fIdx === 0 ? input0 : new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
       const curVTracks = await input.getVideoTracks();
       const curATracks = await input.getAudioTracks();
 
-      let fileMaxTime = 0;
+      let maxVEnd = 0;
+      let maxAEnd = 0;
       let vPktCount = 0;
       let aPktCount = 0;
 
-      if (vSource && curVTracks.length > 0) {
-        const curVDecConfig = await curVTracks[0].getDecoderConfig();
-        const sink = new EncodedPacketSink(curVTracks[0]);
-        let isFirstInTrack = true;
-        for await (const pkt of sink.packets()) {
+      const hasV = vSource && curVTracks.length > 0;
+      const hasA = aSource && curATracks.length > 0;
+
+      const curVDecConfig = hasV ? await curVTracks[0].getDecoderConfig() : null;
+      const curADecConfig = hasA ? await curATracks[0].getDecoderConfig() : null;
+
+      const vSink = hasV ? new EncodedPacketSink(curVTracks[0]) : null;
+      const aSink = hasA ? new EncodedPacketSink(curATracks[0]) : null;
+
+      const vIterator = vSink ? vSink.packets()[Symbol.asyncIterator]() : null;
+      const aIterator = aSink ? aSink.packets()[Symbol.asyncIterator]() : null;
+
+      let nextV = vIterator ? await vIterator.next() : { done: true, value: undefined };
+      let nextA = aIterator ? await aIterator.next() : { done: true, value: undefined };
+
+      let isFirstVInFile = true;
+      let isFirstAInFile = true;
+
+      // Interleave video and audio packets strictly in chronological order
+      while (!nextV.done || !nextA.done) {
+        const vTime = (!nextV.done && nextV.value) ? (nextV.value.timestamp + vOffset) : Infinity;
+        const aTime = (!nextA.done && nextA.value) ? (nextA.value.timestamp + aOffset) : Infinity;
+
+        if (vTime <= aTime && !nextV.done && nextV.value) {
+          const pkt = nextV.value;
           const shifted = new EncodedPacket(
             pkt.data,
             pkt.type,
-            pkt.timestamp + timeOffset,
+            vTime,
             pkt.duration,
             pkt.sequenceNumber,
             pkt.byteLength,
             pkt.sideData
           );
-          if (isFirstInTrack && (curVDecConfig || vDecConfig)) {
-            await vSource.add(shifted, { decoderConfig: (curVDecConfig || vDecConfig) });
-            isFirstInTrack = false;
+          if (isFirstVInFile && (curVDecConfig || vDecConfig)) {
+            await vSource!.add(shifted, { decoderConfig: (curVDecConfig || vDecConfig) });
+            isFirstVInFile = false;
           } else {
-            await vSource.add(shifted);
+            await vSource!.add(shifted);
           }
           vPktCount++;
           const pktEnd = pkt.timestamp + (pkt.duration || 0);
-          if (pktEnd > fileMaxTime) fileMaxTime = pktEnd;
-        }
-      }
+          if (pktEnd > maxVEnd) maxVEnd = pktEnd;
 
-      if (aSource && curATracks.length > 0) {
-        const curADecConfig = await curATracks[0].getDecoderConfig();
-        const sink = new EncodedPacketSink(curATracks[0]);
-        let isFirstInTrack = true;
-        for await (const pkt of sink.packets()) {
+          nextV = await vIterator!.next();
+        } else if (!nextA.done && nextA.value) {
+          const pkt = nextA.value;
           const shifted = new EncodedPacket(
             pkt.data,
             pkt.type,
-            pkt.timestamp + timeOffset,
+            aTime,
             pkt.duration,
             pkt.sequenceNumber,
             pkt.byteLength,
             pkt.sideData
           );
-          if (isFirstInTrack && (curADecConfig || aDecConfig)) {
-            await aSource.add(shifted, { decoderConfig: (curADecConfig || aDecConfig) });
-            isFirstInTrack = false;
+          if (isFirstAInFile && (curADecConfig || aDecConfig)) {
+            await aSource!.add(shifted, { decoderConfig: (curADecConfig || aDecConfig) });
+            isFirstAInFile = false;
           } else {
-            await aSource.add(shifted);
+            await aSource!.add(shifted);
           }
           aPktCount++;
           const pktEnd = pkt.timestamp + (pkt.duration || 0);
-          if (pktEnd > fileMaxTime) fileMaxTime = pktEnd;
+          if (pktEnd > maxAEnd) maxAEnd = pktEnd;
+
+          nextA = await aIterator!.next();
         }
       }
 
@@ -921,10 +941,12 @@ async function processMediabunnyConcatStream(
         percentage: Math.round(((fIdx + 1) / files.length) * 90) + 8,
         statusText: `รวมไฟล์ที่ ${fIdx + 1}/${files.length} เสร็จ (${file.name})`,
         speedMBs,
-        log: `[DONE FILE] ${file.name}: ${vPktCount} video packets, ${aPktCount} audio packets, duration: ${fileMaxTime.toFixed(3)}s`
+        log: `[DONE FILE] ${file.name}: ${vPktCount} video packets (${maxVEnd.toFixed(3)}s), ${aPktCount} audio packets (${maxAEnd.toFixed(3)}s)`
       });
 
-      timeOffset += fileMaxTime > 0 ? fileMaxTime : 5;
+      const segmentDuration = Math.max(maxVEnd, maxAEnd);
+      vOffset += maxVEnd > 0 ? maxVEnd : segmentDuration;
+      aOffset += maxAEnd > 0 ? maxAEnd : segmentDuration;
     }
 
     if (vSource) vSource.close();
@@ -939,11 +961,12 @@ async function processMediabunnyConcatStream(
       totalWritten = target.buffer.byteLength;
     }
 
+    const finalTotalDuration = Math.max(vOffset, aOffset);
     onProgress({
       percentage: 100,
       statusText: 'รวมไฟล์วิดีโอสำเร็จเรียบร้อย!',
       speedMBs: 0,
-      log: `[COMPLETE] Concat finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB, total duration: ${timeOffset.toFixed(3)}s`
+      log: `[COMPLETE] Concat finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB, total duration: ${finalTotalDuration.toFixed(3)}s`
     });
 
     return { success: true, totalBytesWritten: totalWritten || 1, blobUrl };
