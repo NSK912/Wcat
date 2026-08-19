@@ -99,9 +99,6 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
                 <span>{copied ? 'Copied' : 'Copy Logs'}</span>
               </button>
             )}
-            <button onClick={onClose} className="text-slate-400 hover:text-white transition">
-              <X className="w-4 h-4" />
-            </button>
           </div>
         </div>
 
