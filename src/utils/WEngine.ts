@@ -674,13 +674,107 @@ async function processMediabunnyTrimStream(
       log: `[INIT] Starting Trim: "${file.name}" (${(file.size / (1024 * 1024)).toFixed(2)} MB), Range: ${startTime.toFixed(2)}s -> ${endTime.toFixed(2)}s`
     });
 
-    stage = 'Opening Media Input';
+    // Strategy 1: Native High-Performance Conversion
+    // Preserves B-frame PTS/DTS offsets, faststart moov atoms, and smooth preview playback
+    try {
+      stage = 'Opening Media Input';
+      const input = new Input({
+        source: new BlobSource(file),
+        formats: ALL_FORMATS,
+      });
+
+      stage = 'Demuxing & Inspecting Tracks';
+      try {
+        const vTracks = await input.getVideoTracks();
+        if (vTracks.length > 0) vCodec = (await vTracks[0].getCodec()) || 'unknown';
+        const aTracks = await input.getAudioTracks();
+        if (aTracks.length > 0) aCodec = (await aTracks[0].getCodec()) || 'unknown';
+      } catch (e) {
+        // Track inspection optional
+      }
+
+      stage = 'Initializing Mediabunny Output Format & Target';
+      const format = getOutputFormatForFile(file.name);
+      const target = createMediabunnyTarget(writable);
+      const output = new Output({ format, target });
+
+      target.on('write', ({ end }) => {
+        totalWritten = Math.max(totalWritten, end);
+      });
+
+      stage = 'Configuring Mediabunny Conversion';
+      const conversion = await Conversion.init({
+        input,
+        output,
+        trim: {
+          start: startTime > 0 ? startTime : undefined,
+          end: endTime > 0 ? endTime : undefined,
+        },
+      });
+
+      let lastTime = performance.now();
+      let lastBytes = 0;
+
+      stage = 'Executing Conversion Stream';
+      conversion.onProgress = (prog) => {
+        const now = performance.now();
+        const elapsed = (now - lastTime) / 1000;
+        let speedMBs = 0;
+        if (elapsed > 0.5) {
+          speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
+          lastTime = now;
+          lastBytes = totalWritten;
+        }
+        lastProgress = Math.min(99, Math.round(prog * 100));
+        onProgress({
+          percentage: lastProgress,
+          statusText: `Trimming video (${lastProgress}%)...`,
+          speedMBs,
+          log: `[TRIM PROGRESS] ${lastProgress}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+        });
+      };
+
+      await conversion.execute();
+
+      stage = 'Creating Final Output Blob / Buffer';
+      let blobUrl: string | undefined;
+      if (target instanceof BufferTarget && target.buffer) {
+        const isMp4 = file.name.toLowerCase().endsWith('.mp4');
+        const mime = isMp4 ? 'video/mp4' : file.name.toLowerCase().endsWith('.mkv') ? 'video/x-matroska' : 'video/webm';
+        const blob = new Blob([target.buffer], { type: mime });
+        blobUrl = URL.createObjectURL(blob);
+        totalWritten = target.buffer.byteLength;
+      }
+
+      onProgress({
+        percentage: 100,
+        statusText: 'Video trim completed successfully!',
+        speedMBs: 0,
+        log: `[DONE] Native trim finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+      });
+
+      return { success: true, totalBytesWritten: totalWritten, blobUrl };
+    } catch (nativeErr: any) {
+      const errMsg = nativeErr?.message || String(nativeErr);
+      console.warn('Native Conversion failed, falling back to Packet Repair Stream:', nativeErr);
+
+      onProgress({
+        percentage: 5,
+        statusText: 'Timestamp drift detected, activating Packet Repair Mode...',
+        speedMBs: 0,
+        log: `[NOTICE] Native Conversion notice: ${errMsg}. Switching to Packet Repair Stream...`
+      });
+    }
+
+    // Strategy 2: Fallback Packet Repair Stream for files with non-monotonic timestamps or GOP issues
+    totalWritten = 0;
+    stage = 'Opening Media Input (Packet Repair)';
     const input = new Input({
       source: new BlobSource(file),
       formats: ALL_FORMATS,
     });
 
-    stage = 'Demuxing & Inspecting Tracks';
+    stage = 'Demuxing & Inspecting Tracks (Packet Repair)';
     const vTracks = await input.getVideoTracks();
     const aTracks = await input.getAudioTracks();
 
@@ -693,31 +787,19 @@ async function processMediabunnyTrimStream(
       vCodec = (await vTracks[0].getCodec()) || 'unknown';
       vDecConfig = await vTracks[0].getDecoderConfig();
       vSource = new EncodedVideoPacketSource(vCodec!);
-      onProgress({
-        percentage: 4,
-        statusText: 'Inspecting video track...',
-        speedMBs: 0,
-        log: `[INSPECT] Found Video Track: codec=${vCodec}, resolution=${vDecConfig?.codedWidth || 'auto'}x${vDecConfig?.codedHeight || 'auto'}`
-      });
     }
 
     if (aTracks.length > 0) {
       aCodec = (await aTracks[0].getCodec()) || 'unknown';
       aDecConfig = await aTracks[0].getDecoderConfig();
       aSource = new EncodedAudioPacketSource(aCodec!);
-      onProgress({
-        percentage: 6,
-        statusText: 'Inspecting audio track...',
-        speedMBs: 0,
-        log: `[INSPECT] Found Audio Track: codec=${aCodec}, sampleRate=${aDecConfig?.sampleRate || 'auto'}Hz, channels=${aDecConfig?.numberOfChannels || 'auto'}`
-      });
     }
 
     if (!vSource && !aSource) {
       throw new Error(`No supported video or audio tracks found in file ${file.name}`);
     }
 
-    stage = 'Initializing Mediabunny Output Format & Target';
+    stage = 'Initializing Mediabunny Output Format & Target (Packet Repair)';
     const format = getOutputFormatForFile(file.name);
     const target = createMediabunnyTarget(writable);
     const output = new Output({ format, target });
@@ -725,14 +807,14 @@ async function processMediabunnyTrimStream(
     if (vSource) output.addVideoTrack(vSource, { decoderConfig: vDecConfig ?? undefined });
     if (aSource) output.addAudioTrack(aSource, { decoderConfig: aDecConfig ?? undefined });
 
-    stage = 'Starting Output Writer';
+    stage = 'Starting Output Writer (Packet Repair)';
     await output.start();
 
     target.on('write', ({ end }) => {
       totalWritten = Math.max(totalWritten, end);
     });
 
-    stage = 'Demuxing and Processing Packets';
+    stage = 'Processing Packets (Packet Repair)';
     const vSink = vSource && vTracks.length > 0 ? new EncodedPacketSink(vTracks[0]) : null;
     const aSink = aSource && aTracks.length > 0 ? new EncodedPacketSink(aTracks[0]) : null;
 
@@ -744,13 +826,11 @@ async function processMediabunnyTrimStream(
 
     let isFirstV = true;
     let isFirstA = true;
-    let lastVTime = 0;
-    let lastATime = 0;
-    let lastVGopMaxTime = 0;
+    let minVTs: number | null = null;
+    let minATs: number | null = null;
 
     let lastTime = performance.now();
     let lastBytes = 0;
-    const durationRange = (endTime > 0 && endTime < Infinity ? endTime : 3600) - startTime;
 
     while (!nextV.done || !nextA.done) {
       const rawVTime = (!nextV.done && nextV.value) ? nextV.value.timestamp : Infinity;
@@ -767,13 +847,8 @@ async function processMediabunnyTrimStream(
           continue;
         }
 
-        let pTime = pkt.timestamp - startTime;
-        pTime = Math.max(pTime, lastVTime);
-
-        if (pkt.type === 'key' && !isFirstV && pTime <= lastVGopMaxTime) {
-          pTime = lastVGopMaxTime + 0.001;
-        }
-        lastVTime = pTime;
+        if (minVTs === null) minVTs = pkt.timestamp;
+        const pTime = Math.max(0, pkt.timestamp - minVTs);
 
         const shifted = new EncodedPacket(
           pkt.data,
@@ -792,22 +867,17 @@ async function processMediabunnyTrimStream(
           await vSource!.add(shifted);
         }
 
-        const pktEnd = pTime + (pkt.duration || 0);
-        if (pktEnd > lastVGopMaxTime) lastVGopMaxTime = pktEnd;
-
         const now = performance.now();
         const elapsed = (now - lastTime) / 1000;
         if (elapsed > 0.5) {
           const speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
           lastTime = now;
           lastBytes = totalWritten;
-          const pct = Math.min(99, Math.round((pTime / (durationRange || 1)) * 100));
-          lastProgress = pct;
           onProgress({
-            percentage: pct,
-            statusText: `Trimming video (${pct}%)...`,
+            percentage: 50,
+            statusText: `Trimming video in repair mode...`,
             speedMBs,
-            log: `[TRIM PROGRESS] Time: ${pTime.toFixed(2)}s, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+            log: `[REPAIR PROGRESS] Time: ${pTime.toFixed(2)}s, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
           });
         }
 
@@ -823,11 +893,9 @@ async function processMediabunnyTrimStream(
           continue;
         }
 
-        let pTime = pkt.timestamp - startTime;
-        pTime = Math.max(pTime, lastATime);
-        lastATime = pTime;
+        if (minATs === null) minATs = pkt.timestamp;
+        const pTime = Math.max(0, pkt.timestamp - minATs);
 
-        // CRITICAL: First audio packet is 'key', subsequent audio packets are 'delta'
         const audioPktType = isFirstA ? 'key' : 'delta';
 
         const shifted = new EncodedPacket(
@@ -851,7 +919,7 @@ async function processMediabunnyTrimStream(
       }
     }
 
-    stage = 'Finalizing Container Output';
+    stage = 'Finalizing Container Output (Packet Repair)';
     if (vSource) vSource.close();
     if (aSource) aSource.close();
     await output.finalize();
@@ -867,10 +935,11 @@ async function processMediabunnyTrimStream(
 
     onProgress({
       percentage: 100,
-      statusText: 'Video trimming completed successfully!',
+      statusText: 'Video trim completed with Packet Repair!',
       speedMBs: 0,
-      log: `[DONE] Trim finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+      log: `[DONE] Repair trim finished! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
     });
+
     return { success: true, totalBytesWritten: totalWritten, blobUrl };
   } catch (err: any) {
     console.error('Mediabunny Trim Error:', err);
@@ -912,13 +981,101 @@ async function processMediabunnyRemuxStream(
       log: `[INIT] Starting Remux/FastStart: "${file.name}" (${(file.size / (1024 * 1024)).toFixed(2)} MB)`
     });
 
-    stage = 'Opening Media Input';
+    // Strategy 1: Native High-Performance Conversion
+    try {
+      stage = 'Opening Media Input';
+      const input = new Input({
+        source: new BlobSource(file),
+        formats: ALL_FORMATS,
+      });
+
+      stage = 'Demuxing & Inspecting Tracks';
+      try {
+        const vTracks = await input.getVideoTracks();
+        if (vTracks.length > 0) vCodec = (await vTracks[0].getCodec()) || 'unknown';
+        const aTracks = await input.getAudioTracks();
+        if (aTracks.length > 0) aCodec = (await aTracks[0].getCodec()) || 'unknown';
+      } catch (e) {
+        // Track inspection optional
+      }
+
+      stage = 'Initializing Output Format & Target';
+      const format = getOutputFormatForFile(file.name);
+      const target = createMediabunnyTarget(writable);
+      const output = new Output({ format, target });
+
+      target.on('write', ({ end }) => {
+        totalWritten = Math.max(totalWritten, end);
+      });
+
+      stage = 'Configuring Mediabunny Conversion';
+      const conversion = await Conversion.init({
+        input,
+        output,
+      });
+
+      let lastTime = performance.now();
+      let lastBytes = 0;
+
+      stage = 'Executing Conversion Stream';
+      conversion.onProgress = (prog) => {
+        const now = performance.now();
+        const elapsed = (now - lastTime) / 1000;
+        let speedMBs = 0;
+        if (elapsed > 0.5) {
+          speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
+          lastTime = now;
+          lastBytes = totalWritten;
+        }
+        lastProgress = Math.min(99, Math.round(prog * 100));
+        onProgress({
+          percentage: lastProgress,
+          statusText: `Remuxing and repairing container (${lastProgress}%)...`,
+          speedMBs,
+          log: `[REMUX PROGRESS] ${lastProgress}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+        });
+      };
+
+      await conversion.execute();
+
+      stage = 'Creating Final Output Blob / Buffer';
+      let blobUrl: string | undefined;
+      if (target instanceof BufferTarget && target.buffer) {
+        const isMp4 = file.name.toLowerCase().endsWith('.mp4');
+        const blob = new Blob([target.buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
+        blobUrl = URL.createObjectURL(blob);
+        totalWritten = target.buffer.byteLength;
+      }
+
+      onProgress({
+        percentage: 100,
+        statusText: 'Container remuxing completed successfully!',
+        speedMBs: 0,
+        log: `[DONE] Remux finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+      });
+
+      return { success: true, totalBytesWritten: totalWritten, blobUrl };
+    } catch (nativeErr: any) {
+      const errMsg = nativeErr?.message || String(nativeErr);
+      console.warn('Native Remux Conversion failed, falling back to Packet Repair Stream:', nativeErr);
+
+      onProgress({
+        percentage: 5,
+        statusText: 'Timestamp drift detected, activating Packet Repair Mode...',
+        speedMBs: 0,
+        log: `[NOTICE] Native Conversion notice: ${errMsg}. Switching to Packet Repair Stream...`
+      });
+    }
+
+    // Strategy 2: Fallback Packet Repair Stream
+    totalWritten = 0;
+    stage = 'Opening Media Input (Packet Repair)';
     const input = new Input({
       source: new BlobSource(file),
       formats: ALL_FORMATS,
     });
 
-    stage = 'Demuxing & Inspecting Tracks';
+    stage = 'Demuxing & Inspecting Tracks (Packet Repair)';
     const vTracks = await input.getVideoTracks();
     const aTracks = await input.getAudioTracks();
 
@@ -931,31 +1088,19 @@ async function processMediabunnyRemuxStream(
       vCodec = (await vTracks[0].getCodec()) || 'unknown';
       vDecConfig = await vTracks[0].getDecoderConfig();
       vSource = new EncodedVideoPacketSource(vCodec!);
-      onProgress({
-        percentage: 4,
-        statusText: 'Inspecting video track...',
-        speedMBs: 0,
-        log: `[INSPECT] Found Video Track: codec=${vCodec}, resolution=${vDecConfig?.codedWidth || 'auto'}x${vDecConfig?.codedHeight || 'auto'}`
-      });
     }
 
     if (aTracks.length > 0) {
       aCodec = (await aTracks[0].getCodec()) || 'unknown';
       aDecConfig = await aTracks[0].getDecoderConfig();
       aSource = new EncodedAudioPacketSource(aCodec!);
-      onProgress({
-        percentage: 6,
-        statusText: 'Inspecting audio track...',
-        speedMBs: 0,
-        log: `[INSPECT] Found Audio Track: codec=${aCodec}, sampleRate=${aDecConfig?.sampleRate || 'auto'}Hz, channels=${aDecConfig?.numberOfChannels || 'auto'}`
-      });
     }
 
     if (!vSource && !aSource) {
       throw new Error(`No supported video or audio tracks found in file ${file.name}`);
     }
 
-    stage = 'Initializing Output Format & Target';
+    stage = 'Initializing Output Format & Target (Packet Repair)';
     const format = getOutputFormatForFile(file.name);
     const target = createMediabunnyTarget(writable);
     const output = new Output({ format, target });
@@ -963,14 +1108,14 @@ async function processMediabunnyRemuxStream(
     if (vSource) output.addVideoTrack(vSource, { decoderConfig: vDecConfig ?? undefined });
     if (aSource) output.addAudioTrack(aSource, { decoderConfig: aDecConfig ?? undefined });
 
-    stage = 'Starting Output Writer';
+    stage = 'Starting Output Writer (Packet Repair)';
     await output.start();
 
     target.on('write', ({ end }) => {
       totalWritten = Math.max(totalWritten, end);
     });
 
-    stage = 'Demuxing and Processing Packets';
+    stage = 'Processing Packets (Packet Repair)';
     const vSink = vSource && vTracks.length > 0 ? new EncodedPacketSink(vTracks[0]) : null;
     const aSink = aSource && aTracks.length > 0 ? new EncodedPacketSink(aTracks[0]) : null;
 
@@ -982,9 +1127,8 @@ async function processMediabunnyRemuxStream(
 
     let isFirstV = true;
     let isFirstA = true;
-    let lastVTime = 0;
-    let lastATime = 0;
-    let lastVGopMaxTime = 0;
+    let minVTs: number | null = null;
+    let minATs: number | null = null;
 
     let lastTime = performance.now();
     let lastBytes = 0;
@@ -995,12 +1139,9 @@ async function processMediabunnyRemuxStream(
 
       if (rawVTime <= rawATime && !nextV.done && nextV.value) {
         const pkt = nextV.value;
-        let pTime = Math.max(pkt.timestamp, lastVTime);
 
-        if (pkt.type === 'key' && !isFirstV && pTime <= lastVGopMaxTime) {
-          pTime = lastVGopMaxTime + 0.001;
-        }
-        lastVTime = pTime;
+        if (minVTs === null) minVTs = pkt.timestamp;
+        const pTime = Math.max(0, pkt.timestamp - minVTs);
 
         const shifted = new EncodedPacket(
           pkt.data,
@@ -1019,31 +1160,27 @@ async function processMediabunnyRemuxStream(
           await vSource!.add(shifted);
         }
 
-        const pktEnd = pTime + (pkt.duration || 0);
-        if (pktEnd > lastVGopMaxTime) lastVGopMaxTime = pktEnd;
-
         const now = performance.now();
         const elapsed = (now - lastTime) / 1000;
         if (elapsed > 0.5) {
           const speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
           lastTime = now;
           lastBytes = totalWritten;
-          lastProgress = 50;
           onProgress({
             percentage: 50,
-            statusText: `Remuxing container...`,
+            statusText: `Remuxing container in repair mode...`,
             speedMBs,
-            log: `[REMUX PROGRESS] Time: ${pTime.toFixed(2)}s, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+            log: `[REPAIR PROGRESS] Time: ${pTime.toFixed(2)}s, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
           });
         }
 
         nextV = await vIterator!.next();
       } else if (!nextA.done && nextA.value) {
         const pkt = nextA.value;
-        let pTime = Math.max(pkt.timestamp, lastATime);
-        lastATime = pTime;
 
-        // CRITICAL: First audio packet is 'key', subsequent audio packets are 'delta'
+        if (minATs === null) minATs = pkt.timestamp;
+        const pTime = Math.max(0, pkt.timestamp - minATs);
+
         const audioPktType = isFirstA ? 'key' : 'delta';
 
         const shifted = new EncodedPacket(
@@ -1067,7 +1204,7 @@ async function processMediabunnyRemuxStream(
       }
     }
 
-    stage = 'Finalizing Container Output';
+    stage = 'Finalizing Container Output (Packet Repair)';
     if (vSource) vSource.close();
     if (aSource) aSource.close();
     await output.finalize();
@@ -1083,10 +1220,11 @@ async function processMediabunnyRemuxStream(
 
     onProgress({
       percentage: 100,
-      statusText: 'Container remuxing completed successfully!',
+      statusText: 'Container remuxing completed with Packet Repair!',
       speedMBs: 0,
-      log: `[DONE] Remux finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+      log: `[DONE] Repair remux finished! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
     });
+
     return { success: true, totalBytesWritten: totalWritten, blobUrl };
   } catch (err: any) {
     console.error('Mediabunny Remux Error:', err);
