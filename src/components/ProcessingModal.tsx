@@ -62,21 +62,28 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
         <div className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-56 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
           {logs.length === 0 ? (
             <div className="text-slate-400 italic px-1">
-              {message || 'กำลังประมวลผลด้วย FFmpeg...'}
+              {message || 'Processing...'}
             </div>
           ) : (
-            logs.map((log, idx) => (
-              <div
-                key={idx}
-                className={`truncate px-1 ${
-                  log.toLowerCase().includes('error') || log.toLowerCase().includes('aborted')
-                    ? 'text-rose-400 font-semibold'
-                    : 'text-slate-300'
-                }`}
-              >
-                {log}
-              </div>
-            ))
+            logs.map((log, idx) => {
+              const lower = log.toLowerCase();
+              const isError = lower.includes('error') || lower.includes('aborted') || lower.includes('fatal');
+              const isNotice = lower.includes('notice') || lower.includes('warning') || log.includes('⚠️');
+              return (
+                <div
+                  key={idx}
+                  className={`px-1 break-all whitespace-pre-wrap ${
+                    isError
+                      ? 'text-rose-400 font-semibold'
+                      : isNotice
+                      ? 'text-amber-300 font-medium'
+                      : 'text-slate-300'
+                  }`}
+                >
+                  {log}
+                </div>
+              );
+            })
           )}
         </div>
 
@@ -101,7 +108,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
                     className="flex-1 bg-rose-600 hover:bg-rose-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-rose-600/20 flex items-center justify-center space-x-2 transition"
                   >
                     <FileDown className="w-4 h-4" />
-                    <span>เซฟ Error Log (.txt)</span>
+                    <span>Save Error Log (.txt)</span>
                   </button>
                 )}
 

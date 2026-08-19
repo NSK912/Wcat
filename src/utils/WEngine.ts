@@ -591,7 +591,7 @@ async function processMediabunnyTrimStream(
   try {
     onProgress({
       percentage: 2,
-      statusText: 'กำลังเตรียม Input และสร้าง Pipeline การตัดต่อ...',
+      statusText: 'Preparing input and trimming pipeline...',
       speedMBs: 0,
       log: `[INIT] Starting Trim: ${file.name}, Range: ${startTime.toFixed(2)}s -> ${endTime.toFixed(2)}s`
     });
@@ -633,7 +633,7 @@ async function processMediabunnyTrimStream(
       }
       onProgress({
         percentage: Math.min(99, Math.round(prog * 100)),
-        statusText: `กำลังตัดวิดีโอ (${Math.round(prog * 100)}%)...`,
+        statusText: `Trimming video (${Math.round(prog * 100)}%)...`,
         speedMBs,
         log: `[TRIM PROGRESS] ${(prog * 100).toFixed(1)}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
       });
@@ -651,7 +651,7 @@ async function processMediabunnyTrimStream(
 
     onProgress({
       percentage: 100,
-      statusText: 'ตัดไฟล์วิดีโอสำเร็จเรียบร้อย!',
+      statusText: 'Video trimming completed successfully!',
       speedMBs: 0,
       log: `[DONE] Trim finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
     });
@@ -660,7 +660,7 @@ async function processMediabunnyTrimStream(
     console.error('Mediabunny Trim Error:', err);
     onProgress({
       percentage: 0,
-      statusText: `เกิดข้อผิดพลาด: ${err?.message || err}`,
+      statusText: `Error: ${err?.message || err}`,
       speedMBs: 0,
       log: `[ERROR] Trim failed: ${err?.message || err}\n${err?.stack || ''}`
     });
@@ -679,7 +679,7 @@ async function processMediabunnyRemuxStream(
   try {
     onProgress({
       percentage: 2,
-      statusText: 'กำลังเตรียม Input และสร้าง Pipeline การรีมิกซ์...',
+      statusText: 'Preparing input and remux pipeline...',
       speedMBs: 0,
       log: `[INIT] Starting Remux/FastStart: ${file.name}`
     });
@@ -717,7 +717,7 @@ async function processMediabunnyRemuxStream(
       }
       onProgress({
         percentage: Math.min(99, Math.round(prog * 100)),
-        statusText: `กำลังรีมิกซ์และซ่อมแซมโครงสร้างไฟล์ (${Math.round(prog * 100)}%)...`,
+        statusText: `Remuxing and repairing container (${Math.round(prog * 100)}%)...`,
         speedMBs,
         log: `[REMUX PROGRESS] ${(prog * 100).toFixed(1)}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
       });
@@ -735,7 +735,7 @@ async function processMediabunnyRemuxStream(
 
     onProgress({
       percentage: 100,
-      statusText: 'รีมิกซ์โครงสร้างไฟล์สำเร็จเรียบร้อย!',
+      statusText: 'Container remuxing completed successfully!',
       speedMBs: 0,
       log: `[DONE] Remux finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
     });
@@ -744,7 +744,7 @@ async function processMediabunnyRemuxStream(
     console.error('Mediabunny Remux Error:', err);
     onProgress({
       percentage: 0,
-      statusText: `เกิดข้อผิดพลาด: ${err?.message || err}`,
+      statusText: `Error: ${err?.message || err}`,
       speedMBs: 0,
       log: `[ERROR] Remux failed: ${err?.message || err}\n${err?.stack || ''}`
     });
@@ -765,7 +765,7 @@ async function processMediabunnyConcatStream(
 
     onProgress({
       percentage: 2,
-      statusText: `กำลังเตรียมและตรวจสอบโครงสร้าง ${files.length} ไฟล์...`,
+      statusText: `Preparing and analyzing ${files.length} files...`,
       speedMBs: 0,
       log: `[INIT] Starting multi-file concatenation for ${files.length} files.`
     });
@@ -794,7 +794,7 @@ async function processMediabunnyConcatStream(
         });
         onProgress({
           percentage: 4,
-          statusText: `พบวิดีโอแทร็ก: ${vCodec}`,
+          statusText: `Found video track: ${vCodec}`,
           speedMBs: 0,
           log: `[TRACK] Video track added: codec=${vCodec}, width=${vDecConfig?.codedWidth || 'auto'}, height=${vDecConfig?.codedHeight || 'auto'}`
         });
@@ -811,7 +811,7 @@ async function processMediabunnyConcatStream(
         });
         onProgress({
           percentage: 6,
-          statusText: `พบออดิโอแทร็ก: ${aCodec}`,
+          statusText: `Found audio track: ${aCodec}`,
           speedMBs: 0,
           log: `[TRACK] Audio track added: codec=${aCodec}, channels=${aDecConfig?.numberOfChannels || 'auto'}, rate=${aDecConfig?.sampleRate || 'auto'}`
         });
@@ -819,13 +819,13 @@ async function processMediabunnyConcatStream(
     }
 
     if (!vSource && !aSource) {
-      throw new Error(`ไม่พบแทร็กวิดีโอหรือเสียงที่รองรับในไฟล์ ${firstFile.name}`);
+      throw new Error(`No supported video or audio tracks found in file ${firstFile.name}`);
     }
 
     await output.start();
     onProgress({
       percentage: 8,
-      statusText: `เริ่มสตรีมและรวมวิดีโอแบบ Lossless...`,
+      statusText: `Starting lossless video stream concat...`,
       speedMBs: 0,
       log: `[STREAM] Output container started successfully.`
     });
@@ -942,7 +942,7 @@ async function processMediabunnyConcatStream(
 
       onProgress({
         percentage: Math.round(((fIdx + 1) / files.length) * 90) + 8,
-        statusText: `รวมไฟล์ที่ ${fIdx + 1}/${files.length} เสร็จ (${file.name})`,
+        statusText: `Merged file ${fIdx + 1}/${files.length} (${file.name})`,
         speedMBs,
         log: `[DONE FILE] ${file.name}: ${vPktCount} video packets (${maxVEnd.toFixed(3)}s), ${aPktCount} audio packets (${maxAEnd.toFixed(3)}s)`
       });
@@ -967,7 +967,7 @@ async function processMediabunnyConcatStream(
     const finalTotalDuration = Math.max(vOffset, aOffset);
     onProgress({
       percentage: 100,
-      statusText: 'รวมไฟล์วิดีโอสำเร็จเรียบร้อย!',
+      statusText: 'Video concatenation completed successfully!',
       speedMBs: 0,
       log: `[COMPLETE] Concat finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB, total duration: ${finalTotalDuration.toFixed(3)}s`
     });
@@ -977,7 +977,7 @@ async function processMediabunnyConcatStream(
     console.error('Mediabunny Concat Error:', err);
     onProgress({
       percentage: 0,
-      statusText: `เกิดข้อผิดพลาด: ${err?.message || err}`,
+      statusText: `Error: ${err?.message || err}`,
       speedMBs: 0,
       log: `[ERROR] Concat failed: ${err?.message || err}\n${err?.stack || ''}`
     });
@@ -1000,7 +1000,7 @@ export async function processNativeConcatStream(
     const firstFormat = await detectMediaFormat(files[0]);
     onProgress({
       percentage: 1,
-      statusText: `ตรวจพบฟอร์แมตไฟล์: ${firstFormat.toUpperCase()}`,
+      statusText: `Detected container format: ${firstFormat.toUpperCase()}`,
       speedMBs: 0,
       log: `[DETECT] Detected input container format: ${firstFormat.toUpperCase()}`
     });
@@ -1008,7 +1008,7 @@ export async function processNativeConcatStream(
     if (firstFormat === 'webm' || firstFormat === 'mkv') {
       onProgress({
         percentage: 2,
-        statusText: `ใช้งาน Native Zero-RAM EBML Engine สำหรับ ${firstFormat.toUpperCase()}...`,
+        statusText: `Using Native Zero-RAM EBML Engine for ${firstFormat.toUpperCase()}...`,
         speedMBs: 0,
         log: `[ENGINE] Selected Native Zero-RAM EBML Streaming Engine for ${firstFormat.toUpperCase()} files`
       });
@@ -1018,15 +1018,21 @@ export async function processNativeConcatStream(
         console.warn("Native EBML concat failed, falling back to Mediabunny:", nativeErr);
         onProgress({
           percentage: 5,
-          statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
+          statusText: 'Switching to Mediabunny Engine (Fallback)...',
           speedMBs: 0,
-          log: `[FALLBACK] Native EBML engine error, switching to Mediabunny: ${nativeErr}`
+          log: `[FALLBACK] Native EBML engine error, switching to Mediabunny: ${nativeErr}\n[NOTICE] Switched to Mediabunny Engine due to container structure. Processing will take longer.`
         });
         return await processMediabunnyConcatStream(files, writable, onProgress);
       }
     }
 
     // For MP4 / MOV / TS and other formats, use Mediabunny
+    onProgress({
+      percentage: 2,
+      statusText: `Using Mediabunny Engine for ${firstFormat.toUpperCase()} files...`,
+      speedMBs: 0,
+      log: `[ENGINE] Selected Mediabunny Engine for ${firstFormat.toUpperCase()} files\n[NOTICE] Processing ${firstFormat.toUpperCase()} containers with Mediabunny Engine will be slower than MKV/WebM due to MP4 index recalculation.`
+    });
     return await processMediabunnyConcatStream(files, writable, onProgress);
   } catch (error) {
     console.error("Concat Stream Router Error:", error);
@@ -1227,7 +1233,7 @@ export async function processNativeTrimStream(
      if (format === 'webm' || format === 'mkv') {
        onProgress({
          percentage: 2,
-         statusText: `ใช้งาน Native Zero-RAM EBML Engine สำหรับตัดไฟล์ ${format.toUpperCase()}...`,
+         statusText: `Using Native Zero-RAM EBML Engine for ${format.toUpperCase()} trim...`,
          speedMBs: 0,
          log: `[ENGINE] Selected Native Zero-RAM EBML Streaming Engine for ${format.toUpperCase()} trim`
        });
@@ -1237,14 +1243,20 @@ export async function processNativeTrimStream(
          console.warn("Native EBML trim failed, falling back to Mediabunny:", nativeErr);
          onProgress({
            percentage: 5,
-           statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
+           statusText: 'Switching to Mediabunny Engine (Fallback)...',
            speedMBs: 0,
-           log: `[FALLBACK] Native EBML trim error, switching to Mediabunny: ${nativeErr}`
+           log: `[FALLBACK] Native EBML trim error, switching to Mediabunny: ${nativeErr}\n[NOTICE] Switched to Mediabunny Engine due to container structure. Processing will take longer.`
          });
          return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
        }
      }
 
+     onProgress({
+       percentage: 2,
+       statusText: `Using Mediabunny Engine for ${format.toUpperCase()} trim...`,
+       speedMBs: 0,
+       log: `[ENGINE] Selected Mediabunny Engine for ${format.toUpperCase()} trim\n[NOTICE] Processing ${format.toUpperCase()} containers with Mediabunny Engine will be slower than MKV/WebM due to MP4 index recalculation.`
+     });
      return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
   } catch (err) {
      console.error("Trim Stream Error:", err);
@@ -1428,7 +1440,7 @@ export async function processNativeRemuxStream(
      if (format === 'webm' || format === 'mkv') {
        onProgress({
          percentage: 2,
-         statusText: `ใช้งาน Native Zero-RAM EBML Engine สำหรับซ่อมแซมไฟล์ ${format.toUpperCase()}...`,
+         statusText: `Using Native Zero-RAM EBML Engine for ${format.toUpperCase()} remux...`,
          speedMBs: 0,
          log: `[ENGINE] Selected Native Zero-RAM EBML Streaming Engine for ${format.toUpperCase()} remux`
        });
@@ -1438,14 +1450,20 @@ export async function processNativeRemuxStream(
          console.warn("Native EBML remux failed, falling back to Mediabunny:", nativeErr);
          onProgress({
            percentage: 5,
-           statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
+           statusText: 'Switching to Mediabunny Engine (Fallback)...',
            speedMBs: 0,
-           log: `[FALLBACK] Native EBML remux error, switching to Mediabunny: ${nativeErr}`
+           log: `[FALLBACK] Native EBML remux error, switching to Mediabunny: ${nativeErr}\n[NOTICE] Switched to Mediabunny Engine due to container structure. Processing will take longer.`
          });
          return await processMediabunnyRemuxStream(file, writable, onProgress);
        }
      }
 
+     onProgress({
+       percentage: 2,
+       statusText: `Using Mediabunny Engine for ${format.toUpperCase()} remux...`,
+       speedMBs: 0,
+       log: `[ENGINE] Selected Mediabunny Engine for ${format.toUpperCase()} remux\n[NOTICE] Processing ${format.toUpperCase()} containers with Mediabunny Engine will be slower than MKV/WebM due to MP4 index recalculation.`
+     });
      return await processMediabunnyRemuxStream(file, writable, onProgress);
   } catch (err) {
      console.error("Remux Stream Router Error:", err);
