@@ -1005,25 +1005,41 @@ export async function processNativeConcatStream(
       log: `[DETECT] Detected input container format: ${firstFormat.toUpperCase()}`
     });
 
-    if (firstFormat === 'mp4') {
-      return await processMediabunnyConcatStream(files, writable, onProgress);
-    }
-
-    // For WebM/MKV, attempt mediabunny first, fallback to native EBML parser if needed
-    try {
-      return await processMediabunnyConcatStream(files, writable, onProgress);
-    } catch (mbErr) {
-      console.warn("Mediabunny concat failed, falling back to Native EBML Engine:", mbErr);
+    if (firstFormat === 'webm' || firstFormat === 'mkv') {
       onProgress({
-        percentage: 5,
-        statusText: 'สลับไปยัง Native EBML Concatenation Engine...',
+        percentage: 2,
+        statusText: `ใช้งาน Native Zero-RAM EBML Engine สำหรับ ${firstFormat.toUpperCase()}...`,
         speedMBs: 0,
-        log: `[FALLBACK] Mediabunny stream error, switching to Native EBML parser: ${mbErr}`
+        log: `[ENGINE] Selected Native Zero-RAM EBML Streaming Engine for ${firstFormat.toUpperCase()} files`
       });
+      try {
+        return await processNativeEBMLConcatStream(files, writable, onProgress);
+      } catch (nativeErr) {
+        console.warn("Native EBML concat failed, falling back to Mediabunny:", nativeErr);
+        onProgress({
+          percentage: 5,
+          statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
+          speedMBs: 0,
+          log: `[FALLBACK] Native EBML engine error, switching to Mediabunny: ${nativeErr}`
+        });
+        return await processMediabunnyConcatStream(files, writable, onProgress);
+      }
     }
-    
-    onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์ (Standard EBML)...', speedMBs: 0 });
 
+    // For MP4 / MOV / TS and other formats, use Mediabunny
+    return await processMediabunnyConcatStream(files, writable, onProgress);
+  } catch (error) {
+    console.error("Concat Stream Router Error:", error);
+    return { success: false };
+  }
+}
+
+async function processNativeEBMLConcatStream(
+  files: File[],
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  try {
     const fileMetas: FileMeta[] = [];
     let totalDurationMs = 0;
     for (let i = 0; i < files.length; i++) {
@@ -1208,17 +1224,42 @@ export async function processNativeTrimStream(
   try {
      const format = await detectMediaFormat(file);
 
-     if (format === 'mp4') {
-       return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
+     if (format === 'webm' || format === 'mkv') {
+       onProgress({
+         percentage: 2,
+         statusText: `ใช้งาน Native Zero-RAM EBML Engine สำหรับตัดไฟล์ ${format.toUpperCase()}...`,
+         speedMBs: 0,
+         log: `[ENGINE] Selected Native Zero-RAM EBML Streaming Engine for ${format.toUpperCase()} trim`
+       });
+       try {
+         return await executeNativeEBMLTrimStream(file, startTime, endTime, writable, onProgress);
+       } catch (nativeErr) {
+         console.warn("Native EBML trim failed, falling back to Mediabunny:", nativeErr);
+         onProgress({
+           percentage: 5,
+           statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
+           speedMBs: 0,
+           log: `[FALLBACK] Native EBML trim error, switching to Mediabunny: ${nativeErr}`
+         });
+         return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
+       }
      }
 
-     // For WebM/MKV, attempt mediabunny first, fallback to native EBML if needed
-     try {
-       return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
-     } catch (mbErr) {
-       console.warn("Mediabunny trim failed, falling back to Native EBML Engine:", mbErr);
-     }
+     return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
+  } catch (err) {
+     console.error("Trim Stream Error:", err);
+     return { success: false };
+  }
+}
 
+async function executeNativeEBMLTrimStream(
+  file: File,
+  startTime: number,
+  endTime: number,
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  try {
      onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์เพื่อตัดวิดีโอ (Standard Engine)...', speedMBs: 0 });
      
      const meta = await parseWebMFile(file);
@@ -1384,16 +1425,40 @@ export async function processNativeRemuxStream(
   try {
      const format = await detectMediaFormat(file);
 
-     if (format === 'mp4') {
-       return await processMediabunnyRemuxStream(file, writable, onProgress);
+     if (format === 'webm' || format === 'mkv') {
+       onProgress({
+         percentage: 2,
+         statusText: `ใช้งาน Native Zero-RAM EBML Engine สำหรับซ่อมแซมไฟล์ ${format.toUpperCase()}...`,
+         speedMBs: 0,
+         log: `[ENGINE] Selected Native Zero-RAM EBML Streaming Engine for ${format.toUpperCase()} remux`
+       });
+       try {
+         return await executeNativeEBMLRemuxStream(file, writable, onProgress);
+       } catch (nativeErr) {
+         console.warn("Native EBML remux failed, falling back to Mediabunny:", nativeErr);
+         onProgress({
+           percentage: 5,
+           statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
+           speedMBs: 0,
+           log: `[FALLBACK] Native EBML remux error, switching to Mediabunny: ${nativeErr}`
+         });
+         return await processMediabunnyRemuxStream(file, writable, onProgress);
+       }
      }
 
-     try {
-       return await processMediabunnyRemuxStream(file, writable, onProgress);
-     } catch (mbErr) {
-       console.warn("Mediabunny remux failed, falling back to Native EBML Engine:", mbErr);
-     }
+     return await processMediabunnyRemuxStream(file, writable, onProgress);
+  } catch (err) {
+     console.error("Remux Stream Router Error:", err);
+     return { success: false };
+  }
+}
 
+async function executeNativeEBMLRemuxStream(
+  file: File,
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  try {
      onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์เพื่อซ่อมแซม (Standard Remux Engine)...', speedMBs: 0 });
      
      const meta = await parseWebMFile(file);
