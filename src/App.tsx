@@ -332,15 +332,19 @@ export default function App() {
       URL.revokeObjectURL(outputUrl);
     }
     setOutputUrl(null);
-    setProcessingMessage('กำลังเริ่มต้นระบบประมวลผล...');
+    setProcessingMessage('Initializing processing engine...');
 
     const addLog = (text: string) => {
       const now = new Date();
       const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${now.getMilliseconds().toString().padStart(3, '0')}`;
-      setProcessingLogs((prev) => [...prev, `[${timeStr}] ${text}`]);
+      const lines = text.split('\n');
+      setProcessingLogs((prev) => [
+        ...prev,
+        ...lines.map((line) => `[${timeStr}] ${line}`)
+      ]);
     };
 
-    addLog(`Engine: Mediabunny Zero-RAM Stream Processor`);
+    addLog(`Engine: Wcat Zero-RAM Hybrid Stream Engine`);
     addLog(`Target: ${targetFilename}`);
 
     try {
@@ -379,7 +383,7 @@ export default function App() {
       };
 
       if (selectedFiles.length > 1) {
-        setProcessingMessage(`กำลังสตรีมรวมวิดีโอ ${selectedFiles.length} ไฟล์ด้วย Native Zero-RAM Engine...`);
+        setProcessingMessage(`Streaming & merging ${selectedFiles.length} video files...`);
         addLog(`Initiating multi-file concatenation for ${selectedFiles.length} files:`);
         selectedFiles.forEach((f, idx) => addLog(`  [${idx + 1}] ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`));
 
@@ -387,7 +391,7 @@ export default function App() {
 
         const result = await processNativeConcatStream(selectedFiles, writable, (prog) => {
           setProcessingProgress(prog.percentage / 100);
-          setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
+          setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
           if (prog.log) addLog(prog.log);
         });
 
@@ -396,21 +400,21 @@ export default function App() {
         }
 
         if (!result.success || result.totalBytesWritten === 0) {
-          throw new Error('ไม่สามารถรวมไฟล์วิดีโอได้');
+          throw new Error('Failed to concatenate video files');
         }
 
         if (opfsFileHandle) {
           const diskFile = await opfsFileHandle.getFile();
           const url = URL.createObjectURL(diskFile);
           setOutputUrl(url);
-          setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
+          setProcessingMessage('Video concatenation completed successfully!');
           addLog(`Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
         } else if (result.blobUrl) {
           setOutputUrl(result.blobUrl);
-          setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
+          setProcessingMessage('Video concatenation completed successfully!');
           addLog(`Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
-          setProcessingMessage(`รวมไฟล์วิดีโอบันทึกลงปลายทางสำเร็จ: ${fileHandle.name}`);
+          setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
           addLog(`Result saved directly to target file: ${fileHandle.name}`);
         }
 
@@ -418,7 +422,7 @@ export default function App() {
         setIsProcessingComplete(true);
       } else {
         // Trim mode or Single file
-        setProcessingMessage('กำลังสตรีมตัดวิดีโอด้วย Native Zero-RAM Engine...');
+        setProcessingMessage('Streaming video processing...');
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
 
         let inputFile: File;
@@ -450,7 +454,7 @@ export default function App() {
             writable,
             (prog) => {
               setProcessingProgress(prog.percentage / 100);
-              setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
+              setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
               if (prog.log) addLog(prog.log);
             }
           );
@@ -463,7 +467,7 @@ export default function App() {
             writable,
             (prog) => {
               setProcessingProgress(prog.percentage / 100);
-              setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
+              setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
               if (prog.log) addLog(prog.log);
             }
           );
@@ -474,21 +478,21 @@ export default function App() {
         }
 
         if (!result.success || result.totalBytesWritten === 0) {
-          throw new Error('ไม่สามารถตัดวิดีโอได้');
+          throw new Error('Failed to process video file');
         }
 
         if (opfsFileHandle) {
           const diskFile = await opfsFileHandle.getFile();
           const url = URL.createObjectURL(diskFile);
           setOutputUrl(url);
-          setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
+          setProcessingMessage('Video processing completed successfully!');
           addLog(`Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
         } else if (result.blobUrl) {
           setOutputUrl(result.blobUrl);
-          setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
+          setProcessingMessage('Video processing completed successfully!');
           addLog(`Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
-          setProcessingMessage(`ตัดวิดีโอบันทึกลงปลายทางสำเร็จ: ${fileHandle.name}`);
+          setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
           addLog(`Result saved directly to target file: ${fileHandle.name}`);
         }
 
