@@ -340,7 +340,7 @@ export default function App() {
       setProcessingLogs((prev) => [...prev, `[${timeStr}] ${text}`]);
     };
 
-    addLog(`Engine: Mediabunny Zero-RAM Stream Processor`);
+    addLog(`Engine: Wcat Zero-RAM Hybrid Stream Engine`);
     addLog(`Target: ${targetFilename}`);
 
     try {

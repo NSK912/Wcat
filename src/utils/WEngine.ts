@@ -1020,13 +1020,19 @@ export async function processNativeConcatStream(
           percentage: 5,
           statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
           speedMBs: 0,
-          log: `[FALLBACK] Native EBML engine error, switching to Mediabunny: ${nativeErr}`
+          log: `[FALLBACK] Native EBML engine error, switching to Mediabunny: ${nativeErr}\n⚠️ [NOTICE] สลับไปใช้ Mediabunny Engine เนื่องจากโครงสร้างไฟล์พิเศษ การประมวลผลจะใช้เวลาช้ากว่าปกติ`
         });
         return await processMediabunnyConcatStream(files, writable, onProgress);
       }
     }
 
     // For MP4 / MOV / TS and other formats, use Mediabunny
+    onProgress({
+      percentage: 2,
+      statusText: `ใช้งาน Mediabunny Engine สำหรับไฟล์ ${firstFormat.toUpperCase()}...`,
+      speedMBs: 0,
+      log: `[ENGINE] Selected Mediabunny Engine for ${firstFormat.toUpperCase()} files\n⚠️ [NOTICE] การประมวลผลไฟล์ประเภท ${firstFormat.toUpperCase()} ด้วย Mediabunny จะใช้เวลาช้ากว่า MKV/WebM เนื่องจากต้องคำนวณและเรียบเรียง Index MP4 ใหม่`
+    });
     return await processMediabunnyConcatStream(files, writable, onProgress);
   } catch (error) {
     console.error("Concat Stream Router Error:", error);
@@ -1239,12 +1245,18 @@ export async function processNativeTrimStream(
            percentage: 5,
            statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
            speedMBs: 0,
-           log: `[FALLBACK] Native EBML trim error, switching to Mediabunny: ${nativeErr}`
+           log: `[FALLBACK] Native EBML trim error, switching to Mediabunny: ${nativeErr}\n⚠️ [NOTICE] สลับไปใช้ Mediabunny Engine เนื่องจากโครงสร้างไฟล์พิเศษ การประมวลผลจะใช้เวลาช้ากว่าปกติ`
          });
          return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
        }
      }
 
+     onProgress({
+       percentage: 2,
+       statusText: `ใช้งาน Mediabunny Engine สำหรับตัดไฟล์ ${format.toUpperCase()}...`,
+       speedMBs: 0,
+       log: `[ENGINE] Selected Mediabunny Engine for ${format.toUpperCase()} trim\n⚠️ [NOTICE] การประมวลผลไฟล์ประเภท ${format.toUpperCase()} ด้วย Mediabunny จะใช้เวลาช้ากว่า MKV/WebM เนื่องจากต้องคำนวณและเรียบเรียง Index MP4 ใหม่`
+     });
      return await processMediabunnyTrimStream(file, startTime, endTime, writable, onProgress);
   } catch (err) {
      console.error("Trim Stream Error:", err);
@@ -1440,12 +1452,18 @@ export async function processNativeRemuxStream(
            percentage: 5,
            statusText: 'สลับไปยัง Mediabunny Engine (Fallback)...',
            speedMBs: 0,
-           log: `[FALLBACK] Native EBML remux error, switching to Mediabunny: ${nativeErr}`
+           log: `[FALLBACK] Native EBML remux error, switching to Mediabunny: ${nativeErr}\n⚠️ [NOTICE] สลับไปใช้ Mediabunny Engine เนื่องจากโครงสร้างไฟล์พิเศษ การประมวลผลจะใช้เวลาช้ากว่าปกติ`
          });
          return await processMediabunnyRemuxStream(file, writable, onProgress);
        }
      }
 
+     onProgress({
+       percentage: 2,
+       statusText: `ใช้งาน Mediabunny Engine สำหรับซ่อมแซมไฟล์ ${format.toUpperCase()}...`,
+       speedMBs: 0,
+       log: `[ENGINE] Selected Mediabunny Engine for ${format.toUpperCase()} remux\n⚠️ [NOTICE] การประมวลผลไฟล์ประเภท ${format.toUpperCase()} ด้วย Mediabunny จะใช้เวลาช้ากว่า MKV/WebM เนื่องจากต้องคำนวณและเรียบเรียง Index MP4 ใหม่`
+     });
      return await processMediabunnyRemuxStream(file, writable, onProgress);
   } catch (err) {
      console.error("Remux Stream Router Error:", err);
