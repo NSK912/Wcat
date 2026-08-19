@@ -269,8 +269,8 @@ export default function App() {
 
     // 1. Prompt user to choose destination folder & file name before starting export/remux
     let fileHandle: any = null;
-    const detectedExt = (videoName ? videoName.split('.').pop()?.toLowerCase() : 'mp4') || 'mp4';
-    const sourceExt = ['mp4', 'mkv', 'webm', 'ts', 'mov', 'm4v'].includes(detectedExt) ? detectedExt : 'mp4';
+    const detectedExt = (videoName ? videoName.split('.').pop()?.toLowerCase() : 'mkv') || 'mkv';
+    const sourceExt = ['mkv', 'mp4', 'webm', 'ts', 'mov', 'avi'].includes(detectedExt) ? detectedExt : 'mkv';
 
     const defaultOutputName = selectedFiles.length > 1 
       ? `merged_output.${sourceExt}` 
@@ -282,16 +282,12 @@ export default function App() {
           suggestedName: defaultOutputName,
           types: [
             {
-              description: 'MP4 Video (.mp4)',
-              accept: { 'video/mp4': ['.mp4'] },
-            },
-            {
               description: 'Matroska Video (.mkv)',
               accept: { 'video/x-matroska': ['.mkv'] },
             },
             {
-              description: 'WebM Video (.webm)',
-              accept: { 'video/webm': ['.webm'] },
+              description: 'MP4 Video (.mp4)',
+              accept: { 'video/mp4': ['.mp4'] },
             },
             {
               description: 'MPEG-TS Video (.ts)',
@@ -307,15 +303,15 @@ export default function App() {
         console.warn('showSaveFilePicker error/fallback:', err);
         
         // --- NEW: Handle Preview/Iframe restrictions explicitly ---
-        (window as any).alert('⚠️ ระบบไม่สามารถเปิดหน้าต่าง "เลือกที่บันทึกไฟล์ล่วงหน้า" ได้\n\nสาเหตุหลัก: คุณกำลังใช้งานแอปนี้ผ่านหน้าต่าง Preview ของ AI Studio (ซึ่งถูกบล็อกความปลอดภัยการเข้าถึงไฟล์) หรือเบราว์เซอร์ไม่รองรับ\n\n💡 วิธีแก้เพื่อถนอม SSD: ให้คลิกปุ่ม "Open in New Tab" ที่มุมขวาบนของหน้าจอ AI Studio เพื่อเปิดแอปในแท็บใหม่ ฟีเจอร์นี้ถึงจะทำงานได้ครับ');
+        alert('⚠️ ระบบไม่สามารถเปิดหน้าต่าง "เลือกที่บันทึกไฟล์ล่วงหน้า" ได้\n\nสาเหตุหลัก: คุณกำลังใช้งานแอปนี้ผ่านหน้าต่าง Preview ของ AI Studio (ซึ่งถูกบล็อกความปลอดภัยการเข้าถึงไฟล์) หรือเบราว์เซอร์ไม่รองรับ\n\n💡 วิธีแก้เพื่อถนอม SSD: ให้คลิกปุ่ม "Open in New Tab" ที่มุมขวาบนของหน้าจอ AI Studio เพื่อเปิดแอปในแท็บใหม่ ฟีเจอร์นี้ถึงจะทำงานได้ครับ');
         
-        const proceed = (window as any).confirm('คุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
+        const proceed = window.confirm('คุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
         if (!proceed) {
            return;
         }
       }
     } else {
-       const proceed = (window as any).confirm('⚠️ เบราว์เซอร์ของคุณไม่รองรับฟีเจอร์ "เลือกที่บันทึกไฟล์ล่วงหน้า"\n\nคุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
+       const proceed = window.confirm('⚠️ เบราว์เซอร์ของคุณไม่รองรับฟีเจอร์ "เลือกที่บันทึกไฟล์ล่วงหน้า"\n\nคุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
        if (!proceed) return;
     }
 
@@ -332,16 +328,7 @@ export default function App() {
       URL.revokeObjectURL(outputUrl);
     }
     setOutputUrl(null);
-    setProcessingMessage('กำลังเริ่มต้นระบบประมวลผล...');
-
-    const addLog = (text: string) => {
-      const now = new Date();
-      const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${now.getMilliseconds().toString().padStart(3, '0')}`;
-      setProcessingLogs((prev) => [...prev, `[${timeStr}] ${text}`]);
-    };
-
-    addLog(`Engine: Mediabunny Zero-RAM Stream Processor`);
-    addLog(`Target: ${targetFilename}`);
+    setProcessingMessage('Preparing files for FFmpeg...');
 
     try {
       const createPipelineStream = async (handle: FileSystemFileHandle | null, outName: string) => {
@@ -351,10 +338,8 @@ export default function App() {
         if (handle) {
           try {
             writable = await handle.createWritable();
-            addLog(`Direct disk output handle created: ${handle.name}`);
           } catch (e) {
             console.warn('FileHandle createWritable failed:', e);
-            addLog(`Warning: Direct handle createWritable failed: ${e}`);
           }
         }
 
@@ -364,15 +349,13 @@ export default function App() {
             const tempName = `opfs_stream_${Date.now()}_${outName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
             opfsFileHandle = await opfsRoot.getFileHandle(tempName, { create: true });
             writable = await opfsFileHandle.createWritable();
-            addLog(`Virtual OPFS temporary stream initialized: ${tempName}`);
           } catch (err) {
             console.warn('OPFS stream initialization error:', err);
-            addLog(`Warning: OPFS stream init error: ${err}`);
           }
         }
 
         if (!writable) {
-          addLog(`In-memory BufferTarget fallback engaged (No filesystem stream available)`);
+          throw new Error('ไม่สามารถสร้าง Direct Stream บนดิสก์ได้ กรุณาตรวจสอบพื้นที่จัดเก็บข้อมูลบนเครื่อง');
         }
 
         return { writable, opfsFileHandle };
@@ -380,15 +363,11 @@ export default function App() {
 
       if (selectedFiles.length > 1) {
         setProcessingMessage(`กำลังสตรีมรวมวิดีโอ ${selectedFiles.length} ไฟล์ด้วย Native Zero-RAM Engine...`);
-        addLog(`Initiating multi-file concatenation for ${selectedFiles.length} files:`);
-        selectedFiles.forEach((f, idx) => addLog(`  [${idx + 1}] ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`));
-
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
 
         const result = await processNativeConcatStream(selectedFiles, writable, (prog) => {
           setProcessingProgress(prog.percentage / 100);
           setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
-          if (prog.log) addLog(prog.log);
         });
 
         if (writable) {
@@ -404,14 +383,8 @@ export default function App() {
           const url = URL.createObjectURL(diskFile);
           setOutputUrl(url);
           setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
-          addLog(`Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
-        } else if (result.blobUrl) {
-          setOutputUrl(result.blobUrl);
-          setProcessingMessage('รวมไฟล์วิดีโอสำเร็จเรียบร้อย!');
-          addLog(`Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
           setProcessingMessage(`รวมไฟล์วิดีโอบันทึกลงปลายทางสำเร็จ: ${fileHandle.name}`);
-          addLog(`Result saved directly to target file: ${fileHandle.name}`);
         }
 
         setProcessingProgress(1.0);
@@ -444,18 +417,15 @@ export default function App() {
         let result;
 
         if (isFullLengthRemux) {
-          addLog(`Mode: Full length container repair / fast-start optimization for ${inputFile.name}`);
           result = await processNativeRemuxStream(
             inputFile,
             writable,
             (prog) => {
               setProcessingProgress(prog.percentage / 100);
               setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
-              if (prog.log) addLog(prog.log);
             }
           );
         } else {
-          addLog(`Mode: Precision Trim from ${currentStart.toFixed(2)}s to ${finalEndTime.toFixed(2)}s for ${inputFile.name}`);
           result = await processNativeTrimStream(
             inputFile,
             currentStart,
@@ -464,7 +434,6 @@ export default function App() {
             (prog) => {
               setProcessingProgress(prog.percentage / 100);
               setProcessingMessage(`${prog.statusText} - ความเร็ว: ${prog.speedMBs.toFixed(1)} MB/s`);
-              if (prog.log) addLog(prog.log);
             }
           );
         }
@@ -482,14 +451,8 @@ export default function App() {
           const url = URL.createObjectURL(diskFile);
           setOutputUrl(url);
           setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
-          addLog(`Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
-        } else if (result.blobUrl) {
-          setOutputUrl(result.blobUrl);
-          setProcessingMessage('ตัดวิดีโอสำเร็จเรียบร้อย!');
-          addLog(`Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
           setProcessingMessage(`ตัดวิดีโอบันทึกลงปลายทางสำเร็จ: ${fileHandle.name}`);
-          addLog(`Result saved directly to target file: ${fileHandle.name}`);
         }
 
         setProcessingProgress(1.0);
@@ -497,8 +460,6 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Video processing error:', err);
-      addLog(`FATAL ERROR: ${err?.message || err}`);
-      if (err?.stack) addLog(`Stack: ${err.stack}`);
       setProcessingMessage(`Error: ${err.message || 'Processing failed'}`);
       setIsProcessingComplete(true);
     }
