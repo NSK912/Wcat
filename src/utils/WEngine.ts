@@ -681,36 +681,40 @@ async function processMediabunnyTrimStream(
     });
 
     stage = 'Demuxing & Inspecting Tracks';
-    try {
-      const vTracks = await input.getVideoTracks();
-      if (vTracks.length > 0) {
-        vCodec = (await vTracks[0].getCodec()) || 'unknown';
-        const vConfig = await vTracks[0].getDecoderConfig();
-        onProgress({
-          percentage: 4,
-          statusText: 'Inspecting video track...',
-          speedMBs: 0,
-          log: `[INSPECT] Found Video Track: codec=${vCodec}, resolution=${vConfig?.codedWidth || 'auto'}x${vConfig?.codedHeight || 'auto'}`
-        });
-      }
-      const aTracks = await input.getAudioTracks();
-      if (aTracks.length > 0) {
-        aCodec = (await aTracks[0].getCodec()) || 'unknown';
-        const aConfig = await aTracks[0].getDecoderConfig();
-        onProgress({
-          percentage: 6,
-          statusText: 'Inspecting audio track...',
-          speedMBs: 0,
-          log: `[INSPECT] Found Audio Track: codec=${aCodec}, sampleRate=${aConfig?.sampleRate || 'auto'}Hz, channels=${aConfig?.numberOfChannels || 'auto'}`
-        });
-      }
-    } catch (e) {
+    const vTracks = await input.getVideoTracks();
+    const aTracks = await input.getAudioTracks();
+
+    let vSource: EncodedVideoPacketSource | null = null;
+    let aSource: EncodedAudioPacketSource | null = null;
+    let vDecConfig: any = null;
+    let aDecConfig: any = null;
+
+    if (vTracks.length > 0) {
+      vCodec = (await vTracks[0].getCodec()) || 'unknown';
+      vDecConfig = await vTracks[0].getDecoderConfig();
+      vSource = new EncodedVideoPacketSource(vCodec!);
       onProgress({
-        percentage: 5,
-        statusText: 'Track inspection warning',
+        percentage: 4,
+        statusText: 'Inspecting video track...',
         speedMBs: 0,
-        log: `[NOTICE] Track inspection deferred: ${e}`
+        log: `[INSPECT] Found Video Track: codec=${vCodec}, resolution=${vDecConfig?.codedWidth || 'auto'}x${vDecConfig?.codedHeight || 'auto'}`
       });
+    }
+
+    if (aTracks.length > 0) {
+      aCodec = (await aTracks[0].getCodec()) || 'unknown';
+      aDecConfig = await aTracks[0].getDecoderConfig();
+      aSource = new EncodedAudioPacketSource(aCodec!);
+      onProgress({
+        percentage: 6,
+        statusText: 'Inspecting audio track...',
+        speedMBs: 0,
+        log: `[INSPECT] Found Audio Track: codec=${aCodec}, sampleRate=${aDecConfig?.sampleRate || 'auto'}Hz, channels=${aDecConfig?.numberOfChannels || 'auto'}`
+      });
+    }
+
+    if (!vSource && !aSource) {
+      throw new Error(`No supported video or audio tracks found in file ${file.name}`);
     }
 
     stage = 'Initializing Mediabunny Output Format & Target';
@@ -718,43 +722,139 @@ async function processMediabunnyTrimStream(
     const target = createMediabunnyTarget(writable);
     const output = new Output({ format, target });
 
-    stage = 'Configuring Mediabunny Conversion';
-    const conversion = await Conversion.init({
-      input,
-      output,
-      trim: {
-        start: startTime > 0 ? startTime : undefined,
-        end: endTime > 0 ? endTime : undefined,
-      },
-    });
+    if (vSource) output.addVideoTrack(vSource, { decoderConfig: vDecConfig ?? undefined });
+    if (aSource) output.addAudioTrack(aSource, { decoderConfig: aDecConfig ?? undefined });
 
-    let lastTime = performance.now();
-    let lastBytes = 0;
+    stage = 'Starting Output Writer';
+    await output.start();
 
     target.on('write', ({ end }) => {
       totalWritten = Math.max(totalWritten, end);
     });
 
-    stage = 'Executing Conversion Stream';
-    conversion.onProgress = (prog) => {
-      const now = performance.now();
-      const elapsed = (now - lastTime) / 1000;
-      let speedMBs = 0;
-      if (elapsed > 0.5) {
-        speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
-        lastTime = now;
-        lastBytes = totalWritten;
-      }
-      lastProgress = Math.min(99, Math.round(prog * 100));
-      onProgress({
-        percentage: lastProgress,
-        statusText: `Trimming video (${lastProgress}%)...`,
-        speedMBs,
-        log: `[TRIM PROGRESS] ${lastProgress}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
-      });
-    };
+    stage = 'Demuxing and Processing Packets';
+    const vSink = vSource && vTracks.length > 0 ? new EncodedPacketSink(vTracks[0]) : null;
+    const aSink = aSource && aTracks.length > 0 ? new EncodedPacketSink(aTracks[0]) : null;
 
-    await conversion.execute();
+    const vIterator = vSink ? vSink.packets()[Symbol.asyncIterator]() : null;
+    const aIterator = aSink ? aSink.packets()[Symbol.asyncIterator]() : null;
+
+    let nextV = vIterator ? await vIterator.next() : { done: true, value: undefined };
+    let nextA = aIterator ? await aIterator.next() : { done: true, value: undefined };
+
+    let isFirstV = true;
+    let isFirstA = true;
+    let lastVTime = 0;
+    let lastATime = 0;
+    let lastVGopMaxTime = 0;
+
+    let lastTime = performance.now();
+    let lastBytes = 0;
+    const durationRange = (endTime > 0 && endTime < Infinity ? endTime : 3600) - startTime;
+
+    while (!nextV.done || !nextA.done) {
+      const rawVTime = (!nextV.done && nextV.value) ? nextV.value.timestamp : Infinity;
+      const rawATime = (!nextA.done && nextA.value) ? nextA.value.timestamp : Infinity;
+
+      if (rawVTime <= rawATime && !nextV.done && nextV.value) {
+        const pkt = nextV.value;
+        if (pkt.timestamp < startTime) {
+          nextV = await vIterator!.next();
+          continue;
+        }
+        if (endTime > 0 && pkt.timestamp > endTime) {
+          nextV = { done: true, value: undefined };
+          continue;
+        }
+
+        let pTime = pkt.timestamp - startTime;
+        pTime = Math.max(pTime, lastVTime);
+
+        if (pkt.type === 'key' && !isFirstV && pTime <= lastVGopMaxTime) {
+          pTime = lastVGopMaxTime + 0.001;
+        }
+        lastVTime = pTime;
+
+        const shifted = new EncodedPacket(
+          pkt.data,
+          isFirstV ? 'key' : pkt.type,
+          pTime,
+          pkt.duration,
+          pkt.sequenceNumber,
+          pkt.byteLength,
+          pkt.sideData
+        );
+
+        if (isFirstV && vDecConfig) {
+          await vSource!.add(shifted, { decoderConfig: vDecConfig });
+          isFirstV = false;
+        } else {
+          await vSource!.add(shifted);
+        }
+
+        const pktEnd = pTime + (pkt.duration || 0);
+        if (pktEnd > lastVGopMaxTime) lastVGopMaxTime = pktEnd;
+
+        const now = performance.now();
+        const elapsed = (now - lastTime) / 1000;
+        if (elapsed > 0.5) {
+          const speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
+          lastTime = now;
+          lastBytes = totalWritten;
+          const pct = Math.min(99, Math.round((pTime / (durationRange || 1)) * 100));
+          lastProgress = pct;
+          onProgress({
+            percentage: pct,
+            statusText: `Trimming video (${pct}%)...`,
+            speedMBs,
+            log: `[TRIM PROGRESS] Time: ${pTime.toFixed(2)}s, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+          });
+        }
+
+        nextV = await vIterator!.next();
+      } else if (!nextA.done && nextA.value) {
+        const pkt = nextA.value;
+        if (pkt.timestamp < startTime) {
+          nextA = await aIterator!.next();
+          continue;
+        }
+        if (endTime > 0 && pkt.timestamp > endTime) {
+          nextA = { done: true, value: undefined };
+          continue;
+        }
+
+        let pTime = pkt.timestamp - startTime;
+        pTime = Math.max(pTime, lastATime);
+        lastATime = pTime;
+
+        // CRITICAL: First audio packet is 'key', subsequent audio packets are 'delta'
+        const audioPktType = isFirstA ? 'key' : 'delta';
+
+        const shifted = new EncodedPacket(
+          pkt.data,
+          audioPktType,
+          pTime,
+          pkt.duration,
+          pkt.sequenceNumber,
+          pkt.byteLength,
+          pkt.sideData
+        );
+
+        if (isFirstA && aDecConfig) {
+          await aSource!.add(shifted, { decoderConfig: aDecConfig });
+          isFirstA = false;
+        } else {
+          await aSource!.add(shifted);
+        }
+
+        nextA = await aIterator!.next();
+      }
+    }
+
+    stage = 'Finalizing Container Output';
+    if (vSource) vSource.close();
+    if (aSource) aSource.close();
+    await output.finalize();
 
     stage = 'Creating Final Output Blob / Buffer';
     let blobUrl: string | undefined;
@@ -819,36 +919,40 @@ async function processMediabunnyRemuxStream(
     });
 
     stage = 'Demuxing & Inspecting Tracks';
-    try {
-      const vTracks = await input.getVideoTracks();
-      if (vTracks.length > 0) {
-        vCodec = (await vTracks[0].getCodec()) || 'unknown';
-        const vConfig = await vTracks[0].getDecoderConfig();
-        onProgress({
-          percentage: 4,
-          statusText: 'Inspecting video track...',
-          speedMBs: 0,
-          log: `[INSPECT] Found Video Track: codec=${vCodec}, resolution=${vConfig?.codedWidth || 'auto'}x${vConfig?.codedHeight || 'auto'}`
-        });
-      }
-      const aTracks = await input.getAudioTracks();
-      if (aTracks.length > 0) {
-        aCodec = (await aTracks[0].getCodec()) || 'unknown';
-        const aConfig = await aTracks[0].getDecoderConfig();
-        onProgress({
-          percentage: 6,
-          statusText: 'Inspecting audio track...',
-          speedMBs: 0,
-          log: `[INSPECT] Found Audio Track: codec=${aCodec}, sampleRate=${aConfig?.sampleRate || 'auto'}Hz, channels=${aConfig?.numberOfChannels || 'auto'}`
-        });
-      }
-    } catch (e) {
+    const vTracks = await input.getVideoTracks();
+    const aTracks = await input.getAudioTracks();
+
+    let vSource: EncodedVideoPacketSource | null = null;
+    let aSource: EncodedAudioPacketSource | null = null;
+    let vDecConfig: any = null;
+    let aDecConfig: any = null;
+
+    if (vTracks.length > 0) {
+      vCodec = (await vTracks[0].getCodec()) || 'unknown';
+      vDecConfig = await vTracks[0].getDecoderConfig();
+      vSource = new EncodedVideoPacketSource(vCodec!);
       onProgress({
-        percentage: 5,
-        statusText: 'Track inspection warning',
+        percentage: 4,
+        statusText: 'Inspecting video track...',
         speedMBs: 0,
-        log: `[NOTICE] Track inspection deferred: ${e}`
+        log: `[INSPECT] Found Video Track: codec=${vCodec}, resolution=${vDecConfig?.codedWidth || 'auto'}x${vDecConfig?.codedHeight || 'auto'}`
       });
+    }
+
+    if (aTracks.length > 0) {
+      aCodec = (await aTracks[0].getCodec()) || 'unknown';
+      aDecConfig = await aTracks[0].getDecoderConfig();
+      aSource = new EncodedAudioPacketSource(aCodec!);
+      onProgress({
+        percentage: 6,
+        statusText: 'Inspecting audio track...',
+        speedMBs: 0,
+        log: `[INSPECT] Found Audio Track: codec=${aCodec}, sampleRate=${aDecConfig?.sampleRate || 'auto'}Hz, channels=${aDecConfig?.numberOfChannels || 'auto'}`
+      });
+    }
+
+    if (!vSource && !aSource) {
+      throw new Error(`No supported video or audio tracks found in file ${file.name}`);
     }
 
     stage = 'Initializing Output Format & Target';
@@ -856,39 +960,117 @@ async function processMediabunnyRemuxStream(
     const target = createMediabunnyTarget(writable);
     const output = new Output({ format, target });
 
-    stage = 'Configuring Mediabunny Conversion';
-    const conversion = await Conversion.init({
-      input,
-      output,
-    });
+    if (vSource) output.addVideoTrack(vSource, { decoderConfig: vDecConfig ?? undefined });
+    if (aSource) output.addAudioTrack(aSource, { decoderConfig: aDecConfig ?? undefined });
 
-    let lastTime = performance.now();
-    let lastBytes = 0;
+    stage = 'Starting Output Writer';
+    await output.start();
 
     target.on('write', ({ end }) => {
       totalWritten = Math.max(totalWritten, end);
     });
 
-    stage = 'Executing Conversion Stream';
-    conversion.onProgress = (prog) => {
-      const now = performance.now();
-      const elapsed = (now - lastTime) / 1000;
-      let speedMBs = 0;
-      if (elapsed > 0.5) {
-        speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
-        lastTime = now;
-        lastBytes = totalWritten;
-      }
-      lastProgress = Math.min(99, Math.round(prog * 100));
-      onProgress({
-        percentage: lastProgress,
-        statusText: `Remuxing and repairing container (${lastProgress}%)...`,
-        speedMBs,
-        log: `[REMUX PROGRESS] ${lastProgress}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
-      });
-    };
+    stage = 'Demuxing and Processing Packets';
+    const vSink = vSource && vTracks.length > 0 ? new EncodedPacketSink(vTracks[0]) : null;
+    const aSink = aSource && aTracks.length > 0 ? new EncodedPacketSink(aTracks[0]) : null;
 
-    await conversion.execute();
+    const vIterator = vSink ? vSink.packets()[Symbol.asyncIterator]() : null;
+    const aIterator = aSink ? aSink.packets()[Symbol.asyncIterator]() : null;
+
+    let nextV = vIterator ? await vIterator.next() : { done: true, value: undefined };
+    let nextA = aIterator ? await aIterator.next() : { done: true, value: undefined };
+
+    let isFirstV = true;
+    let isFirstA = true;
+    let lastVTime = 0;
+    let lastATime = 0;
+    let lastVGopMaxTime = 0;
+
+    let lastTime = performance.now();
+    let lastBytes = 0;
+
+    while (!nextV.done || !nextA.done) {
+      const rawVTime = (!nextV.done && nextV.value) ? nextV.value.timestamp : Infinity;
+      const rawATime = (!nextA.done && nextA.value) ? nextA.value.timestamp : Infinity;
+
+      if (rawVTime <= rawATime && !nextV.done && nextV.value) {
+        const pkt = nextV.value;
+        let pTime = Math.max(pkt.timestamp, lastVTime);
+
+        if (pkt.type === 'key' && !isFirstV && pTime <= lastVGopMaxTime) {
+          pTime = lastVGopMaxTime + 0.001;
+        }
+        lastVTime = pTime;
+
+        const shifted = new EncodedPacket(
+          pkt.data,
+          isFirstV ? 'key' : pkt.type,
+          pTime,
+          pkt.duration,
+          pkt.sequenceNumber,
+          pkt.byteLength,
+          pkt.sideData
+        );
+
+        if (isFirstV && vDecConfig) {
+          await vSource!.add(shifted, { decoderConfig: vDecConfig });
+          isFirstV = false;
+        } else {
+          await vSource!.add(shifted);
+        }
+
+        const pktEnd = pTime + (pkt.duration || 0);
+        if (pktEnd > lastVGopMaxTime) lastVGopMaxTime = pktEnd;
+
+        const now = performance.now();
+        const elapsed = (now - lastTime) / 1000;
+        if (elapsed > 0.5) {
+          const speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
+          lastTime = now;
+          lastBytes = totalWritten;
+          lastProgress = 50;
+          onProgress({
+            percentage: 50,
+            statusText: `Remuxing container...`,
+            speedMBs,
+            log: `[REMUX PROGRESS] Time: ${pTime.toFixed(2)}s, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+          });
+        }
+
+        nextV = await vIterator!.next();
+      } else if (!nextA.done && nextA.value) {
+        const pkt = nextA.value;
+        let pTime = Math.max(pkt.timestamp, lastATime);
+        lastATime = pTime;
+
+        // CRITICAL: First audio packet is 'key', subsequent audio packets are 'delta'
+        const audioPktType = isFirstA ? 'key' : 'delta';
+
+        const shifted = new EncodedPacket(
+          pkt.data,
+          audioPktType,
+          pTime,
+          pkt.duration,
+          pkt.sequenceNumber,
+          pkt.byteLength,
+          pkt.sideData
+        );
+
+        if (isFirstA && aDecConfig) {
+          await aSource!.add(shifted, { decoderConfig: aDecConfig });
+          isFirstA = false;
+        } else {
+          await aSource!.add(shifted);
+        }
+
+        nextA = await aIterator!.next();
+      }
+    }
+
+    stage = 'Finalizing Container Output';
+    if (vSource) vSource.close();
+    if (aSource) aSource.close();
+    await output.finalize();
 
     stage = 'Creating Final Output Blob / Buffer';
     let blobUrl: string | undefined;
