@@ -760,6 +760,10 @@ async function processMediabunnyTrimStream(
       }
     }
 
+    if (vSource) vSource.close();
+    if (aSource) aSource.close();
+    await output.finalize();
+
     let blobUrl: string | undefined;
     if (target instanceof BufferTarget && target.buffer) {
       const isMp4 = file.name.toLowerCase().endsWith('.mp4');
@@ -943,6 +947,10 @@ async function processMediabunnyRemuxStream(
         nextA = await aIterator!.next();
       }
     }
+
+    if (vSource) vSource.close();
+    if (aSource) aSource.close();
+    await output.finalize();
 
     let blobUrl: string | undefined;
     if (target instanceof BufferTarget && target.buffer) {
