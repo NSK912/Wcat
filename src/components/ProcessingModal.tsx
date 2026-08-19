@@ -24,6 +24,14 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
   onClose,
   onDownload,
 }) => {
+  const logContainerRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [logs]);
+
   if (!isOpen) return null;
 
   const isError = message.toLowerCase().includes('error') || message.toLowerCase().includes('failed');
@@ -59,7 +67,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
       <div className="bg-slate-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl w-full max-w-lg p-5 shadow-2xl flex flex-col space-y-4 animate-in fade-in zoom-in duration-200">
         
         {/* Terminal log box */}
-        <div className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-56 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
+        <div ref={logContainerRef} className="bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl p-3.5 h-56 overflow-y-auto font-mono text-[11px] text-slate-300 space-y-1.5 select-text">
           {logs.length === 0 ? (
             <div className="text-slate-400 italic px-1">
               {message || 'กำลังประมวลผลด้วย FFmpeg...'}

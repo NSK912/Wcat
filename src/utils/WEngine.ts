@@ -51,33 +51,96 @@ export async function detectMediaFormat(file: File): Promise<'mp4' | 'webm' | 'm
 
 /**
  * Creates a Mediabunny Target connected to a FileSystemWritableFileStream or in-memory BufferTarget
+ * Includes 4MB RAM chunk buffering to prevent Chrome FileSystemWritableFileStream IPC disk overhead
  */
 function createMediabunnyTarget(writable: FileSystemWritableFileStream | null): StreamTarget | BufferTarget {
   if (!writable) {
     return new BufferTarget();
   }
 
+  const BUFFER_SIZE = 4 * 1024 * 1024; // 4MB buffer for maximum SSD write throughput
+  let pendingChunks: Uint8Array[] = [];
+  let pendingLength = 0;
+  let currentStartPos: number | null = null;
+  let currentPos = 0;
+
+  const flushBuffer = async () => {
+    if (pendingLength === 0) return;
+
+    let combined: Uint8Array;
+    if (pendingChunks.length === 1) {
+      combined = pendingChunks[0];
+    } else {
+      combined = new Uint8Array(pendingLength);
+      let offset = 0;
+      for (const chunk of pendingChunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+    }
+
+    const writePos = currentStartPos;
+    pendingChunks = [];
+    pendingLength = 0;
+    currentStartPos = null;
+
+    try {
+      if (typeof (writable as any).seek === 'function' && writePos !== null) {
+        await (writable as any).seek(writePos);
+      }
+      await writable.write(combined);
+    } catch (err) {
+      console.error('Buffered writable flush error:', err);
+      try {
+        await writable.write(combined);
+      } catch (innerErr) {
+        console.error('Fallback writable write failed:', innerErr);
+        throw innerErr;
+      }
+    }
+  };
+
   const customWritable = new WritableStream<StreamTargetChunk>({
     async write(chunk) {
-      if (writable && typeof writable.write === 'function') {
-        try {
-          await writable.write(chunk);
-        } catch (err) {
-          // Direct fallback if chunk structure isn't directly unwrapped
-          try {
-            if (typeof (writable as any).seek === 'function' && typeof chunk.position === 'number') {
-              await (writable as any).seek(chunk.position);
-            }
-            await writable.write(chunk.data);
-          } catch (innerErr) {
-            console.error('Writable write failure:', innerErr);
-            throw innerErr;
-          }
-        }
+      if (!writable) return;
+
+      let data: Uint8Array | null = null;
+      let pos: number | undefined = undefined;
+
+      if (chunk instanceof Uint8Array) {
+        data = chunk;
+      } else if (chunk && typeof chunk === 'object') {
+        data = (chunk as any).data || null;
+        pos = typeof (chunk as any).position === 'number' ? (chunk as any).position : undefined;
+      }
+
+      if (!data) {
+        await flushBuffer();
+        await writable.write(chunk as any);
+        return;
+      }
+
+      const chunkPos = pos !== undefined ? pos : currentPos;
+
+      // If position seeks non-sequentially, flush pending buffer first
+      if (currentStartPos !== null && chunkPos !== (currentStartPos + pendingLength)) {
+        await flushBuffer();
+      }
+
+      if (pendingLength === 0) {
+        currentStartPos = chunkPos;
+      }
+
+      pendingChunks.push(data);
+      pendingLength += data.length;
+      currentPos = chunkPos + data.length;
+
+      if (pendingLength >= BUFFER_SIZE) {
+        await flushBuffer();
       }
     },
     async close() {
-      // Handled by outer caller
+      await flushBuffer();
     }
   });
 
@@ -617,6 +680,8 @@ async function processMediabunnyTrimStream(
     let lastTime = performance.now();
     let lastBytes = 0;
     let totalWritten = 0;
+    let lastUiUpdate = 0;
+    let lastLoggedPercent = -1;
 
     target.on('write', ({ end }) => {
       totalWritten = Math.max(totalWritten, end);
@@ -631,12 +696,23 @@ async function processMediabunnyTrimStream(
         lastTime = now;
         lastBytes = totalWritten;
       }
-      onProgress({
-        percentage: Math.min(99, Math.round(prog * 100)),
-        statusText: `กำลังตัดวิดีโอ (${Math.round(prog * 100)}%)...`,
-        speedMBs,
-        log: `[TRIM PROGRESS] ${(prog * 100).toFixed(1)}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
-      });
+
+      const currentPercent = Math.min(99, Math.round(prog * 100));
+      const shouldLog = currentPercent !== lastLoggedPercent && (currentPercent % 2 === 0 || prog >= 1);
+
+      if (now - lastUiUpdate > 150 || shouldLog || prog >= 1) {
+        lastUiUpdate = now;
+        if (shouldLog) {
+          lastLoggedPercent = currentPercent;
+        }
+
+        onProgress({
+          percentage: currentPercent,
+          statusText: `กำลังตัดวิดีโอ (${currentPercent}%)...`,
+          speedMBs,
+          log: shouldLog ? `[TRIM PROGRESS] ${currentPercent}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB` : undefined
+        });
+      }
     };
 
     await conversion.execute();
@@ -701,6 +777,8 @@ async function processMediabunnyRemuxStream(
     let lastTime = performance.now();
     let lastBytes = 0;
     let totalWritten = 0;
+    let lastUiUpdate = 0;
+    let lastLoggedPercent = -1;
 
     target.on('write', ({ end }) => {
       totalWritten = Math.max(totalWritten, end);
@@ -715,12 +793,23 @@ async function processMediabunnyRemuxStream(
         lastTime = now;
         lastBytes = totalWritten;
       }
-      onProgress({
-        percentage: Math.min(99, Math.round(prog * 100)),
-        statusText: `กำลังรีมิกซ์และซ่อมแซมโครงสร้างไฟล์ (${Math.round(prog * 100)}%)...`,
-        speedMBs,
-        log: `[REMUX PROGRESS] ${(prog * 100).toFixed(1)}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
-      });
+
+      const currentPercent = Math.min(99, Math.round(prog * 100));
+      const shouldLog = currentPercent !== lastLoggedPercent && (currentPercent % 2 === 0 || prog >= 1);
+
+      if (now - lastUiUpdate > 150 || shouldLog || prog >= 1) {
+        lastUiUpdate = now;
+        if (shouldLog) {
+          lastLoggedPercent = currentPercent;
+        }
+
+        onProgress({
+          percentage: currentPercent,
+          statusText: `กำลังรีมิกซ์และซ่อมแซมโครงสร้างไฟล์ (${currentPercent}%)...`,
+          speedMBs,
+          log: shouldLog ? `[REMUX PROGRESS] ${currentPercent}% complete, written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB` : undefined
+        });
+      }
     };
 
     await conversion.execute();
