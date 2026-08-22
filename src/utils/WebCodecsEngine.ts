@@ -11,6 +11,8 @@ import {
   ALL_FORMATS,
   VideoSample,
   Quality,
+  canEncodeVideo,
+  canEncodeAudio,
   type StreamTargetChunk,
   type VideoCodec,
   type AudioCodec,
@@ -30,7 +32,7 @@ export function isWebCodecsSupported(): boolean {
 }
 
 /**
- * Probes WebCodecs hardware acceleration capabilities
+ * Probes WebCodecs hardware acceleration & software capabilities
  */
 export async function probeWebCodecsCapabilities(): Promise<{
   supported: boolean;
@@ -59,7 +61,7 @@ export async function probeWebCodecsCapabilities(): Promise<{
       height: 1080,
       bitrate: 4_000_000,
       framerate: 30,
-      hardwareAcceleration: 'prefer-hardware',
+      hardwareAcceleration: 'no-preference',
     });
     codecs.avc = !!avcSupport.supported;
     if (avcSupport.config?.hardwareAcceleration === 'prefer-hardware') {
@@ -75,7 +77,7 @@ export async function probeWebCodecsCapabilities(): Promise<{
       height: 1080,
       bitrate: 4_000_000,
       framerate: 30,
-      hardwareAcceleration: 'prefer-hardware',
+      hardwareAcceleration: 'no-preference',
     });
     codecs.vp9 = !!vp9Support.supported;
   } catch {}
@@ -88,7 +90,7 @@ export async function probeWebCodecsCapabilities(): Promise<{
       height: 1080,
       bitrate: 4_000_000,
       framerate: 30,
-      hardwareAcceleration: 'prefer-hardware',
+      hardwareAcceleration: 'no-preference',
     });
     codecs.av1 = !!av1Support.supported;
   } catch {}
@@ -101,7 +103,7 @@ export async function probeWebCodecsCapabilities(): Promise<{
       height: 1080,
       bitrate: 4_000_000,
       framerate: 30,
-      hardwareAcceleration: 'prefer-hardware',
+      hardwareAcceleration: 'no-preference',
     });
     codecs.hevc = !!hevcSupport.supported;
   } catch {}
@@ -145,6 +147,69 @@ function resolveQuality(qualityStr?: string): Quality {
     ? (qualityStr as QualityLevel)
     : 'high';
   return new Quality(level);
+}
+
+/**
+ * Automatically negotiates a supported video codec for the given resolution/quality.
+ * Falls back across AVC -> VP9 -> VP8 -> AV1 -> HEVC if a specific profile is not supported.
+ */
+async function negotiateVideoCodec(
+  preferredCodec: VideoCodec,
+  width: number,
+  height: number,
+  quality: Quality
+): Promise<VideoCodec> {
+  const safeWidth = Math.max(2, width - (width % 2));
+  const safeHeight = Math.max(2, height - (height % 2));
+
+  try {
+    const isSupported = await canEncodeVideo(preferredCodec, {
+      width: safeWidth,
+      height: safeHeight,
+      quality,
+      hardwareAcceleration: 'no-preference',
+    });
+    if (isSupported) return preferredCodec;
+  } catch {
+    // Continue to fallback candidates
+  }
+
+  const fallbackCandidates: VideoCodec[] = ['avc', 'vp9', 'vp8', 'av1', 'hevc'];
+  for (const candidate of fallbackCandidates) {
+    if (candidate === preferredCodec) continue;
+    try {
+      const supported = await canEncodeVideo(candidate, {
+        width: safeWidth,
+        height: safeHeight,
+        quality,
+        hardwareAcceleration: 'no-preference',
+      });
+      if (supported) return candidate;
+    } catch {}
+  }
+
+  return preferredCodec;
+}
+
+/**
+ * Automatically negotiates supported audio codec
+ */
+async function negotiateAudioCodec(preferredCodec: AudioCodec): Promise<AudioCodec> {
+  try {
+    const isSupported = await canEncodeAudio(preferredCodec);
+    if (isSupported) return preferredCodec;
+  } catch {}
+
+  const fallbacks: AudioCodec[] = ['aac', 'opus', 'flac'];
+  for (const candidate of fallbacks) {
+    if (candidate === preferredCodec) continue;
+    try {
+      const supported = await canEncodeAudio(candidate);
+      if (supported) return candidate;
+    } catch {}
+  }
+
+  return preferredCodec;
 }
 
 /**
@@ -221,9 +286,9 @@ export async function processWebCodecsEncodeStream(
   const startTime = performance.now();
   onProgress({
     percentage: 1,
-    statusText: 'Initializing WebCodecs API Hardware Acceleration Pipeline...',
+    statusText: 'Initializing WebCodecs API Processing Pipeline...',
     speedMBs: 0,
-    log: `[WebCodecs API] Hardware Accelerated Video Encoding Pipeline Initialized\n[WebCodecs API] Source: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`,
+    log: `[WebCodecs API] Video Encoding Pipeline Initialized\n[WebCodecs API] Source: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`,
   });
 
   const input = new Input({
@@ -235,24 +300,28 @@ export async function processWebCodecsEncodeStream(
   const videoTracks = await input.getVideoTracks();
   const audioTracks = await input.getAudioTracks();
 
-  let sourceWidth = 1920;
-  let sourceHeight = 1080;
+  let rawWidth = 1920;
+  let rawHeight = 1080;
   let sourceDuration = settings.duration || 0;
 
   if (videoTracks.length > 0) {
     const vTrack = videoTracks[0];
-    sourceWidth = vTrack.displayWidth || vTrack.codedWidth || 1920;
-    sourceHeight = vTrack.displayHeight || vTrack.codedHeight || 1080;
+    rawWidth = vTrack.displayWidth || vTrack.codedWidth || 1920;
+    rawHeight = vTrack.displayHeight || vTrack.codedHeight || 1080;
     const dur = await vTrack.computeDuration();
     if (dur && dur > 0) sourceDuration = dur;
     const codec = await vTrack.getCodec();
     onProgress({
       percentage: 3,
-      statusText: `WebCodecs: Detected Video Track ${sourceWidth}x${sourceHeight} (${codec || 'H.264'})`,
+      statusText: `WebCodecs: Detected Video Track ${rawWidth}x${rawHeight} (${codec || 'H.264'})`,
       speedMBs: 0,
-      log: `[WebCodecs API] Video Stream: ${sourceWidth}x${sourceHeight} (${codec || 'H.264'}), Duration: ${sourceDuration.toFixed(2)}s`,
+      log: `[WebCodecs API] Video Stream: ${rawWidth}x${rawHeight} (${codec || 'H.264'}), Duration: ${sourceDuration.toFixed(2)}s`,
     });
   }
+
+  // Ensure dimensions are even numbers (vital for AVC/HEVC/VP9 hardware & software encoders)
+  const sourceWidth = Math.max(2, rawWidth - (rawWidth % 2));
+  const sourceHeight = Math.max(2, rawHeight - (rawHeight % 2));
 
   // Calculate Trim Timestamps
   const trimStart = settings.startTime > 0 ? settings.startTime : undefined;
@@ -260,15 +329,28 @@ export async function processWebCodecsEncodeStream(
 
   onProgress({
     percentage: 5,
-    statusText: 'Configuring WebCodecs VideoEncoder & AudioEncoder...',
+    statusText: 'Negotiating WebCodecs VideoEncoder & AudioEncoder configuration...',
     speedMBs: 0,
     log: `[WebCodecs API] Trim Range: ${trimStart ? `${trimStart.toFixed(2)}s` : '0.00s'} -> ${trimEnd ? `${trimEnd.toFixed(2)}s` : `${sourceDuration.toFixed(2)}s`}`,
   });
 
-  // Determine Output Format
+  // Determine Video Codec & Quality with fallback negotiation
+  const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
+  const targetQuality = resolveQuality(settings.videoQuality);
+  const targetVideoCodec = await negotiateVideoCodec(
+    preferredVideoCodec,
+    sourceWidth,
+    sourceHeight,
+    targetQuality
+  );
+
+  const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
+  const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
+
+  // Determine Output Format compatible with negotiated codecs
   const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
   let outputFormat;
-  if (ext === 'webm' || settings.outputFormat === 'webm') {
+  if (ext === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8') {
     outputFormat = new WebMOutputFormat();
   } else if (ext === 'mkv') {
     outputFormat = new MkvOutputFormat();
@@ -284,10 +366,6 @@ export async function processWebCodecsEncodeStream(
   });
 
   const output = new Output({ format: outputFormat, target });
-
-  // Determine Video Codec & Quality
-  const targetVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
-  const targetQuality = resolveQuality(settings.videoQuality);
 
   // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip)
   const needsCanvasProcessing =
@@ -314,7 +392,7 @@ export async function processWebCodecsEncodeStream(
     }
   }
 
-  // Configure Mediabunny WebCodecs Pipeline
+  // Configure Mediabunny WebCodecs Pipeline with 'no-preference' to support both HW & SW encoding
   const conversion = await Conversion.init({
     input,
     output,
@@ -326,7 +404,7 @@ export async function processWebCodecsEncodeStream(
       forceTranscode: true, // Forces WebCodecs VideoDecoder -> VideoEncoder pipeline
       codec: targetVideoCodec,
       quality: targetQuality,
-      hardwareAcceleration: 'prefer-hardware',
+      hardwareAcceleration: 'no-preference',
       rotate: (settings.rotation as any) || undefined,
       allowRotationMetadata: false, // Bakes rotation into the WebCodecs pixel buffer
       process: needsCanvasProcessing && offscreenCanvas && canvasCtx
@@ -363,7 +441,6 @@ export async function processWebCodecsEncodeStream(
               ctx.shadowBlur = 4;
               ctx.shadowOffsetX = 1;
               ctx.shadowOffsetY = 1;
-
               const text = settings.watermarkText;
               const textMetrics = ctx.measureText(text);
               const padding = 20;
@@ -405,7 +482,7 @@ export async function processWebCodecsEncodeStream(
     audio: {
       discard: settings.muteAudio,
       forceTranscode: true, // Forces WebCodecs AudioDecoder -> AudioEncoder
-      codec: (settings.audioCodec as AudioCodec) || 'aac',
+      codec: targetAudioCodec,
       quality: resolveQuality('high'),
     },
   });
@@ -440,15 +517,16 @@ export async function processWebCodecsEncodeStream(
     percentage: 10,
     statusText: 'WebCodecs VideoEncoder actively processing frames...',
     speedMBs: 0,
-    log: `[WebCodecs API] Hardware VideoEncoder started with Codec: ${targetVideoCodec.toUpperCase()} | Quality: ${targetQuality}`,
+    log: `[WebCodecs API] VideoEncoder started with Codec: ${targetVideoCodec.toUpperCase()} (Audio: ${targetAudioCodec.toUpperCase()}) | Quality: ${settings.videoQuality || 'high'}`,
   });
 
   await conversion.execute();
 
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
-    const isMp4 = !file.name.toLowerCase().endsWith('.webm') && !file.name.toLowerCase().endsWith('.mkv');
-    const mime = isMp4 ? 'video/mp4' : file.name.toLowerCase().endsWith('.mkv') ? 'video/x-matroska' : 'video/webm';
+    const isMp4 = outputFormat instanceof Mp4OutputFormat;
+    const isMkv = outputFormat instanceof MkvOutputFormat;
+    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
     const blob = new Blob([target.buffer], { type: mime });
     blobUrl = URL.createObjectURL(blob);
     totalWritten = target.buffer.byteLength;
@@ -504,8 +582,19 @@ export async function processWebCodecsConcatStream(
   }
 
   const firstFile = files[0];
+  const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
+  const targetQuality = resolveQuality(settings.videoQuality);
+  const targetVideoCodec = await negotiateVideoCodec(preferredVideoCodec, 1920, 1080, targetQuality);
+  const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
+  const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
+
   const ext = firstFile.name.split('.').pop()?.toLowerCase() || 'mp4';
-  const format = ext === 'webm' ? new WebMOutputFormat() : ext === 'mkv' ? new MkvOutputFormat() : new Mp4OutputFormat({ fastStart: 'in-memory' });
+  const format =
+    ext === 'webm' || targetVideoCodec === 'vp8'
+      ? new WebMOutputFormat()
+      : ext === 'mkv'
+      ? new MkvOutputFormat()
+      : new Mp4OutputFormat({ fastStart: 'in-memory' });
 
   const target = createWebCodecsTarget(writable);
   let totalWritten = 0;
@@ -537,14 +626,14 @@ export async function processWebCodecsConcatStream(
       composable: true, // Allows multiple file segments targeting the same output
       video: {
         forceTranscode: true,
-        codec: (settings.videoCodec as VideoCodec) || 'avc',
-        quality: resolveQuality(settings.videoQuality),
-        hardwareAcceleration: 'prefer-hardware',
+        codec: targetVideoCodec,
+        quality: targetQuality,
+        hardwareAcceleration: 'no-preference',
       },
       audio: {
         discard: settings.muteAudio,
         forceTranscode: true,
-        codec: (settings.audioCodec as AudioCodec) || 'aac',
+        codec: targetAudioCodec,
         quality: resolveQuality('high'),
       },
     });
@@ -563,8 +652,9 @@ export async function processWebCodecsConcatStream(
 
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
-    const isMp4 = !firstFile.name.toLowerCase().endsWith('.webm') && !firstFile.name.toLowerCase().endsWith('.mkv');
-    const mime = isMp4 ? 'video/mp4' : firstFile.name.toLowerCase().endsWith('.mkv') ? 'video/x-matroska' : 'video/webm';
+    const isMp4 = format instanceof Mp4OutputFormat;
+    const isMkv = format instanceof MkvOutputFormat;
+    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
     const blob = new Blob([target.buffer], { type: mime });
     blobUrl = URL.createObjectURL(blob);
     totalWritten = target.buffer.byteLength;
