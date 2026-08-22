@@ -895,7 +895,7 @@ export async function processWebCodecsConcatStream(
     await conversion.execute();
   }
 
-  await output.close();
+  await output.finalize();
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
     const isMp4 = format instanceof Mp4OutputFormat;
