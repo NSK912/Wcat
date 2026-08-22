@@ -858,6 +858,10 @@ export async function processWebCodecsConcatStream(
       },
     });
 
+    if (currentFileIdx === 1) {
+      await output.start();
+    }
+
     conversion.onProgress = (prog: number) => {
       const overall = Math.round((((currentFileIdx - 1) + prog) / files.length) * 100);
       onProgress({
@@ -869,6 +873,8 @@ export async function processWebCodecsConcatStream(
 
     await conversion.execute();
   }
+
+  await output.close();
 
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
