@@ -13,6 +13,7 @@ import {
   Quality,
   canEncodeVideo,
   canEncodeAudio,
+  OutputTrackGroup,
   type StreamTargetChunk,
   type VideoCodec,
   type AudioCodec,
@@ -823,16 +824,21 @@ export async function processWebCodecsConcatStream(
 
   const output = new Output({ format, target });
 
-  // Build sequential conversions per file
-  let currentFileIdx = 0;
-  for (const segment of segments) {
+  const videoGroup = new OutputTrackGroup();
+  const audioGroup = new OutputTrackGroup();
+  videoGroup.pairWith(audioGroup);
+
+  const conversions = [];
+  
+  // Initialize all conversions first (must be done before output.start())
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
     const file = segment.file;
-    currentFileIdx++;
     onProgress({
-      percentage: Math.round(((currentFileIdx - 1) / files.length) * 100),
-      statusText: `WebCodecs Concat: Encoding segment ${currentFileIdx}/${files.length} (${file.name})...`,
+      percentage: Math.round((i / files.length) * 50),
+      statusText: `WebCodecs Concat: Initializing segment ${i + 1}/${files.length} (${file.name})...`,
       speedMBs: 0,
-      log: `[WebCodecs Concat] Processing segment ${currentFileIdx}/${files.length}: ${file.name}`,
+      log: `[WebCodecs Concat] Initializing segment ${i + 1}/${files.length}: ${file.name}`,
     });
 
     const input = new Input({
@@ -849,21 +855,36 @@ export async function processWebCodecsConcatStream(
         codec: targetVideoCodec,
         quality: targetQuality,
         hardwareAcceleration: 'no-preference',
+        group: videoGroup
       },
       audio: {
         discard: settings.muteAudio,
         forceTranscode: true,
         codec: targetAudioCodec,
         quality: resolveQuality('high'),
+        group: audioGroup
       },
     });
 
-    if (currentFileIdx === 1) {
-      await output.start();
-    }
+    conversions.push({ conversion, segment, file });
+  }
 
-    conversion.onProgress = (prog: number) => {
-      const overall = Math.round((((currentFileIdx - 1) + prog) / files.length) * 100);
+  // Now start the output file
+  await output.start();
+
+  // Execute conversions sequentially
+  let currentFileIdx = 0;
+  for (const { conversion, segment, file } of conversions) {
+    currentFileIdx++;
+    onProgress({
+      percentage: 50 + Math.round(((currentFileIdx - 1) / files.length) * 50),
+      statusText: `WebCodecs Concat: Encoding segment ${currentFileIdx}/${files.length} (${file.name})...`,
+      speedMBs: 0,
+      log: `[WebCodecs Concat] Processing segment ${currentFileIdx}/${files.length}: ${file.name}`,
+    });
+
+    conversion.onProgress = (prog) => {
+      const overall = Math.round((((currentFileIdx - 1) + prog) / files.length) * 50) + 50;
       onProgress({
         percentage: Math.min(99, overall),
         statusText: `WebCodecs Concat [${currentFileIdx}/${files.length}]: ${Math.round(prog * 100)}%`,
@@ -875,7 +896,6 @@ export async function processWebCodecsConcatStream(
   }
 
   await output.close();
-
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
     const isMp4 = format instanceof Mp4OutputFormat;
