@@ -734,13 +734,49 @@ export async function processWebCodecsEncodeStream(
  * Concat multiple files using WebCodecs API transcoding
  */
 export async function processWebCodecsConcatStream(
-  files: File[],
+  inputItems: any[],
   settings: EditSettings,
   writable: FileSystemWritableFileStream | null,
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
-  if (files.length === 0) {
-    throw new Error('No files provided for concatenation');
+// 1. Flatten if inputItems are tracks
+  let files: File[] = [];
+  let segments: any[] = [];
+  const isTracks = inputItems.length > 0 && inputItems[0].clips !== undefined;
+  
+  if (isTracks) {
+    const allClips = [];
+    inputItems.forEach(t => {
+      if (!t.hidden) {
+        t.clips.forEach(c => allClips.push(c));
+      }
+    });
+    // Sort by timeline start time
+    allClips.sort((a, b) => a.startTime - b.startTime);
+    allClips.forEach(c => {
+      if (c.file && (c.mediaType === 'video' || c.file.type.startsWith('video/'))) {
+        segments.push({
+          file: c.file,
+          name: c.name || c.file.name,
+          startTime: c.startTime,
+          sourceStartTime: c.sourceStartTime || 0,
+          duration: c.duration || c.fileDuration || 0
+        });
+        files.push(c.file);
+      }
+    });
+  } else {
+    files = inputItems as File[];
+    segments = files.map(f => ({
+      file: f,
+      name: f.name,
+      sourceStartTime: settings.startTime || 0,
+      duration: (settings.endTime ? settings.endTime - (settings.startTime || 0) : 0)
+    }));
+  }
+
+  if (segments.length === 0) {
+    throw new Error('No valid video files/clips provided for concatenation');
   }
 
   onProgress({
@@ -789,7 +825,8 @@ export async function processWebCodecsConcatStream(
 
   // Build sequential conversions per file
   let currentFileIdx = 0;
-  for (const file of files) {
+  for (const segment of segments) {
+    const file = segment.file;
     currentFileIdx++;
     onProgress({
       percentage: Math.round(((currentFileIdx - 1) / files.length) * 100),

@@ -14,3 +14,33 @@ input, textarea {
   -moz-user-select: text !important;
   -ms-user-select: text !important;
 }
+
+/* Custom Sleek Dark Scrollbars across entire app (matching terminal log) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(71, 85, 105, 0.7) rgba(15, 23, 42, 0.6);
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.75);
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.8);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

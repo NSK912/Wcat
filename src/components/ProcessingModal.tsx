@@ -42,7 +42,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
   const suggestionLine = logs.find(l => l.startsWith('[SUGGESTION]'))?.replace('[SUGGESTION]', '').trim();
 
   const generateFullLogText = () => {
-    const timestamp = new Date().toLocaleString('th-TH');
+    const timestamp = new Date().toLocaleString('en-US');
     const logHeader = [
       `========================================`,
       ` Mediabunny / Wcat Engine Process & Error Log`,

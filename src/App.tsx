@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { EditSettings, ActiveTab, SampleVideo } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
 import { processNativeConcatStream, processNativeTrimStream, processNativeRemuxStream } from './utils/WEngine';
@@ -11,6 +11,7 @@ import { VideoPlayer } from './components/VideoPlayer';
 import { Timeline } from './components/Timeline';
 import { ProcessingModal } from './components/ProcessingModal';
 import { SampleModal } from './components/SampleModal';
+import { Dropdown } from './components/Dropdown';
 import { Zap, Cpu } from 'lucide-react';
 
 const DEFAULT_SETTINGS: EditSettings = {
@@ -43,6 +44,10 @@ const DEFAULT_SETTINGS: EditSettings = {
 
 const getFileDuration = async (file: File): Promise<number> => {
   return new Promise((resolve) => {
+    if (file.type.startsWith('image/')) {
+      resolve(5); // Default 5 seconds for image clips
+      return;
+    }
     const video = document.createElement('video');
     video.preload = 'metadata';
     const url = URL.createObjectURL(file);
@@ -50,11 +55,11 @@ const getFileDuration = async (file: File): Promise<number> => {
     video.onloadedmetadata = () => {
       const dur = video.duration || 0;
       URL.revokeObjectURL(url);
-      resolve(dur);
+      resolve(dur > 0 ? dur : 10);
     };
     video.onerror = () => {
       URL.revokeObjectURL(url);
-      resolve(0);
+      resolve(10);
     };
   });
 };
@@ -69,6 +74,17 @@ export default function App() {
   const [settings, setSettings] = useState<EditSettings>(DEFAULT_SETTINGS);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isEncodeMode, setIsEncodeMode] = useState<boolean>(false);
+  const fileUrlCache = useRef<Map<string, string>>(new Map());
+
+  const getOrCreateFileUrl = useCallback((file: File): string => {
+    const key = `${file.name}_${file.size}_${file.lastModified}`;
+    let url = fileUrlCache.current.get(key);
+    if (!url) {
+      url = URL.createObjectURL(file);
+      fileUrlCache.current.set(key, url);
+    }
+    return url;
+  }, []);
 
   // Modals
   const [isSampleModalOpen, setIsSampleModalOpen] = useState<boolean>(false);
@@ -80,9 +96,44 @@ export default function App() {
   const [outputUrl, setOutputUrl] = useState<string | null>(null);
   const [outputFilename, setOutputFilename] = useState<string>('output.mp4');
   const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [mediaOffset, setMediaOffset] = useState<number>(0);
+  const [sourceStartTime, setSourceStartTime] = useState<number>(0);
+  const [clipEndTime, setClipEndTime] = useState<number>(0);
+  const [hasActiveClip, setHasActiveClip] = useState<boolean>(false);
+  const [activeAudioClips, setActiveAudioClips] = useState<{ id: string; url: string; startTime: number; sourceStartTime: number }[]>([]);
 
   const singleFileInputRef = useRef<HTMLInputElement>(null);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Master timeline playback clock to advance across blank gaps and when no video element is active
+  useEffect(() => {
+    if (!isPlaying) return;
+    if (hasActiveClip && videoUrl) return; // Active video element drives time updates with exact frame/audio sync
+
+    let lastTime = performance.now();
+    let animId: number;
+
+    const tick = (now: number) => {
+      const delta = (now - lastTime) / 1000;
+      lastTime = now;
+
+      setCurrentTime((prev) => {
+        const speed = settings.speed || 1;
+        const next = prev + delta * speed;
+        const max = duration > 0 ? duration : 10;
+        if (next >= max) {
+          setIsPlaying(false);
+          return max;
+        }
+        return next;
+      });
+
+      animId = requestAnimationFrame(tick);
+    };
+
+    animId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animId);
+  }, [isPlaying, duration, settings.speed, hasActiveClip, videoUrl]);
 
   // Prevent right click context menu globally
   useEffect(() => {
@@ -157,17 +208,16 @@ export default function App() {
     };
   }, [videoUrl, duration]);
 
-  const handleSingleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSingleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      if (videoUrl) {
-        try { URL.revokeObjectURL(videoUrl); } catch {}
-      }
       const file = files[0];
       setSelectedFiles([file]);
-      const url = URL.createObjectURL(file);
+      const url = getOrCreateFileUrl(file);
+      const dur = await getFileDuration(file);
       setVideoUrl(url);
       setVideoName(file.name);
+      setDuration(dur);
       if (outputUrl) {
         try { URL.revokeObjectURL(outputUrl); } catch {}
       }
@@ -176,25 +226,30 @@ export default function App() {
       setCurrentTime(0);
       setSettings((prev) => ({
         ...prev,
+        duration: dur,
         startTime: 0,
-        endTime: 0,
+        endTime: dur,
       }));
     }
     e.target.value = '';
   };
 
-  const handleMultiFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMultiFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      if (videoUrl) {
-        try { URL.revokeObjectURL(videoUrl); } catch {}
-      }
       const fileArr: File[] = Array.from(files);
       setSelectedFiles(fileArr);
+
+      // Probe all files in parallel to get their true durations
+      const durations = await Promise.all(fileArr.map((f) => getFileDuration(f)));
+      const totalDur = durations.reduce((acc, d) => acc + d, 0);
+
       const firstFile = fileArr[0];
-      const url = URL.createObjectURL(firstFile);
+      const url = getOrCreateFileUrl(firstFile);
       setVideoUrl(url);
       setVideoName(fileArr.length === 1 ? firstFile.name : `${fileArr.length} files selected`);
+      setDuration(totalDur > 0 ? totalDur : durations[0]);
+
       if (outputUrl) {
         try { URL.revokeObjectURL(outputUrl); } catch {}
       }
@@ -203,43 +258,60 @@ export default function App() {
       setCurrentTime(0);
       setSettings((prev) => ({
         ...prev,
+        duration: totalDur > 0 ? totalDur : durations[0],
         startTime: 0,
-        endTime: 0,
+        endTime: totalDur > 0 ? totalDur : durations[0],
       }));
     }
     e.target.value = '';
   };
 
-  const handleFilesReorder = (newFiles: File[]) => {
+  const handleFilesReorder = useCallback((newFiles: File[]) => {
     setSelectedFiles(newFiles);
     if (newFiles.length > 0) {
-      const url = URL.createObjectURL(newFiles[0]);
-      setVideoUrl(url);
+      const url = getOrCreateFileUrl(newFiles[0]);
+      setVideoUrl((prev) => (prev !== url ? url : prev));
       setVideoName(newFiles.length === 1 ? newFiles[0].name : `${newFiles.length} files selected`);
       setOutputUrl(null);
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setSettings((prev) => ({
-        ...prev,
-        startTime: 0,
-        endTime: 0,
-      }));
     }
-  };
+  }, [getOrCreateFileUrl]);
 
-  const handleSelectFile = (file: File) => {
-    const url = URL.createObjectURL(file);
-    setVideoUrl(url);
-    setVideoName(file.name);
-    setOutputUrl(null);
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setSettings((prev) => ({
-      ...prev,
-      startTime: 0,
-      endTime: 0,
-    }));
-  };
+  const handleSelectFile = useCallback(
+    (
+      file: File | null,
+      clipStartTime: number = 0,
+      _clipDuration: number = 0,
+      clipSourceStart: number = 0,
+      clipEnd: number = 0,
+      audioClips: { id: string; file: File; startTime: number; sourceStartTime: number }[] = []
+    ) => {
+      if (!file && audioClips.length === 0) {
+        setHasActiveClip(false);
+        setVideoUrl(null);
+        setMediaOffset(0);
+        setSourceStartTime(0);
+        setClipEndTime(0);
+        setActiveAudioClips([]);
+        return;
+      }
+      const url = file ? getOrCreateFileUrl(file) : null;
+      setHasActiveClip(true);
+      setVideoUrl((prev) => (prev !== url ? url : prev));
+      setVideoName((prev) => (file && prev !== file.name ? file.name : prev));
+      setMediaOffset((prev) => (prev !== clipStartTime ? clipStartTime : prev));
+      setSourceStartTime((prev) => (prev !== clipSourceStart ? clipSourceStart : prev));
+      setClipEndTime((prev) => (prev !== clipEnd ? clipEnd : prev));
+      
+      const aClips = audioClips.map(c => ({
+        id: c.id,
+        url: getOrCreateFileUrl(c.file),
+        startTime: c.startTime,
+        sourceStartTime: c.sourceStartTime
+      }));
+      setActiveAudioClips(aClips);
+    },
+    [getOrCreateFileUrl]
+  );
 
   const handleSelectSample = async (sample: SampleVideo) => {
     try {
@@ -247,10 +319,7 @@ export default function App() {
       const blob = await response.blob();
       const file = new File([blob], `${sample.name.replace(/\s+/g, '_')}.mp4`, { type: 'video/mp4' });
       setSelectedFiles([file]);
-      const blobUrl = URL.createObjectURL(file);
-      if (videoUrl && videoUrl.startsWith('blob:')) {
-        try { URL.revokeObjectURL(videoUrl); } catch {}
-      }
+      const blobUrl = getOrCreateFileUrl(file);
       setVideoUrl(blobUrl);
     } catch {
       setSelectedFiles([]);
@@ -270,13 +339,15 @@ export default function App() {
   };
 
   const handleDurationLoaded = (dur: number) => {
-    setDuration(dur);
-    setSettings((prev) => ({
-      ...prev,
-      duration: dur,
-      startTime: 0,
-      endTime: dur,
-    }));
+    if (selectedFiles.length <= 1 || duration === 0) {
+      setDuration(dur);
+      setSettings((prev) => ({
+        ...prev,
+        duration: dur,
+        startTime: 0,
+        endTime: dur,
+      }));
+    }
   };
 
   const updateSettings = (newSettings: Partial<EditSettings>) => {
@@ -306,7 +377,7 @@ export default function App() {
   };
 
   // Run FFmpeg Export Process
-  const handleExport = async () => {
+  const handleExport = async (tracks?: any[]) => {
     if (!videoUrl) return;
 
     // 1. Prompt user to choose destination folder & file name before starting export/remux
@@ -348,16 +419,15 @@ export default function App() {
         }
         console.warn('showSaveFilePicker error/fallback:', err);
         
-        // --- NEW: Handle Preview/Iframe restrictions explicitly ---
-        (window as any).alert('⚠️ ระบบไม่สามารถเปิดหน้าต่าง "เลือกที่บันทึกไฟล์ล่วงหน้า" ได้\n\nสาเหตุหลัก: คุณกำลังใช้งานแอปนี้ผ่านหน้าต่าง Preview ของ AI Studio (ซึ่งถูกบล็อกความปลอดภัยการเข้าถึงไฟล์) หรือเบราว์เซอร์ไม่รองรับ\n\n💡 วิธีแก้เพื่อถนอม SSD: ให้คลิกปุ่ม "Open in New Tab" ที่มุมขวาบนของหน้าจอ AI Studio เพื่อเปิดแอปในแท็บใหม่ ฟีเจอร์นี้ถึงจะทำงานได้ครับ');
+        (window as any).alert('⚠️ Unable to open "Save File Picker".\n\nReason: You are using the app inside an iframe/preview window with restricted file access permissions, or your browser does not support the File System Access API.\n\n💡 Solution: Click "Open in New Tab" in the top right corner to run the app directly and enable direct-to-disk streaming.');
         
-        const proceed = (window as any).confirm('คุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
+        const proceed = (window as any).confirm('Do you want to continue using fallback memory storage mode?\n(This will process in a temporary memory buffer or virtual storage)');
         if (!proceed) {
            return;
         }
       }
     } else {
-       const proceed = (window as any).confirm('⚠️ เบราว์เซอร์ของคุณไม่รองรับฟีเจอร์ "เลือกที่บันทึกไฟล์ล่วงหน้า"\n\nคุณต้องการประมวลผลต่อด้วย "โหมดสำรอง" หรือไม่?\n(โหมดนี้จะสร้างไฟล์ชั่วคราวลงใน RAM และอาจดึง SSD มาช่วยหากไฟล์ใหญ่มาก)');
+       const proceed = (window as any).confirm('⚠️ Your browser does not support the Save File Picker.\n\nDo you want to continue with fallback storage mode?');
        if (!proceed) return;
     }
 
@@ -445,14 +515,21 @@ export default function App() {
         const shouldUseEncodeMode = isEncodeMode || hasVisualModifications;
 
         let result;
+        // =====================================================================
+        // 🔴 ENCODE MODE: MULTI-TRACK CONCATENATION (WITH RE-ENCODING)
+        // =====================================================================
         if (shouldUseEncodeMode) {
           addLog(`[WebCodecs API] Hardware Accelerated Concatenation & Encoding Mode Initialized`);
-          result = await processWebCodecsConcatStream(selectedFiles, settings, writable, (prog) => {
+          result = await processWebCodecsConcatStream(tracks && tracks.length > 0 ? tracks : selectedFiles, settings, writable, (prog) => {
             setProcessingProgress(prog.percentage / 100);
             setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
             if (prog.log) addLog(prog.log);
           });
-        } else {
+        } 
+        // =====================================================================
+        // 🔵 COPY MODE: MULTI-TRACK CONCATENATION (FAST STREAM COPY)
+        // =====================================================================
+        else {
           result = await processNativeConcatStream(selectedFiles, writable, (prog) => {
             setProcessingProgress(prog.percentage / 100);
             setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
@@ -524,6 +601,9 @@ export default function App() {
         const shouldUseEncodeMode = isEncodeMode || hasVisualModifications;
         let result;
 
+        // =====================================================================
+        // 🔴 ENCODE MODE: SINGLE-TRACK / TRIM (WITH RE-ENCODING)
+        // =====================================================================
         if (shouldUseEncodeMode) {
           const scaleInfo = (settings.cropAspect && settings.cropAspect !== 'original') ? `Scale: ${settings.cropAspect}, ` : '';
           addLog(`[WebCodecs API] Hardware Accelerated Re-Encoding Mode Activated (${scaleInfo}Codec: ${(settings.videoCodec || 'avc').toUpperCase()}, Quality: ${settings.videoQuality || 'high'})`);
@@ -537,7 +617,11 @@ export default function App() {
               if (prog.log) addLog(prog.log);
             }
           );
-        } else if (isFullLengthRemux) {
+        } 
+        // =====================================================================
+        // 🔵 COPY MODE: SINGLE-TRACK FULL LENGTH (FAST NATIVE REMUX)
+        // =====================================================================
+        else if (isFullLengthRemux) {
           addLog(`Mode: Full length container repair / fast-start optimization for ${inputFile.name}`);
           result = await processNativeRemuxStream(
             inputFile,
@@ -548,7 +632,11 @@ export default function App() {
               if (prog.log) addLog(prog.log);
             }
           );
-        } else {
+        } 
+        // =====================================================================
+        // 🔵 COPY MODE: SINGLE-TRACK TRIM (FAST STREAM COPY)
+        // =====================================================================
+        else {
           addLog(`Mode: Precision Trim from ${currentStart.toFixed(2)}s to ${finalEndTime.toFixed(2)}s for ${inputFile.name}`);
           result = await processNativeTrimStream(
             inputFile,
@@ -645,6 +733,9 @@ export default function App() {
         <div className="flex-1 flex flex-col overflow-hidden bg-black/20 backdrop-blur-sm">
           {/* Video Player Area with Floating Panel Encode (Stops right at the Timeline toolbar) */}
           <div className="relative flex-1 min-h-0 flex flex-col">
+            {/* ================================================================= */}
+            {/* 🎛️ ENCODE MODE / COPY MODE: PANEL TOGGLE & UI SETTINGS                 */}
+            {/* ================================================================= */}
             {/* Left Floating Panel Encode (Expanded box when ON, or clean floating button when OFF) */}
             {isEncodeMode ? (
               <div className="absolute top-3 left-3 bottom-3 z-30 pointer-events-none flex">
@@ -658,7 +749,7 @@ export default function App() {
                       id="encode-mode-toggle-btn"
                       onClick={() => {
                         setIsEncodeMode(false);
-                        setSettings((prev) => ({ ...prev, encodeMode: false }));
+                        setSettings((prev) => ({ ...prev, encodeMode: false, cropAspect: 'original' }));
                       }}
                       className="-rotate-90 whitespace-nowrap px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 border shadow-md cursor-pointer select-none origin-center bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white border-violet-400/50 shadow-violet-500/25"
                       title="Close Panel Encode (WebCodecs ON)"
@@ -668,62 +759,66 @@ export default function App() {
                   </div>
 
                   {/* Right side: Codec, Resolution & Quality Controls inside Panel Encode */}
-                  <div className="flex-1 flex flex-col gap-2.5 text-xs animate-fadeIn min-w-0 pl-2 border-l border-white/10">
+                  <div className="flex-1 flex flex-col gap-2 text-xs animate-fadeIn min-w-0 pl-2 border-l border-white/10">
                     <div className="flex flex-col gap-1">
                       <span className="text-[11px] text-slate-400 font-mono">Codec:</span>
-                      <select
+                      <Dropdown
+                        id="select-codec"
                         value={settings.videoCodec || 'avc'}
-                        onChange={(e) => updateSettings({ videoCodec: e.target.value as any })}
-                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
-                      >
-                        <option value="avc">H.264 / AVC</option>
-                        <option value="hevc">H.265 / HEVC</option>
-                        <option value="vp9">VP9</option>
-                        <option value="av1">AV1</option>
-                      </select>
+                        onChange={(val) => updateSettings({ videoCodec: val as any })}
+                        options={[
+                          { value: 'avc', label: 'H.264 / AVC' },
+                          { value: 'hevc', label: 'H.265 / HEVC' },
+                          { value: 'vp9', label: 'VP9' },
+                          { value: 'av1', label: 'AV1' },
+                        ]}
+                      />
                     </div>
 
                     <div className="flex flex-col gap-1">
                       <span className="text-[11px] text-slate-400 font-mono">Resolution:</span>
-                      <select
+                      <Dropdown
+                        id="select-resolution"
                         value={settings.resolution || '1080'}
-                        onChange={(e) => updateSettings({ resolution: e.target.value as any })}
-                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
-                      >
-                        <option value="480">480p</option>
-                        <option value="720">720p</option>
-                        <option value="1080">1080p (FHD)</option>
-                        <option value="2k">2K (1440p)</option>
-                        <option value="4k">4K (2160p)</option>
-                        <option value="8k">8K (4320p)</option>
-                      </select>
+                        onChange={(val) => updateSettings({ resolution: val as any })}
+                        options={[
+                          { value: '480', label: '480p' },
+                          { value: '720', label: '720p' },
+                          { value: '1080', label: '1080p (FHD)' },
+                          { value: '2k', label: '2K (1440p)' },
+                          { value: '4k', label: '4K (2160p)' },
+                          { value: '8k', label: '8K (4320p)' },
+                        ]}
+                      />
                     </div>
 
                     <div className="flex flex-col gap-1">
                       <span className="text-[11px] text-slate-400 font-mono">Quality:</span>
-                      <select
+                      <Dropdown
+                        id="select-quality"
                         value={settings.videoQuality || 'high'}
-                        onChange={(e) => updateSettings({ videoQuality: e.target.value as any })}
-                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
-                      >
-                        <option value="very-high">Very High</option>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
-                      </select>
+                        onChange={(val) => updateSettings({ videoQuality: val as any })}
+                        options={[
+                          { value: 'very-high', label: 'Very High' },
+                          { value: 'high', label: 'High' },
+                          { value: 'medium', label: 'Medium' },
+                          { value: 'low', label: 'Low' },
+                        ]}
+                      />
                     </div>
                     <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-slate-400 font-mono">Speed (ความเร็ว Encode):</span>
-                      <select
+                      <span className="text-[11px] text-slate-400 font-mono">Speed:</span>
+                      <Dropdown
+                        id="select-speed"
                         value={settings.encodeSpeed || 'ultra-fast'}
-                        onChange={(e) => updateSettings({ encodeSpeed: e.target.value as any })}
-                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
-                      >
-                        <option value="ultra-fast">เร็วสุด (Ultra Fast / Hardware)</option>
-                        <option value="fast">เร็ว (Fast)</option>
-                        <option value="medium">ปานกลาง (Medium / Balanced)</option>
-                        <option value="slow">ช้า (Slow / High Efficiency)</option>
-                      </select>
+                        onChange={(val) => updateSettings({ encodeSpeed: val as any })}
+                        options={[
+                          { value: 'ultra-fast', label: 'Ultra Fast (Hardware)' },
+                          { value: 'fast', label: 'Fast' },
+                          { value: 'medium', label: 'Medium (Balanced)' },
+                          { value: 'slow', label: 'Slow (High Efficiency)' },
+                        ]}
+                      />
                     </div>
                   </div>
                 </div>
@@ -734,7 +829,11 @@ export default function App() {
                   id="encode-mode-toggle-btn"
                   onClick={() => {
                     setIsEncodeMode(true);
-                    setSettings((prev) => ({ ...prev, encodeMode: true }));
+                    setSettings((prev) => ({ 
+                      ...prev, 
+                      encodeMode: true,
+                      cropAspect: (prev.cropAspect === 'original' || !prev.cropAspect) ? '16:9' : prev.cropAspect
+                    }));
                   }}
                   className="-rotate-90 whitespace-nowrap px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 border shadow-md cursor-pointer select-none origin-center bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/70 backdrop-blur-md"
                   title="Open Panel Encode"
@@ -746,8 +845,14 @@ export default function App() {
 
             <VideoPlayer
               videoUrl={videoUrl}
+              activeAudioClips={activeAudioClips}
               settings={settings}
               currentTime={currentTime}
+              mediaOffset={mediaOffset}
+              sourceStartTime={sourceStartTime}
+              clipEndTime={clipEndTime}
+              hasActiveClip={hasActiveClip}
+              selectedFiles={selectedFiles}
               isPlaying={isPlaying}
               onTimeUpdate={setCurrentTime}
               onDurationLoaded={handleDurationLoaded}
@@ -758,7 +863,13 @@ export default function App() {
               onToggleEncodeMode={() => {
                 const nextMode = !isEncodeMode;
                 setIsEncodeMode(nextMode);
-                setSettings((prev) => ({ ...prev, encodeMode: nextMode }));
+                setSettings((prev) => ({ 
+                  ...prev, 
+                  encodeMode: nextMode,
+                  cropAspect: nextMode 
+                    ? ((prev.cropAspect === 'original' || !prev.cropAspect) ? '16:9' : prev.cropAspect)
+                    : 'original'
+                }));
               }}
               videoName={videoName}
               selectedFile={selectedFiles.length > 0 ? selectedFiles[0] : undefined}
