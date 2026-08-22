@@ -10,10 +10,11 @@ import {
   Conversion,
   ALL_FORMATS,
   VideoSample,
+  Quality,
   type StreamTargetChunk,
   type VideoCodec,
   type AudioCodec,
-  type Quality,
+  type QualityLevel,
 } from 'mediabunny';
 import { EditSettings } from '../types';
 
@@ -133,6 +134,17 @@ export async function probeWebCodecsCapabilities(): Promise<{
     codecs,
     audioCodecs,
   };
+}
+
+/**
+ * Helper to safely construct a Mediabunny Quality instance
+ */
+function resolveQuality(qualityStr?: string): Quality {
+  const validLevels: QualityLevel[] = ['very-low', 'low', 'medium', 'high', 'very-high'];
+  const level: QualityLevel = validLevels.includes(qualityStr as QualityLevel)
+    ? (qualityStr as QualityLevel)
+    : 'high';
+  return new Quality(level);
 }
 
 /**
@@ -275,7 +287,7 @@ export async function processWebCodecsEncodeStream(
 
   // Determine Video Codec & Quality
   const targetVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
-  const targetQuality: Quality = (settings.videoQuality as Quality) || 'high';
+  const targetQuality = resolveQuality(settings.videoQuality);
 
   // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip)
   const needsCanvasProcessing =
@@ -394,7 +406,7 @@ export async function processWebCodecsEncodeStream(
       discard: settings.muteAudio,
       forceTranscode: true, // Forces WebCodecs AudioDecoder -> AudioEncoder
       codec: (settings.audioCodec as AudioCodec) || 'aac',
-      quality: 'high',
+      quality: resolveQuality('high'),
     },
   });
 
@@ -526,13 +538,14 @@ export async function processWebCodecsConcatStream(
       video: {
         forceTranscode: true,
         codec: (settings.videoCodec as VideoCodec) || 'avc',
-        quality: (settings.videoQuality as Quality) || 'high',
+        quality: resolveQuality(settings.videoQuality),
         hardwareAcceleration: 'prefer-hardware',
       },
       audio: {
         discard: settings.muteAudio,
         forceTranscode: true,
         codec: (settings.audioCodec as AudioCodec) || 'aac',
+        quality: resolveQuality('high'),
       },
     });
 
