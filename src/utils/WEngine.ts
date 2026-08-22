@@ -703,12 +703,30 @@ async function processMediabunnyTrimStream(
       });
 
       stage = 'Configuring Mediabunny Conversion';
+      let _start = startTime > 0 ? startTime : undefined;
+      let _end = endTime > 0 ? endTime : undefined;
+      
+      const vTracks = await input.getVideoTracks();
+      let sourceDur = 0;
+      if (vTracks.length > 0) {
+          const dur = await vTracks[0].computeDuration();
+          if (dur) sourceDur = dur;
+      }
+      
+      if (sourceDur > 0) {
+          if (_start !== undefined && _start >= sourceDur) _start = Math.max(0, sourceDur - 0.1);
+          if (_end !== undefined && _end > sourceDur) _end = sourceDur;
+      }
+      if (_start !== undefined && _end !== undefined && _start >= _end) {
+          _start = Math.max(0, _end - 0.1);
+      }
+
       const conversion = await Conversion.init({
         input,
         output,
         trim: {
-          start: startTime > 0 ? startTime : undefined,
-          end: endTime > 0 ? endTime : undefined,
+          start: _start,
+          end: _end,
         },
       });
 
@@ -1779,8 +1797,18 @@ async function executeNativeEBMLTrimStream(
      let segmentDataOffset = 0;
      const cuePoints: { time: number, offset: number }[] = [];
 
-     const startMs = startTime * 1000;
-     const endMs = endTime * 1000;
+     let startMs = startTime * 1000;
+     let endMs = endTime * 1000;
+     
+     if (startMs >= meta.fileDurationMs) {
+         startMs = Math.max(0, meta.fileDurationMs - 100);
+     }
+     if (endMs > meta.fileDurationMs) {
+         endMs = meta.fileDurationMs;
+     }
+     if (startMs >= endMs) {
+         startMs = Math.max(0, endMs - 100);
+     }
      const CHUNK_SIZE = 1024 * 1024;
 
      // Patch the Duration in SegmentInfo for Standard Compliance

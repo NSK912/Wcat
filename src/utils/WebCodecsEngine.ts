@@ -416,8 +416,10 @@ export async function processWebCodecsEncodeStream(
   const sourceHeight = Math.max(2, rawHeight - (rawHeight % 2));
 
   // Calculate Trim Timestamps
-  const trimStart = settings.startTime > 0 ? settings.startTime : undefined;
-  const trimEnd = settings.endTime > 0 && settings.endTime < sourceDuration ? settings.endTime : undefined;
+  let trimStart = settings.startTime > 0 ? settings.startTime : undefined;
+  if (trimStart !== undefined && trimStart >= sourceDuration) trimStart = Math.max(0, sourceDuration - 0.1);
+  let trimEnd = settings.endTime > 0 && settings.endTime < sourceDuration ? settings.endTime : undefined;
+  if (trimStart !== undefined && trimEnd !== undefined && trimStart >= trimEnd) trimStart = Math.max(0, trimEnd - 0.1);
 
   onProgress({
     percentage: 5,
