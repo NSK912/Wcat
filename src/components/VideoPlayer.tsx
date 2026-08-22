@@ -13,6 +13,9 @@ import {
   Smartphone,
   Film,
   RotateCcw,
+  Lock,
+  Crop,
+  Move,
 } from 'lucide-react';
 
 interface VideoPlayerProps {
@@ -25,6 +28,8 @@ interface VideoPlayerProps {
   onTogglePlay: () => void;
   onSeek: (time: number) => void;
   onUpdateSettings?: (settings: Partial<EditSettings>) => void;
+  onToggleEncodeMode?: () => void;
+  isEncodeMode?: boolean;
   videoName?: string;
   selectedFile?: File;
 }
@@ -37,6 +42,18 @@ interface AspectOption {
 }
 
 const ASPECT_OPTIONS: AspectOption[] = [
+  {
+    id: 'original',
+    label: 'ค่าคงที่จากวิดีโอ (Original)',
+    sublabel: 'สัดส่วนเดิมตามไฟล์วิดีโอจริง',
+    icon: <RotateCcw className="w-3.5 h-3.5" />,
+  },
+  {
+    id: 'free',
+    label: 'ครอบแบบฟรี (Free Crop)',
+    sublabel: 'ย่อขยายและปรับกรอบเองอย่างอิสระ',
+    icon: <Crop className="w-3.5 h-3.5" />,
+  },
   {
     id: '16:9',
     label: '16:9',
@@ -73,13 +90,9 @@ const ASPECT_OPTIONS: AspectOption[] = [
     sublabel: 'Cinematic / Ultrawide',
     icon: <Film className="w-3.5 h-3.5" />,
   },
-  {
-    id: 'original',
-    label: 'Original',
-    sublabel: 'Auto / Fit Source',
-    icon: <RotateCcw className="w-3.5 h-3.5" />,
-  },
 ];
+
+type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   videoUrl,
@@ -90,17 +103,41 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onDurationLoaded,
   onTogglePlay,
   onUpdateSettings,
+  onToggleEncodeMode,
+  isEncodeMode = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoWrapperRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
-  // Reset error state when video URL changes
+  const isFreeCropActive = Boolean(isEncodeMode && settings.cropAspect === 'free');
+  const isScalingActive = Boolean(isEncodeMode && settings.cropAspect && settings.cropAspect !== 'original');
+  const currentCropRect = settings.freeCropRect || { x: 0, y: 0, width: 1, height: 1 };
+
+  // Dragging state for free crop
+  const [isDraggingCrop, setIsDraggingCrop] = useState<boolean>(false);
+  const dragInfoRef = useRef<{
+    handle: DragHandle;
+    startX: number;
+    startY: number;
+    startRect: { x: number; y: number; width: number; height: number };
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
+
+  // Reset error state and context menu when video URL or mode changes
   useEffect(() => {
     setLoadError(null);
   }, [videoUrl]);
+
+  useEffect(() => {
+    if (!isEncodeMode) {
+      setContextMenu(null);
+    }
+  }, [isEncodeMode]);
 
   // Handle outside clicks to close context menu
   useEffect(() => {
@@ -193,8 +230,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return transforms.join(' ');
   };
 
-  // Aspect ratio class container
+  // Aspect ratio class container (Only active when Encode Mode is enabled and not in free mode)
   const getAspectClass = () => {
+    if (!isEncodeMode || settings.cropAspect === 'free') {
+      return 'max-h-[480px] w-auto';
+    }
     switch (settings.cropAspect) {
       case '16:9':
         return 'aspect-[16/9] max-h-[480px] w-full max-w-[854px]';
@@ -252,13 +292,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setLoadError(detail);
   };
 
-  // Right-click context menu handler
+  // Right-click context menu handler (Only activates on the video preview box when Encode Mode is enabled)
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    // In default Copy Mode, encode features/context menus are completely disabled
+    if (!isEncodeMode || !videoUrl || loadError) {
+      return;
+    }
+
     e.preventDefault();
     e.stopPropagation();
 
-    const menuWidth = 240;
-    const menuHeight = 350;
+    const menuWidth = 260;
+    const menuHeight = 390;
     let posX = e.clientX;
     let posY = e.clientY;
 
@@ -270,19 +315,118 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
 
     setContextMenu({ x: posX, y: posY });
-  }, []);
+  }, [isEncodeMode, videoUrl, loadError]);
 
   const handleSelectAspect = (aspect: EditSettings['cropAspect']) => {
+    const newSettings: Partial<EditSettings> = { cropAspect: aspect };
+
+    if (aspect === 'free') {
+      const initialRect =
+        settings.freeCropRect && settings.freeCropRect.width > 0.05
+          ? settings.freeCropRect
+          : { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
+      newSettings.freeCropRect = initialRect;
+    }
+
+    if (!isEncodeMode && aspect !== 'original') {
+      // Auto enable Encode Mode if user chooses a scaled/crop aspect ratio
+      if (onToggleEncodeMode) {
+        onToggleEncodeMode();
+      }
+      newSettings.encodeMode = true;
+    }
+
     if (onUpdateSettings) {
-      onUpdateSettings({ cropAspect: aspect });
+      onUpdateSettings(newSettings);
     }
     setContextMenu(null);
   };
 
+  // --- Interactive Dragging & Resizing Handles for Free Crop ---
+  const handleMouseDownCrop = (e: React.MouseEvent, handle: DragHandle) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!videoWrapperRef.current) return;
+    const rect = videoWrapperRef.current.getBoundingClientRect();
+
+    dragInfoRef.current = {
+      handle,
+      startX: e.clientX,
+      startY: e.clientY,
+      startRect: { ...currentCropRect },
+      containerWidth: rect.width,
+      containerHeight: rect.height,
+    };
+
+    setIsDraggingCrop(true);
+  };
+
+  useEffect(() => {
+    if (!isDraggingCrop) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragInfoRef.current) return;
+
+      const { handle, startX, startY, startRect, containerWidth, containerHeight } = dragInfoRef.current;
+      const dx = (e.clientX - startX) / Math.max(10, containerWidth);
+      const dy = (e.clientY - startY) / Math.max(10, containerHeight);
+
+      let { x, y, width, height } = { ...startRect };
+      const minSize = 0.1; // 10% min crop size
+
+      if (handle === 'move') {
+        x = Math.max(0, Math.min(1 - width, startRect.x + dx));
+        y = Math.max(0, Math.min(1 - height, startRect.y + dy));
+      } else {
+        if (handle.includes('e')) {
+          width = Math.max(minSize, Math.min(1 - x, startRect.width + dx));
+        }
+        if (handle.includes('s')) {
+          height = Math.max(minSize, Math.min(1 - y, startRect.height + dy));
+        }
+        if (handle.includes('w')) {
+          const maxLeftShift = startRect.x + startRect.width - minSize;
+          const newX = Math.max(0, Math.min(maxLeftShift, startRect.x + dx));
+          width = startRect.width + (startRect.x - newX);
+          x = newX;
+        }
+        if (handle.includes('n')) {
+          const maxTopShift = startRect.y + startRect.height - minSize;
+          const newY = Math.max(0, Math.min(maxTopShift, startRect.y + dy));
+          height = startRect.height + (startRect.y - newY);
+          y = newY;
+        }
+      }
+
+      if (onUpdateSettings) {
+        onUpdateSettings({
+          freeCropRect: {
+            x: Math.max(0, Math.min(0.9, x)),
+            y: Math.max(0, Math.min(0.9, y)),
+            width: Math.max(minSize, Math.min(1, width)),
+            height: Math.max(minSize, Math.min(1, height)),
+          },
+        });
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingCrop(false);
+      dragInfoRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingCrop, onUpdateSettings]);
+
   return (
     <div
       ref={containerRef}
-      onContextMenu={handleContextMenu}
       className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-6 overflow-hidden select-none"
     >
       {!videoUrl ? (
@@ -354,13 +498,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       ) : (
         <div
+          ref={videoWrapperRef}
+          onContextMenu={handleContextMenu}
           className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center transition-all duration-300 ${getAspectClass()}`}
         >
           <video
             ref={videoRef}
             src={videoUrl}
             className={`transition-all duration-200 ${
-              settings.cropAspect && settings.cropAspect !== 'original'
+              isScalingActive && !isFreeCropActive
                 ? 'w-full h-full object-cover'
                 : 'max-h-full max-w-full object-contain'
             }`}
@@ -391,18 +537,145 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             muted={settings.muteAudio}
           />
 
-          {/* Current Aspect Ratio Badge Indicator */}
-          {settings.cropAspect && settings.cropAspect !== 'original' && (
+          {/* --- Interactive Free Crop Box with Drag Handles --- */}
+          {isFreeCropActive && (
+            <div className="absolute inset-0 pointer-events-none z-20 overflow-hidden">
+              {/* Darkened Mask Overlays outside active crop rectangle */}
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{ top: 0, left: 0, right: 0, height: `${currentCropRect.y * 100}%` }}
+              />
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  height: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
+                }}
+              />
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{
+                  top: `${currentCropRect.y * 100}%`,
+                  bottom: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
+                  left: 0,
+                  width: `${currentCropRect.x * 100}%`,
+                }}
+              />
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{
+                  top: `${currentCropRect.y * 100}%`,
+                  bottom: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
+                  right: 0,
+                  width: `${Math.max(0, (1 - (currentCropRect.x + currentCropRect.width)) * 100)}%`,
+                }}
+              />
+
+              {/* Active Crop Box Window */}
+              <div
+                className="absolute border-2 border-violet-400 shadow-[0_0_15px_rgba(167,139,250,0.5)] pointer-events-auto"
+                style={{
+                  top: `${currentCropRect.y * 100}%`,
+                  left: `${currentCropRect.x * 100}%`,
+                  width: `${currentCropRect.width * 100}%`,
+                  height: `${currentCropRect.height * 100}%`,
+                }}
+              >
+                {/* Center Move Area */}
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'move')}
+                  className="absolute inset-3 cursor-move flex items-center justify-center group/center"
+                  title="คลิกค้างเพื่อเลื่อนตำแหน่งกรอบ"
+                >
+                  <div className="p-1.5 rounded-full bg-slate-900/80 text-violet-300 border border-violet-400/40 opacity-0 group-hover/center:opacity-100 transition shadow-lg flex items-center space-x-1 text-[10px]">
+                    <Move className="w-3.5 h-3.5" />
+                    <span>เลื่อนตำแหน่ง</span>
+                  </div>
+                </div>
+
+                {/* Corner Resize Handles */}
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'nw')}
+                  className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
+                  title="ย่อขยาย มุมบนซ้าย"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'ne')}
+                  className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
+                  title="ย่อขยาย มุมบนขวา"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'sw')}
+                  className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
+                  title="ย่อขยาย มุมล่างซ้าย"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'se')}
+                  className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
+                  title="ย่อขยาย มุมล่างขวา"
+                />
+
+                {/* Edge Resize Handles */}
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'n')}
+                  className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-6 h-2.5 bg-violet-300 border border-violet-700 rounded shadow cursor-ns-resize hover:scale-110 transition"
+                  title="ปรับความสูงด้านบน"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 's')}
+                  className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-6 h-2.5 bg-violet-300 border border-violet-700 rounded shadow cursor-ns-resize hover:scale-110 transition"
+                  title="ปรับความสูงด้านล่าง"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'w')}
+                  className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2.5 h-6 bg-violet-300 border border-violet-700 rounded shadow cursor-ew-resize hover:scale-110 transition"
+                  title="ปรับความกว้างด้านซ้าย"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'e')}
+                  className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2.5 h-6 bg-violet-300 border border-violet-700 rounded shadow cursor-ew-resize hover:scale-110 transition"
+                  title="ปรับความกว้างด้านขวา"
+                />
+
+                {/* Floating Quick Action Badge on Crop Box */}
+                <div className="absolute -top-8 left-0 flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-violet-400/50 text-violet-200 text-[10px] font-mono px-2 py-0.5 rounded-md shadow-lg pointer-events-auto">
+                  <Crop className="w-3 h-3 text-violet-400" />
+                  <span>
+                    {Math.round(currentCropRect.width * 100)}% × {Math.round(currentCropRect.height * 100)}%
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (onUpdateSettings) {
+                        onUpdateSettings({
+                          freeCropRect: { x: 0, y: 0, width: 1, height: 1 },
+                        });
+                      }
+                    }}
+                    className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+                    title="รีเซ็ตเต็มเฟรม 100%"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Current Aspect Ratio Badge Indicator (Only shown when Encode Mode is on and ratio is set) */}
+          {isScalingActive && (
             <div
               onClick={(e) => {
                 e.stopPropagation();
                 handleContextMenu(e);
               }}
-              className="absolute top-3 left-3 z-10 px-2.5 py-1 bg-slate-900/85 hover:bg-slate-800 border border-white/20 text-cyan-400 text-xs font-mono rounded-md shadow-lg backdrop-blur-md flex items-center space-x-1.5 cursor-pointer transition"
+              className="absolute top-3 left-3 z-10 px-2.5 py-1 bg-slate-900/85 hover:bg-slate-800 border border-violet-400/40 text-violet-300 text-xs font-mono rounded-md shadow-lg backdrop-blur-md flex items-center space-x-1.5 cursor-pointer transition"
               title="Click or right-click to change scale"
             >
-              <Scaling className="w-3 h-3 text-cyan-400" />
-              <span className="font-semibold tracking-wider">{settings.cropAspect}</span>
+              <Scaling className="w-3 h-3 text-violet-400" />
+              <span className="font-semibold tracking-wider">{settings.cropAspect === 'free' ? 'Free Crop' : settings.cropAspect}</span>
+              <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1 rounded">Encode</span>
             </div>
           )}
 
@@ -420,86 +693,92 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             </div>
           )}
 
-          {/* Floating play/pause overlay button on click */}
-          <div
-            onClick={() => {
-              if (videoRef.current) {
-                if (isPlaying) {
-                  videoRef.current.pause();
-                } else {
-                  videoRef.current.play().catch(console.error);
+          {/* Floating play/pause overlay button on click (Hidden during crop drag) */}
+          {!isFreeCropActive && (
+            <div
+              onClick={() => {
+                if (videoRef.current) {
+                  if (isPlaying) {
+                    videoRef.current.pause();
+                  } else {
+                    videoRef.current.play().catch(console.error);
+                  }
                 }
-              }
-              onTogglePlay();
-            }}
-            className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group ${
-              isPlaying ? 'opacity-0 hover:opacity-100 bg-black/20' : 'opacity-100 bg-black/30'
-            }`}
-          >
-            <div className="h-9 w-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-600/30 border border-white/10 transform group-hover:scale-110 transition">
-              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+                onTogglePlay();
+              }}
+              className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group ${
+                isPlaying ? 'opacity-0 hover:opacity-100 bg-black/20' : 'opacity-100 bg-black/30'
+              }`}
+            >
+              <div className="h-9 w-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-600/30 border border-white/10 transform group-hover:scale-110 transition">
+                {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
 
-      {/* Right-Click Popup Context Menu for Aspect Ratio / Scale */}
-      {contextMenu && (
+      {/* Right-Click Popup Context Menu for Aspect Ratio / Scale (Only rendered in Encode Mode) */}
+      {isEncodeMode && contextMenu && (
         <div
           ref={menuRef}
-          className="fixed z-50 min-w-[230px] bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl backdrop-blur-xl p-1.5 text-slate-200 animate-in fade-in zoom-in-95 duration-150"
+          className="fixed z-50 min-w-[260px] bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl backdrop-blur-xl p-2 text-slate-200 animate-in fade-in zoom-in-95 duration-150"
           style={{
             top: `${contextMenu.y}px`,
             left: `${contextMenu.x}px`,
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Menu Header */}
-          <div className="px-3 py-2 border-b border-slate-800/80 flex items-center justify-between mb-1">
-            <div className="flex items-center space-x-2">
-              <Scaling className="w-4 h-4 text-cyan-400" />
-              <span className="text-xs font-semibold text-white tracking-wide">Video Scale / สเกลวิดีโอ</span>
-            </div>
-            <span className="text-[10px] text-slate-400 font-mono">Aspect</span>
-          </div>
-
           {/* Aspect Ratio Options List */}
           <div className="flex flex-col gap-0.5 max-h-[300px] overflow-y-auto">
             {ASPECT_OPTIONS.map((option) => {
-              const isActive = (settings.cropAspect || 'original') === option.id;
+              const isSelected = (settings.cropAspect || 'original') === option.id;
+              const isActive = isEncodeMode && isSelected;
+              const isOriginal = option.id === 'original';
+
               return (
                 <button
                   key={option.id}
                   onClick={() => handleSelectAspect(option.id)}
                   className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between text-xs transition cursor-pointer ${
                     isActive
-                      ? 'bg-cyan-500/15 text-cyan-300 font-medium border border-cyan-500/30'
+                      ? 'bg-violet-500/20 text-violet-200 font-medium border border-violet-500/40 shadow-sm'
+                      : !isEncodeMode && !isOriginal
+                      ? 'hover:bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-transparent'
                       : 'hover:bg-slate-800/80 text-slate-300 hover:text-white border border-transparent'
                   }`}
                 >
                   <div className="flex items-center space-x-2.5">
                     <span
                       className={`p-1 rounded ${
-                        isActive ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-400'
+                        isActive
+                          ? 'bg-violet-500/30 text-violet-300'
+                          : !isEncodeMode && !isOriginal
+                          ? 'bg-slate-800/70 text-slate-500'
+                          : 'bg-slate-800 text-slate-400'
                       }`}
                     >
                       {option.icon}
                     </span>
                     <div className="flex flex-col">
-                      <span className="font-bold text-xs">{option.label}</span>
+                      <div className="flex items-center space-x-1.5">
+                        <span className="font-bold text-xs">{option.label}</span>
+                        {!isEncodeMode && !isOriginal && (
+                          <span className="text-[9px] text-amber-400/80 font-normal">
+                            (เปิด Encode)
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[10px] text-slate-400 leading-none">{option.sublabel}</span>
                     </div>
                   </div>
-                  {isActive && <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0 ml-2" />}
+                  {isActive && <Check className="w-3.5 h-3.5 text-violet-400 shrink-0 ml-2" />}
+                  {!isEncodeMode && !isOriginal && (
+                    <Lock className="w-3 h-3 text-slate-500 shrink-0 ml-2" />
+                  )}
                 </button>
               );
             })}
-          </div>
-
-          {/* Menu Footer Hint */}
-          <div className="mt-1 pt-1.5 border-t border-slate-800/80 px-2.5 py-1 text-[10px] text-slate-500 flex items-center justify-between">
-            <span>คลิกขวาเพื่อเปิดเมนูนี้ได้ตลอดเวลา</span>
-            <span className="font-mono text-slate-600">Esc to close</span>
           </div>
         </div>
       )}

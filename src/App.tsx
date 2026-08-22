@@ -25,6 +25,7 @@ const DEFAULT_SETTINGS: EditSettings = {
   flipH: false,
   flipV: false,
   cropAspect: 'original',
+  freeCropRect: { x: 0, y: 0, width: 1, height: 1 },
   watermarkText: '',
   watermarkPosition: 'bottom-right',
   watermarkColor: '#ffffff',
@@ -36,6 +37,8 @@ const DEFAULT_SETTINGS: EditSettings = {
   videoCodec: 'avc',
   audioCodec: 'aac',
   videoQuality: 'high',
+  resolution: '1080',
+  encodeSpeed: 'ultra-fast',
 };
 
 const getFileDuration = async (file: File): Promise<number> => {
@@ -638,77 +641,129 @@ export default function App() {
 
       {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden relative z-10">
-        {/* Top Left Floating Encode Mode Button & Controls */}
-        <div className="absolute top-3 left-3 z-30 flex items-center space-x-2">
-          <button
-            id="encode-mode-toggle-btn"
-            onClick={() => {
-              const nextMode = !isEncodeMode;
-              setIsEncodeMode(nextMode);
-              setSettings((prev) => ({ ...prev, encodeMode: nextMode }));
-            }}
-            className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 border shadow-lg cursor-pointer select-none ${
-              isEncodeMode
-                ? 'bg-gradient-to-r from-violet-600/90 to-indigo-600/90 hover:from-violet-500 hover:to-indigo-500 text-white border-violet-400/50 shadow-violet-500/25 ring-1 ring-violet-400/40'
-                : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/70 backdrop-blur-md'
-            }`}
-            title={isEncodeMode ? 'WebCodecs API Hardware Accelerated Encode Mode Active' : 'Switch to WebCodecs API Encode Mode'}
-          >
-            <div className={`w-2 h-2 rounded-full transition-all ${isEncodeMode ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]' : 'bg-slate-500'}`} />
-            <Zap className={`w-3.5 h-3.5 ${isEncodeMode ? 'text-amber-300' : 'text-slate-400'}`} />
-            <span>Encode Mode</span>
-            <span className={`px-1.5 py-0.5 text-[10px] rounded font-mono font-medium ${
-              isEncodeMode ? 'bg-violet-950/80 text-violet-200 border border-violet-400/40' : 'bg-slate-800 text-slate-400'
-            }`}>
-              {isEncodeMode ? 'WebCodecs ON' : 'OFF'}
-            </span>
-          </button>
-
-          {/* Dynamic Codec Selector when Encode Mode is Active */}
-          {isEncodeMode && (
-            <div className="hidden sm:flex items-center space-x-1.5 bg-slate-900/90 border border-violet-500/40 backdrop-blur-md px-2.5 py-1 rounded-lg text-xs shadow-md animate-fadeIn">
-              <span className="text-[11px] text-slate-400 font-mono">Codec:</span>
-              <select
-                value={settings.videoCodec || 'avc'}
-                onChange={(e) => updateSettings({ videoCodec: e.target.value as any })}
-                className="bg-slate-800 text-violet-300 font-mono text-[11px] rounded px-1.5 py-0.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer"
-              >
-                <option value="avc">H.264 / AVC</option>
-                <option value="hevc">H.265 / HEVC</option>
-                <option value="vp9">VP9</option>
-                <option value="av1">AV1</option>
-              </select>
-
-              <span className="text-[11px] text-slate-400 font-mono ml-1">Quality:</span>
-              <select
-                value={settings.videoQuality || 'high'}
-                onChange={(e) => updateSettings({ videoQuality: e.target.value as any })}
-                className="bg-slate-800 text-violet-300 font-mono text-[11px] rounded px-1.5 py-0.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer"
-              >
-                <option value="very-high">Very High</option>
-                <option value="high">High</option>
-                <option value="medium">Medium</option>
-                <option value="low">Low</option>
-              </select>
-            </div>
-          )}
-        </div>
-
         {/* Left/Center: Video Player & Timeline */}
         <div className="flex-1 flex flex-col overflow-hidden bg-black/20 backdrop-blur-sm">
-          <VideoPlayer
-            videoUrl={videoUrl}
-            settings={settings}
-            currentTime={currentTime}
-            isPlaying={isPlaying}
-            onTimeUpdate={setCurrentTime}
-            onDurationLoaded={handleDurationLoaded}
-            onTogglePlay={() => setIsPlaying(!isPlaying)}
-            onSeek={(t) => setCurrentTime(t)}
-            onUpdateSettings={updateSettings}
-            videoName={videoName}
-            selectedFile={selectedFiles.length > 0 ? selectedFiles[0] : undefined}
-          />
+          {/* Video Player Area with Floating Panel Encode (Stops right at the Timeline toolbar) */}
+          <div className="relative flex-1 min-h-0 flex flex-col">
+            {/* Left Floating Panel Encode (Expanded box when ON, or clean floating button when OFF) */}
+            {isEncodeMode ? (
+              <div className="absolute top-3 left-3 bottom-3 z-30 pointer-events-none flex">
+                <div
+                  id="panel-encode"
+                  className="w-72 h-full flex flex-row items-center gap-3 p-3 rounded-xl border backdrop-blur-md shadow-xl transition-all duration-200 pointer-events-auto overflow-y-auto bg-slate-950/90 border-violet-500/50 shadow-violet-500/10"
+                >
+                  {/* Left side: Vertically rotated Panel Encode Toggle Button */}
+                  <div className="flex items-center justify-center my-auto shrink-0 w-8 h-32 relative">
+                    <button
+                      id="encode-mode-toggle-btn"
+                      onClick={() => {
+                        setIsEncodeMode(false);
+                        setSettings((prev) => ({ ...prev, encodeMode: false }));
+                      }}
+                      className="-rotate-90 whitespace-nowrap px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 border shadow-md cursor-pointer select-none origin-center bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white border-violet-400/50 shadow-violet-500/25"
+                      title="Close Panel Encode (WebCodecs ON)"
+                    >
+                      <span>Panel Encode</span>
+                    </button>
+                  </div>
+
+                  {/* Right side: Codec, Resolution & Quality Controls inside Panel Encode */}
+                  <div className="flex-1 flex flex-col gap-2.5 text-xs animate-fadeIn min-w-0 pl-2 border-l border-white/10">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[11px] text-slate-400 font-mono">Codec:</span>
+                      <select
+                        value={settings.videoCodec || 'avc'}
+                        onChange={(e) => updateSettings({ videoCodec: e.target.value as any })}
+                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
+                      >
+                        <option value="avc">H.264 / AVC</option>
+                        <option value="hevc">H.265 / HEVC</option>
+                        <option value="vp9">VP9</option>
+                        <option value="av1">AV1</option>
+                      </select>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[11px] text-slate-400 font-mono">Resolution:</span>
+                      <select
+                        value={settings.resolution || '1080'}
+                        onChange={(e) => updateSettings({ resolution: e.target.value as any })}
+                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
+                      >
+                        <option value="480">480p</option>
+                        <option value="720">720p</option>
+                        <option value="1080">1080p (FHD)</option>
+                        <option value="2k">2K (1440p)</option>
+                        <option value="4k">4K (2160p)</option>
+                        <option value="8k">8K (4320p)</option>
+                      </select>
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[11px] text-slate-400 font-mono">Quality:</span>
+                      <select
+                        value={settings.videoQuality || 'high'}
+                        onChange={(e) => updateSettings({ videoQuality: e.target.value as any })}
+                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
+                      >
+                        <option value="very-high">Very High</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[11px] text-slate-400 font-mono">Speed (ความเร็ว Encode):</span>
+                      <select
+                        value={settings.encodeSpeed || 'ultra-fast'}
+                        onChange={(e) => updateSettings({ encodeSpeed: e.target.value as any })}
+                        className="w-full bg-slate-900 text-violet-300 font-mono text-[11px] rounded px-2 py-1.5 border border-slate-700 focus:outline-none focus:border-violet-500 cursor-pointer shadow-inner"
+                      >
+                        <option value="ultra-fast">เร็วสุด (Ultra Fast / Hardware)</option>
+                        <option value="fast">เร็ว (Fast)</option>
+                        <option value="medium">ปานกลาง (Medium / Balanced)</option>
+                        <option value="slow">ช้า (Slow / High Efficiency)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="absolute top-1/2 -translate-y-1/2 left-2 z-30 flex items-center justify-center w-8 h-32 pointer-events-auto">
+                <button
+                  id="encode-mode-toggle-btn"
+                  onClick={() => {
+                    setIsEncodeMode(true);
+                    setSettings((prev) => ({ ...prev, encodeMode: true }));
+                  }}
+                  className="-rotate-90 whitespace-nowrap px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 border shadow-md cursor-pointer select-none origin-center bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/70 backdrop-blur-md"
+                  title="Open Panel Encode"
+                >
+                  <span>Panel Encode</span>
+                </button>
+              </div>
+            )}
+
+            <VideoPlayer
+              videoUrl={videoUrl}
+              settings={settings}
+              currentTime={currentTime}
+              isPlaying={isPlaying}
+              onTimeUpdate={setCurrentTime}
+              onDurationLoaded={handleDurationLoaded}
+              onTogglePlay={() => setIsPlaying(!isPlaying)}
+              onSeek={(t) => setCurrentTime(t)}
+              onUpdateSettings={updateSettings}
+              isEncodeMode={isEncodeMode}
+              onToggleEncodeMode={() => {
+                const nextMode = !isEncodeMode;
+                setIsEncodeMode(nextMode);
+                setSettings((prev) => ({ ...prev, encodeMode: nextMode }));
+              }}
+              videoName={videoName}
+              selectedFile={selectedFiles.length > 0 ? selectedFiles[0] : undefined}
+            />
+          </div>
 
           <Timeline
             currentTime={currentTime}

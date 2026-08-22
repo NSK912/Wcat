@@ -150,6 +150,87 @@ function resolveQuality(qualityStr?: string): Quality {
 }
 
 /**
+ * Calculates target dimensions based on resolution preset ('480', '720', '1080', '2k', '4k', '8k')
+ */
+export function getTargetDimensions(
+  baseWidth: number,
+  baseHeight: number,
+  resolution?: string
+): { width: number; height: number } {
+  if (!resolution || resolution === 'original') {
+    const w = Math.max(2, baseWidth - (baseWidth % 2));
+    const h = Math.max(2, baseHeight - (baseHeight % 2));
+    return { width: w, height: h };
+  }
+
+  let targetShortDim = 1080;
+  switch (resolution) {
+    case '480':
+      targetShortDim = 480;
+      break;
+    case '720':
+      targetShortDim = 720;
+      break;
+    case '1080':
+      targetShortDim = 1080;
+      break;
+    case '2k':
+      targetShortDim = 1440;
+      break;
+    case '4k':
+      targetShortDim = 2160;
+      break;
+    case '8k':
+      targetShortDim = 4320;
+      break;
+    default:
+      targetShortDim = 1080;
+      break;
+  }
+
+  const aspectRatio = baseWidth / baseHeight;
+  let targetWidth: number;
+  let targetHeight: number;
+
+  if (baseWidth >= baseHeight) {
+    // Landscape or square: short dimension is height
+    targetHeight = targetShortDim;
+    targetWidth = Math.round(targetShortDim * aspectRatio);
+  } else {
+    // Portrait: short dimension is width
+    targetWidth = targetShortDim;
+    targetHeight = Math.round(targetShortDim / aspectRatio);
+  }
+
+  // Ensure dimensions are even numbers for encoder compatibility
+  targetWidth = Math.max(2, targetWidth - (targetWidth % 2));
+  targetHeight = Math.max(2, targetHeight - (targetHeight % 2));
+
+  return { width: targetWidth, height: targetHeight };
+}
+
+/**
+ * Maps EncodeSpeed ('slow' | 'medium' | 'fast' | 'ultra-fast') to hardware acceleration and encoder latency hints
+ */
+function resolveSpeedConfig(speed?: string): {
+  hardwareAcceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software';
+  latencyMode?: 'quality' | 'realtime';
+} {
+  switch (speed) {
+    case 'ultra-fast':
+      return { hardwareAcceleration: 'prefer-hardware', latencyMode: 'realtime' };
+    case 'fast':
+      return { hardwareAcceleration: 'prefer-hardware', latencyMode: 'quality' };
+    case 'medium':
+      return { hardwareAcceleration: 'no-preference', latencyMode: 'quality' };
+    case 'slow':
+      return { hardwareAcceleration: 'prefer-software', latencyMode: 'quality' };
+    default:
+      return { hardwareAcceleration: 'prefer-hardware', latencyMode: 'realtime' };
+  }
+}
+
+/**
  * Automatically negotiates a supported video codec for the given resolution/quality.
  * Falls back across AVC -> VP9 -> VP8 -> AV1 -> HEVC if a specific profile is not supported.
  */
@@ -157,7 +238,8 @@ async function negotiateVideoCodec(
   preferredCodec: VideoCodec,
   width: number,
   height: number,
-  quality: Quality
+  quality: Quality,
+  hwAcceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'prefer-hardware'
 ): Promise<VideoCodec> {
   const safeWidth = Math.max(2, width - (width % 2));
   const safeHeight = Math.max(2, height - (height % 2));
@@ -167,7 +249,7 @@ async function negotiateVideoCodec(
       width: safeWidth,
       height: safeHeight,
       quality,
-      hardwareAcceleration: 'no-preference',
+      hardwareAcceleration: hwAcceleration,
     });
     if (isSupported) return preferredCodec;
   } catch {
@@ -182,10 +264,15 @@ async function negotiateVideoCodec(
         width: safeWidth,
         height: safeHeight,
         quality,
-        hardwareAcceleration: 'no-preference',
+        hardwareAcceleration: hwAcceleration,
       });
       if (supported) return candidate;
     } catch {}
+  }
+
+  // Fallback to no-preference if specific hardware/software constraint fails
+  if (hwAcceleration !== 'no-preference') {
+    return negotiateVideoCodec(preferredCodec, width, height, quality, 'no-preference');
   }
 
   return preferredCodec;
@@ -334,39 +421,38 @@ export async function processWebCodecsEncodeStream(
     log: `[WebCodecs API] Trim Range: ${trimStart ? `${trimStart.toFixed(2)}s` : '0.00s'} -> ${trimEnd ? `${trimEnd.toFixed(2)}s` : `${sourceDuration.toFixed(2)}s`}`,
   });
 
-  // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip, aspect ratio)
+  // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip, aspect ratio, resolution change)
   const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
-  const needsCanvasProcessing =
-    settings.filter !== 'none' ||
-    settings.brightness !== 1.0 ||
-    settings.contrast !== 1.0 ||
-    settings.flipH ||
-    settings.flipV ||
-    Boolean(settings.watermarkText?.trim()) ||
-    hasCustomAspect;
+  const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
 
   let canvasWidth = sourceWidth;
   let canvasHeight = sourceHeight;
 
   if (hasCustomAspect) {
-    let aspectMultiplier = 16 / 9;
-    switch (settings.cropAspect) {
-      case '16:9': aspectMultiplier = 16 / 9; break;
-      case '4:3': aspectMultiplier = 4 / 3; break;
-      case '1:1': aspectMultiplier = 1 / 1; break;
-      case '4:5': aspectMultiplier = 4 / 5; break;
-      case '9:16': aspectMultiplier = 9 / 16; break;
-      case '21:9': aspectMultiplier = 21 / 9; break;
-    }
-
-    if (sourceWidth / sourceHeight > aspectMultiplier) {
-      // Source is wider than target ratio
-      canvasHeight = sourceHeight;
-      canvasWidth = Math.round(sourceHeight * aspectMultiplier);
+    if (settings.cropAspect === 'free' && settings.freeCropRect) {
+      const rect = settings.freeCropRect;
+      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
+      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
     } else {
-      // Source is taller than target ratio
-      canvasWidth = sourceWidth;
-      canvasHeight = Math.round(sourceWidth / aspectMultiplier);
+      let aspectMultiplier = 16 / 9;
+      switch (settings.cropAspect) {
+        case '16:9': aspectMultiplier = 16 / 9; break;
+        case '4:3': aspectMultiplier = 4 / 3; break;
+        case '1:1': aspectMultiplier = 1 / 1; break;
+        case '4:5': aspectMultiplier = 4 / 5; break;
+        case '9:16': aspectMultiplier = 9 / 16; break;
+        case '21:9': aspectMultiplier = 21 / 9; break;
+      }
+
+      if (sourceWidth / sourceHeight > aspectMultiplier) {
+        // Source is wider than target ratio
+        canvasHeight = sourceHeight;
+        canvasWidth = Math.round(sourceHeight * aspectMultiplier);
+      } else {
+        // Source is taller than target ratio
+        canvasWidth = sourceWidth;
+        canvasHeight = Math.round(sourceWidth / aspectMultiplier);
+      }
     }
 
     // Ensure even dimensions
@@ -381,14 +467,38 @@ export async function processWebCodecsEncodeStream(
     });
   }
 
-  // Determine Video Codec & Quality with fallback negotiation using target dimensions
+  if (hasResolutionPreset) {
+    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
+    canvasWidth = targetDims.width;
+    canvasHeight = targetDims.height;
+    onProgress({
+      percentage: 8,
+      statusText: `Applied resolution preset: ${settings.resolution?.toUpperCase()} (${canvasWidth}x${canvasHeight})`,
+      speedMBs: 0,
+      log: `[WebCodecs API] Target Resolution: ${settings.resolution?.toUpperCase()} -> ${canvasWidth}x${canvasHeight}`,
+    });
+  }
+
+  const needsCanvasProcessing =
+    settings.filter !== 'none' ||
+    settings.brightness !== 1.0 ||
+    settings.contrast !== 1.0 ||
+    settings.flipH ||
+    settings.flipV ||
+    Boolean(settings.watermarkText?.trim()) ||
+    hasCustomAspect ||
+    hasResolutionPreset;
+
+  // Determine Speed, Video Codec & Quality with fallback negotiation using target dimensions
+  const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
   const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
   const targetQuality = resolveQuality(settings.videoQuality);
   const targetVideoCodec = await negotiateVideoCodec(
     preferredVideoCodec,
     canvasWidth,
     canvasHeight,
-    targetQuality
+    targetQuality,
+    speedConfig.hardwareAcceleration
   );
 
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
@@ -430,7 +540,7 @@ export async function processWebCodecsEncodeStream(
     }
   }
 
-  // Configure Mediabunny WebCodecs Pipeline with 'no-preference' to support both HW & SW encoding
+  // Configure Mediabunny WebCodecs Pipeline with selected speed/acceleration configuration
   const conversion = await Conversion.init({
     input,
     output,
@@ -442,7 +552,7 @@ export async function processWebCodecsEncodeStream(
       forceTranscode: true, // Forces WebCodecs VideoDecoder -> VideoEncoder pipeline
       codec: targetVideoCodec,
       quality: targetQuality,
-      hardwareAcceleration: 'no-preference',
+      hardwareAcceleration: speedConfig.hardwareAcceleration,
       width: canvasWidth,
       height: canvasHeight,
       processedWidth: canvasWidth,
@@ -483,7 +593,13 @@ export async function processWebCodecsEncodeStream(
             let sw = srcWidth;
             let sh = srcHeight;
 
-            if (Math.abs(srcRatio - dstRatio) > 0.01) {
+            if (settings.cropAspect === 'free' && settings.freeCropRect) {
+              const rect = settings.freeCropRect;
+              sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+              sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+              sw = Math.max(2, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+              sh = Math.max(2, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+            } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
               if (srcRatio > dstRatio) {
                 // Source is wider than destination: crop sides
                 sw = srcHeight * dstRatio;
