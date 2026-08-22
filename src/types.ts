@@ -9,7 +9,7 @@ export interface EditSettings {
   rotation: number; // 0, 90, 180, 270
   flipH: boolean;
   flipV: boolean;
-  cropAspect: 'original' | '16:9' | '9:16' | '1:1' | '4:3';
+  cropAspect: 'original' | '16:9' | '4:3' | '1:1' | '4:5' | '9:16' | '21:9';
   watermarkText: string;
   watermarkPosition: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center';
   watermarkColor: string;

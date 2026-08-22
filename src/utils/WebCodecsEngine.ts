@@ -367,26 +367,56 @@ export async function processWebCodecsEncodeStream(
 
   const output = new Output({ format: outputFormat, target });
 
-  // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip)
+  // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip, aspect ratio)
   const needsCanvasProcessing =
     settings.filter !== 'none' ||
     settings.brightness !== 1.0 ||
     settings.contrast !== 1.0 ||
     settings.flipH ||
     settings.flipV ||
-    Boolean(settings.watermarkText?.trim());
+    Boolean(settings.watermarkText?.trim()) ||
+    Boolean(settings.cropAspect && settings.cropAspect !== 'original');
+
+  let canvasWidth = sourceWidth;
+  let canvasHeight = sourceHeight;
+
+  if (settings.cropAspect && settings.cropAspect !== 'original') {
+    let aspectMultiplier = 16 / 9;
+    switch (settings.cropAspect) {
+      case '16:9': aspectMultiplier = 16 / 9; break;
+      case '4:3': aspectMultiplier = 4 / 3; break;
+      case '1:1': aspectMultiplier = 1 / 1; break;
+      case '4:5': aspectMultiplier = 4 / 5; break;
+      case '9:16': aspectMultiplier = 9 / 16; break;
+      case '21:9': aspectMultiplier = 21 / 9; break;
+    }
+
+    if (sourceWidth / sourceHeight > aspectMultiplier) {
+      // Source is wider than target ratio
+      canvasHeight = sourceHeight;
+      canvasWidth = Math.round(sourceHeight * aspectMultiplier);
+    } else {
+      // Source is taller than target ratio
+      canvasWidth = sourceWidth;
+      canvasHeight = Math.round(sourceWidth / aspectMultiplier);
+    }
+
+    // Ensure even dimensions
+    canvasWidth = Math.max(2, canvasWidth - (canvasWidth % 2));
+    canvasHeight = Math.max(2, canvasHeight - (canvasHeight % 2));
+  }
 
   let offscreenCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
   let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
 
   if (needsCanvasProcessing) {
     if (typeof OffscreenCanvas !== 'undefined') {
-      offscreenCanvas = new OffscreenCanvas(sourceWidth, sourceHeight);
+      offscreenCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
       canvasCtx = offscreenCanvas.getContext('2d');
     } else if (typeof document !== 'undefined') {
       const c = document.createElement('canvas');
-      c.width = sourceWidth;
-      c.height = sourceHeight;
+      c.width = canvasWidth;
+      c.height = canvasHeight;
       offscreenCanvas = c;
       canvasCtx = c.getContext('2d');
     }
@@ -428,7 +458,31 @@ export async function processWebCodecsEncodeStream(
               ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
             }
 
-            ctx.drawImage(img as any, 0, 0, w, h);
+            // Calculate source crop rectangle to preserve aspect ratio without distortion
+            const srcWidth = (img as any).width || (img as any).videoWidth || (sample as any).displayWidth || (sample as any).codedWidth || w;
+            const srcHeight = (img as any).height || (img as any).videoHeight || (sample as any).displayHeight || (sample as any).codedHeight || h;
+
+            const srcRatio = srcWidth / srcHeight;
+            const dstRatio = w / h;
+
+            let sx = 0;
+            let sy = 0;
+            let sw = srcWidth;
+            let sh = srcHeight;
+
+            if (Math.abs(srcRatio - dstRatio) > 0.01) {
+              if (srcRatio > dstRatio) {
+                // Source is wider than destination: crop sides
+                sw = srcHeight * dstRatio;
+                sx = (srcWidth - sw) / 2;
+              } else {
+                // Source is taller than destination: crop top/bottom
+                sh = srcWidth / dstRatio;
+                sy = (srcHeight - sh) / 2;
+              }
+            }
+
+            ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
             ctx.restore();
 
             // Apply Watermark Overlay

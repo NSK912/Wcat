@@ -679,6 +679,7 @@ export default function App() {
             onDurationLoaded={handleDurationLoaded}
             onTogglePlay={() => setIsPlaying(!isPlaying)}
             onSeek={(t) => setCurrentTime(t)}
+            onUpdateSettings={updateSettings}
             videoName={videoName}
             selectedFile={selectedFiles.length > 0 ? selectedFiles[0] : undefined}
           />

@@ -1,6 +1,19 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { EditSettings } from '../types';
-import { Play, Pause, AlertTriangle, RefreshCw } from 'lucide-react';
+import {
+  Play,
+  Pause,
+  AlertTriangle,
+  RefreshCw,
+  Check,
+  Scaling,
+  Monitor,
+  Tv,
+  Square,
+  Smartphone,
+  Film,
+  RotateCcw,
+} from 'lucide-react';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
@@ -11,9 +24,62 @@ interface VideoPlayerProps {
   onDurationLoaded: (duration: number) => void;
   onTogglePlay: () => void;
   onSeek: (time: number) => void;
+  onUpdateSettings?: (settings: Partial<EditSettings>) => void;
   videoName?: string;
   selectedFile?: File;
 }
+
+interface AspectOption {
+  id: EditSettings['cropAspect'];
+  label: string;
+  sublabel: string;
+  icon: React.ReactNode;
+}
+
+const ASPECT_OPTIONS: AspectOption[] = [
+  {
+    id: '16:9',
+    label: '16:9',
+    sublabel: 'Widescreen (YouTube / TV)',
+    icon: <Monitor className="w-3.5 h-3.5" />,
+  },
+  {
+    id: '4:3',
+    label: '4:3',
+    sublabel: 'Classic / Standard TV',
+    icon: <Tv className="w-3.5 h-3.5" />,
+  },
+  {
+    id: '1:1',
+    label: '1:1',
+    sublabel: 'Square (Instagram / Feed)',
+    icon: <Square className="w-3.5 h-3.5" />,
+  },
+  {
+    id: '4:5',
+    label: '4:5',
+    sublabel: 'Portrait (Social Post)',
+    icon: <Smartphone className="w-3.5 h-3.5" />,
+  },
+  {
+    id: '9:16',
+    label: '9:16',
+    sublabel: 'Vertical (Reels / TikTok)',
+    icon: <Smartphone className="w-3.5 h-3.5 rotate-90" />,
+  },
+  {
+    id: '21:9',
+    label: '21:9',
+    sublabel: 'Cinematic / Ultrawide',
+    icon: <Film className="w-3.5 h-3.5" />,
+  },
+  {
+    id: 'original',
+    label: 'Original',
+    sublabel: 'Auto / Fit Source',
+    icon: <RotateCcw className="w-3.5 h-3.5" />,
+  },
+];
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   videoUrl,
@@ -23,14 +89,41 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onTimeUpdate,
   onDurationLoaded,
   onTogglePlay,
+  onUpdateSettings,
 }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Reset error state when video URL changes
   useEffect(() => {
     setLoadError(null);
   }, [videoUrl]);
+
+  // Handle outside clicks to close context menu
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setContextMenu(null);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    if (contextMenu) {
+      document.addEventListener('mousedown', handleOutsideClick);
+      document.addEventListener('keydown', handleKeyDown);
+      return () => {
+        document.removeEventListener('mousedown', handleOutsideClick);
+        document.removeEventListener('keydown', handleKeyDown);
+      };
+    }
+  }, [contextMenu]);
 
   useEffect(() => {
     if (videoRef.current && videoUrl && !loadError) {
@@ -104,13 +197,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const getAspectClass = () => {
     switch (settings.cropAspect) {
       case '16:9':
-        return 'aspect-video max-h-[480px]';
-      case '9:16':
-        return 'aspect-[9/16] max-h-[480px]';
-      case '1:1':
-        return 'aspect-square max-h-[420px]';
+        return 'aspect-[16/9] max-h-[480px] w-full max-w-[854px]';
       case '4:3':
-        return 'aspect-[4/3] max-h-[450px]';
+        return 'aspect-[4/3] max-h-[460px] w-full max-w-[640px]';
+      case '1:1':
+        return 'aspect-square max-h-[420px] w-full max-w-[420px]';
+      case '4:5':
+        return 'aspect-[4/5] max-h-[480px] w-full max-w-[384px]';
+      case '9:16':
+        return 'aspect-[9/16] max-h-[480px] w-full max-w-[270px]';
+      case '21:9':
+        return 'aspect-[21/9] max-h-[400px] w-full max-w-[933px]';
+      case 'original':
       default:
         return 'max-h-[480px] w-auto';
     }
@@ -154,8 +252,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     setLoadError(detail);
   };
 
+  // Right-click context menu handler
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const menuWidth = 240;
+    const menuHeight = 350;
+    let posX = e.clientX;
+    let posY = e.clientY;
+
+    if (posX + menuWidth > window.innerWidth - 12) {
+      posX = window.innerWidth - menuWidth - 12;
+    }
+    if (posY + menuHeight > window.innerHeight - 12) {
+      posY = window.innerHeight - menuHeight - 12;
+    }
+
+    setContextMenu({ x: posX, y: posY });
+  }, []);
+
+  const handleSelectAspect = (aspect: EditSettings['cropAspect']) => {
+    if (onUpdateSettings) {
+      onUpdateSettings({ cropAspect: aspect });
+    }
+    setContextMenu(null);
+  };
+
   return (
-    <div className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-6 overflow-hidden">
+    <div
+      ref={containerRef}
+      onContextMenu={handleContextMenu}
+      className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-6 overflow-hidden select-none"
+    >
       {!videoUrl ? (
         <div className="flex flex-col items-center gap-4">
           <div className="flex items-center space-x-2">
@@ -224,7 +353,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
       ) : (
-        <div className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}>
+        <div
+          className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center transition-all duration-300 ${getAspectClass()}`}
+        >
           <video
             ref={videoRef}
             src={videoUrl}
@@ -255,6 +386,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             preload="auto"
             muted={settings.muteAudio}
           />
+
+          {/* Current Aspect Ratio Badge Indicator */}
+          {settings.cropAspect && settings.cropAspect !== 'original' && (
+            <div
+              onClick={(e) => {
+                e.stopPropagation();
+                handleContextMenu(e);
+              }}
+              className="absolute top-3 left-3 z-10 px-2.5 py-1 bg-slate-900/85 hover:bg-slate-800 border border-white/20 text-cyan-400 text-xs font-mono rounded-md shadow-lg backdrop-blur-md flex items-center space-x-1.5 cursor-pointer transition"
+              title="Click or right-click to change scale"
+            >
+              <Scaling className="w-3 h-3 text-cyan-400" />
+              <span className="font-semibold tracking-wider">{settings.cropAspect}</span>
+            </div>
+          )}
 
           {/* Live Watermark Overlay */}
           {settings.watermarkText && (
@@ -292,6 +438,68 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
         </div>
       )}
+
+      {/* Right-Click Popup Context Menu for Aspect Ratio / Scale */}
+      {contextMenu && (
+        <div
+          ref={menuRef}
+          className="fixed z-50 min-w-[230px] bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl backdrop-blur-xl p-1.5 text-slate-200 animate-in fade-in zoom-in-95 duration-150"
+          style={{
+            top: `${contextMenu.y}px`,
+            left: `${contextMenu.x}px`,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Menu Header */}
+          <div className="px-3 py-2 border-b border-slate-800/80 flex items-center justify-between mb-1">
+            <div className="flex items-center space-x-2">
+              <Scaling className="w-4 h-4 text-cyan-400" />
+              <span className="text-xs font-semibold text-white tracking-wide">Video Scale / สเกลวิดีโอ</span>
+            </div>
+            <span className="text-[10px] text-slate-400 font-mono">Aspect</span>
+          </div>
+
+          {/* Aspect Ratio Options List */}
+          <div className="flex flex-col gap-0.5 max-h-[300px] overflow-y-auto">
+            {ASPECT_OPTIONS.map((option) => {
+              const isActive = (settings.cropAspect || 'original') === option.id;
+              return (
+                <button
+                  key={option.id}
+                  onClick={() => handleSelectAspect(option.id)}
+                  className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between text-xs transition cursor-pointer ${
+                    isActive
+                      ? 'bg-cyan-500/15 text-cyan-300 font-medium border border-cyan-500/30'
+                      : 'hover:bg-slate-800/80 text-slate-300 hover:text-white border border-transparent'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2.5">
+                    <span
+                      className={`p-1 rounded ${
+                        isActive ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {option.icon}
+                    </span>
+                    <div className="flex flex-col">
+                      <span className="font-bold text-xs">{option.label}</span>
+                      <span className="text-[10px] text-slate-400 leading-none">{option.sublabel}</span>
+                    </div>
+                  </div>
+                  {isActive && <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0 ml-2" />}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Menu Footer Hint */}
+          <div className="mt-1 pt-1.5 border-t border-slate-800/80 px-2.5 py-1 text-[10px] text-slate-500 flex items-center justify-between">
+            <span>คลิกขวาเพื่อเปิดเมนูนี้ได้ตลอดเวลา</span>
+            <span className="font-mono text-slate-600">Esc to close</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
