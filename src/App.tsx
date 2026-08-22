@@ -385,9 +385,14 @@ export default function App() {
     const detectedExt = (videoName ? videoName.split('.').pop()?.toLowerCase() : 'mp4') || 'mp4';
     const sourceExt = ['mp4', 'mkv', 'webm', 'ts', 'mov', 'm4v'].includes(detectedExt) ? detectedExt : 'mp4';
 
-    const defaultOutputName = selectedFiles.length > 1 
-      ? `merged_output.${sourceExt}` 
-      : `trimmed_${videoName ? videoName.split('.')[0] : 'video'}.${sourceExt}`;
+    const baseName = videoName ? videoName.split('.')[0] : 'video';
+    let defaultOutputName = '';
+    if (isEncodeMode) {
+      const isMulti = (tracks && tracks.some(t => !t.hidden && t.clips.length > 0)) || selectedFiles.length > 1;
+      defaultOutputName = isMulti ? `encoded_project.${sourceExt}` : `encoded_${baseName}.${sourceExt}`;
+    } else {
+      defaultOutputName = selectedFiles.length > 1 ? `merged_output.${sourceExt}` : `trimmed_${baseName}.${sourceExt}`;
+    }
 
     if ('showSaveFilePicker' in window) {
       try {
