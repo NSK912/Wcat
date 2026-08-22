@@ -334,13 +334,60 @@ export async function processWebCodecsEncodeStream(
     log: `[WebCodecs API] Trim Range: ${trimStart ? `${trimStart.toFixed(2)}s` : '0.00s'} -> ${trimEnd ? `${trimEnd.toFixed(2)}s` : `${sourceDuration.toFixed(2)}s`}`,
   });
 
-  // Determine Video Codec & Quality with fallback negotiation
+  // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip, aspect ratio)
+  const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
+  const needsCanvasProcessing =
+    settings.filter !== 'none' ||
+    settings.brightness !== 1.0 ||
+    settings.contrast !== 1.0 ||
+    settings.flipH ||
+    settings.flipV ||
+    Boolean(settings.watermarkText?.trim()) ||
+    hasCustomAspect;
+
+  let canvasWidth = sourceWidth;
+  let canvasHeight = sourceHeight;
+
+  if (hasCustomAspect) {
+    let aspectMultiplier = 16 / 9;
+    switch (settings.cropAspect) {
+      case '16:9': aspectMultiplier = 16 / 9; break;
+      case '4:3': aspectMultiplier = 4 / 3; break;
+      case '1:1': aspectMultiplier = 1 / 1; break;
+      case '4:5': aspectMultiplier = 4 / 5; break;
+      case '9:16': aspectMultiplier = 9 / 16; break;
+      case '21:9': aspectMultiplier = 21 / 9; break;
+    }
+
+    if (sourceWidth / sourceHeight > aspectMultiplier) {
+      // Source is wider than target ratio
+      canvasHeight = sourceHeight;
+      canvasWidth = Math.round(sourceHeight * aspectMultiplier);
+    } else {
+      // Source is taller than target ratio
+      canvasWidth = sourceWidth;
+      canvasHeight = Math.round(sourceWidth / aspectMultiplier);
+    }
+
+    // Ensure even dimensions
+    canvasWidth = Math.max(2, canvasWidth - (canvasWidth % 2));
+    canvasHeight = Math.max(2, canvasHeight - (canvasHeight % 2));
+
+    onProgress({
+      percentage: 7,
+      statusText: `Applied scale ${settings.cropAspect}: Target resolution ${canvasWidth}x${canvasHeight}`,
+      speedMBs: 0,
+      log: `[WebCodecs API] Scale Aspect Ratio: ${settings.cropAspect} (Calculated Target Dimensions: ${canvasWidth}x${canvasHeight})`,
+    });
+  }
+
+  // Determine Video Codec & Quality with fallback negotiation using target dimensions
   const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
   const targetQuality = resolveQuality(settings.videoQuality);
   const targetVideoCodec = await negotiateVideoCodec(
     preferredVideoCodec,
-    sourceWidth,
-    sourceHeight,
+    canvasWidth,
+    canvasHeight,
     targetQuality
   );
 
@@ -366,45 +413,6 @@ export async function processWebCodecsEncodeStream(
   });
 
   const output = new Output({ format: outputFormat, target });
-
-  // Check if we need canvas frame filtering (brightness, contrast, watermark, filters, flip, aspect ratio)
-  const needsCanvasProcessing =
-    settings.filter !== 'none' ||
-    settings.brightness !== 1.0 ||
-    settings.contrast !== 1.0 ||
-    settings.flipH ||
-    settings.flipV ||
-    Boolean(settings.watermarkText?.trim()) ||
-    Boolean(settings.cropAspect && settings.cropAspect !== 'original');
-
-  let canvasWidth = sourceWidth;
-  let canvasHeight = sourceHeight;
-
-  if (settings.cropAspect && settings.cropAspect !== 'original') {
-    let aspectMultiplier = 16 / 9;
-    switch (settings.cropAspect) {
-      case '16:9': aspectMultiplier = 16 / 9; break;
-      case '4:3': aspectMultiplier = 4 / 3; break;
-      case '1:1': aspectMultiplier = 1 / 1; break;
-      case '4:5': aspectMultiplier = 4 / 5; break;
-      case '9:16': aspectMultiplier = 9 / 16; break;
-      case '21:9': aspectMultiplier = 21 / 9; break;
-    }
-
-    if (sourceWidth / sourceHeight > aspectMultiplier) {
-      // Source is wider than target ratio
-      canvasHeight = sourceHeight;
-      canvasWidth = Math.round(sourceHeight * aspectMultiplier);
-    } else {
-      // Source is taller than target ratio
-      canvasWidth = sourceWidth;
-      canvasHeight = Math.round(sourceWidth / aspectMultiplier);
-    }
-
-    // Ensure even dimensions
-    canvasWidth = Math.max(2, canvasWidth - (canvasWidth % 2));
-    canvasHeight = Math.max(2, canvasHeight - (canvasHeight % 2));
-  }
 
   let offscreenCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
   let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
@@ -435,6 +443,11 @@ export async function processWebCodecsEncodeStream(
       codec: targetVideoCodec,
       quality: targetQuality,
       hardwareAcceleration: 'no-preference',
+      width: canvasWidth,
+      height: canvasHeight,
+      processedWidth: canvasWidth,
+      processedHeight: canvasHeight,
+      fit: 'cover',
       rotate: (settings.rotation as any) || undefined,
       allowRotationMetadata: false, // Bakes rotation into the WebCodecs pixel buffer
       process: needsCanvasProcessing && offscreenCanvas && canvasCtx

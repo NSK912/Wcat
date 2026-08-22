@@ -428,8 +428,21 @@ export default function App() {
 
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
 
+        const hasVisualModifications =
+          Boolean(settings.cropAspect && settings.cropAspect !== 'original') ||
+          settings.filter !== 'none' ||
+          settings.brightness !== 1.0 ||
+          settings.contrast !== 1.0 ||
+          settings.rotation !== 0 ||
+          settings.flipH ||
+          settings.flipV ||
+          Boolean(settings.watermarkText?.trim()) ||
+          settings.muteAudio;
+
+        const shouldUseEncodeMode = isEncodeMode || hasVisualModifications;
+
         let result;
-        if (isEncodeMode) {
+        if (shouldUseEncodeMode) {
           addLog(`[WebCodecs API] Hardware Accelerated Concatenation & Encoding Mode Initialized`);
           result = await processWebCodecsConcatStream(selectedFiles, settings, writable, (prog) => {
             setProcessingProgress(prog.percentage / 100);
@@ -494,10 +507,23 @@ export default function App() {
         const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
 
         const isFullLengthRemux = currentStart === 0 && finalEndTime >= currentFileDuration - 0.1;
+        const hasVisualModifications =
+          Boolean(settings.cropAspect && settings.cropAspect !== 'original') ||
+          settings.filter !== 'none' ||
+          settings.brightness !== 1.0 ||
+          settings.contrast !== 1.0 ||
+          settings.rotation !== 0 ||
+          settings.flipH ||
+          settings.flipV ||
+          Boolean(settings.watermarkText?.trim()) ||
+          settings.muteAudio;
+
+        const shouldUseEncodeMode = isEncodeMode || hasVisualModifications;
         let result;
 
-        if (isEncodeMode) {
-          addLog(`[WebCodecs API] Hardware Accelerated Re-Encoding Mode Activated (Codec: ${(settings.videoCodec || 'avc').toUpperCase()}, Quality: ${settings.videoQuality || 'high'})`);
+        if (shouldUseEncodeMode) {
+          const scaleInfo = (settings.cropAspect && settings.cropAspect !== 'original') ? `Scale: ${settings.cropAspect}, ` : '';
+          addLog(`[WebCodecs API] Hardware Accelerated Re-Encoding Mode Activated (${scaleInfo}Codec: ${(settings.videoCodec || 'avc').toUpperCase()}, Quality: ${settings.videoQuality || 'high'})`);
           result = await processWebCodecsEncodeStream(
             inputFile,
             settings,

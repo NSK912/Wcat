@@ -359,7 +359,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           <video
             ref={videoRef}
             src={videoUrl}
-            className="max-h-full max-w-full object-contain transition-all duration-200"
+            className={`transition-all duration-200 ${
+              settings.cropAspect && settings.cropAspect !== 'original'
+                ? 'w-full h-full object-cover'
+                : 'max-h-full max-w-full object-contain'
+            }`}
             style={{
               filter: getCssFilter(),
               transform: getTransform(),
