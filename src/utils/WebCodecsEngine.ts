@@ -13,6 +13,10 @@ import {
   Quality,
   canEncodeVideo,
   canEncodeAudio,
+  AudioSampleSink,
+  AudioSampleSource,
+  VideoSampleSink,
+  VideoSampleSource,
   OutputTrackGroup,
   type StreamTargetChunk,
   type VideoCodec,
@@ -816,29 +820,39 @@ export async function processWebCodecsConcatStream(
       ? new MkvOutputFormat()
       : new Mp4OutputFormat({ fastStart: 'in-memory' });
 
-  const target = createWebCodecsTarget(writable);
+    const target = createWebCodecsTarget(writable);
   let totalWritten = 0;
   target.on('write', ({ end }) => {
     totalWritten = Math.max(totalWritten, end);
   });
-
   const output = new Output({ format, target });
 
-  const videoGroup = new OutputTrackGroup();
-  const audioGroup = new OutputTrackGroup();
-  videoGroup.pairWith(audioGroup);
+  // Create single continuous output tracks
+  const vSource = new VideoSampleSource({
+    codec: targetVideoCodec,
+    width: 1920,
+    height: 1080,
+    hardwareAcceleration: 'no-preference'
+  });
+  const aSource = new AudioSampleSource({
+    codec: targetAudioCodec,
+  });
 
-  const conversions = [];
-  
-  // Initialize all conversions first (must be done before output.start())
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i];
-    const file = segment.file;
+  output.addVideoTrack(vSource);
+  output.addAudioTrack(aSource);
+
+  await output.start();
+
+  let currentVideoTime = 0;
+  let currentAudioTime = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     onProgress({
-      percentage: Math.round((i / files.length) * 50),
-      statusText: `WebCodecs Concat: Initializing segment ${i + 1}/${files.length} (${file.name})...`,
+      percentage: Math.round((i / files.length) * 100),
+      statusText: `WebCodecs Concat: Encoding segment ${i + 1}/${files.length} (${file.name})...`,
       speedMBs: 0,
-      log: `[WebCodecs Concat] Initializing segment ${i + 1}/${files.length}: ${file.name}`,
+      log: `[WebCodecs Concat] Processing segment ${i + 1}/${files.length}: ${file.name}`,
     });
 
     const input = new Input({
@@ -846,56 +860,44 @@ export async function processWebCodecsConcatStream(
       formats: ALL_FORMATS,
     });
 
-    const conversion = await Conversion.init({
-      input,
-      output,
-      composable: true, // Allows multiple file segments targeting the same output
-      video: {
-        forceTranscode: true,
-        codec: targetVideoCodec,
-        quality: targetQuality,
-        hardwareAcceleration: 'no-preference',
-        group: videoGroup
-      },
-      audio: {
-        discard: settings.muteAudio,
-        forceTranscode: true,
-        codec: targetAudioCodec,
-        quality: resolveQuality('high'),
-        group: audioGroup
-      },
-    });
+    let maxVidDur = 0;
+    let maxAudDur = 0;
 
-    conversions.push({ conversion, segment, file });
-  }
+    const vTracks = await input.getVideoTracks();
+    if (vTracks.length > 0) {
+      const vSink = new VideoSampleSink(vTracks[0]);
+      for await (const sample of vSink.samples()) {
+        const origDuration = sample.duration;
+        let pSample = sample;
+        if (sample.squarePixelWidth !== 1920 || sample.squarePixelHeight !== 1080) {
+            pSample = await sample.transform({ width: 1920, height: 1080, fit: 'cover' });
+        }
+        pSample.setTimestamp(pSample.timestamp + currentVideoTime);
+        await vSource.add(pSample);
+        maxVidDur = Math.max(maxVidDur, pSample.timestamp + origDuration - currentVideoTime);
+        if (pSample !== sample) pSample.close();
+        sample.close();
+      }
+    }
 
-  // Now start the output file
-  await output.start();
+    const aTracks = await input.getAudioTracks();
+    if (aTracks.length > 0 && !settings.muteAudio) {
+      const aSink = new AudioSampleSink(aTracks[0]);
+      for await (const sample of aSink.samples()) {
+        const origDuration = sample.duration;
+        sample.setTimestamp(sample.timestamp + currentAudioTime);
+        await aSource.add(sample);
+        maxAudDur = Math.max(maxAudDur, sample.timestamp + origDuration - currentAudioTime);
+        sample.close();
+      }
+    }
 
-  // Execute conversions sequentially
-  let currentFileIdx = 0;
-  for (const { conversion, segment, file } of conversions) {
-    currentFileIdx++;
-    onProgress({
-      percentage: 50 + Math.round(((currentFileIdx - 1) / files.length) * 50),
-      statusText: `WebCodecs Concat: Encoding segment ${currentFileIdx}/${files.length} (${file.name})...`,
-      speedMBs: 0,
-      log: `[WebCodecs Concat] Processing segment ${currentFileIdx}/${files.length}: ${file.name}`,
-    });
-
-    conversion.onProgress = (prog) => {
-      const overall = Math.round((((currentFileIdx - 1) + prog) / files.length) * 50) + 50;
-      onProgress({
-        percentage: Math.min(99, overall),
-        statusText: `WebCodecs Concat [${currentFileIdx}/${files.length}]: ${Math.round(prog * 100)}%`,
-        speedMBs: 0,
-      });
-    };
-
-    await conversion.execute();
+    currentVideoTime += maxVidDur;
+    currentAudioTime += maxAudDur;
   }
 
   await output.finalize();
+
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
     const isMp4 = format instanceof Mp4OutputFormat;
