@@ -830,12 +830,14 @@ export async function processWebCodecsConcatStream(
   // Create single continuous output tracks
   const vSource = new VideoSampleSource({
     codec: targetVideoCodec,
+    quality: targetQuality,
     width: 1920,
     height: 1080,
     hardwareAcceleration: 'no-preference'
   });
   const aSource = new AudioSampleSource({
     codec: targetAudioCodec,
+    quality: resolveQuality('high')
   });
 
   output.addVideoTrack(vSource);
