@@ -17,6 +17,10 @@ export interface EditSettings {
   volume: number; // 0 to 2
   muteAudio: boolean;
   outputFormat: 'mp4' | 'webm' | 'gif' | 'mp3';
+  encodeMode?: boolean; // When true, uses WebCodecs API Hardware Acceleration Pipeline
+  videoCodec?: 'avc' | 'hevc' | 'vp9' | 'av1';
+  audioCodec?: 'aac' | 'opus';
+  videoQuality?: 'low' | 'medium' | 'high' | 'very-high';
 }
 
 export type ActiveTab = 'trim' | 'filters' | 'adjust' | 'text' | 'audio' | 'export';

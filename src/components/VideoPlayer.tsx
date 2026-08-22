@@ -1,6 +1,6 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { EditSettings } from '../types';
-import { Play, Pause, RotateCcw, Volume2, VolumeX, Maximize2 } from 'lucide-react';
+import { Play, Pause, AlertTriangle, RefreshCw } from 'lucide-react';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
@@ -23,21 +23,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onTimeUpdate,
   onDurationLoaded,
   onTogglePlay,
-  onSeek,
-  videoName,
-  selectedFile,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Reset error state when video URL changes
+  useEffect(() => {
+    setLoadError(null);
+  }, [videoUrl]);
 
   useEffect(() => {
-    if (videoRef.current) {
+    if (videoRef.current && videoUrl && !loadError) {
       if (isPlaying) {
-        videoRef.current.play().catch(() => {});
+        const promise = videoRef.current.play();
+        if (promise !== undefined) {
+          promise.catch((err) => {
+            console.warn('Playback paused or not permitted:', err);
+          });
+        }
       } else {
         videoRef.current.pause();
       }
     }
-  }, [isPlaying]);
+  }, [isPlaying, videoUrl, loadError]);
 
   useEffect(() => {
     if (videoRef.current && Math.abs(videoRef.current.currentTime - currentTime) > 0.3) {
@@ -124,6 +132,28 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
+  const handleVideoError = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
+    const mediaErr = e.currentTarget.error;
+    let detail = 'Browser cannot preview this video directly';
+    if (mediaErr) {
+      switch (mediaErr.code) {
+        case 1: // MEDIA_ERR_ABORTED
+          detail = 'Video playback was aborted';
+          break;
+        case 2: // MEDIA_ERR_NETWORK
+          detail = 'Network error loading video';
+          break;
+        case 3: // MEDIA_ERR_DECODE
+          detail = 'Decode error (unsupported audio/video codec)';
+          break;
+        case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+          detail = 'Video format not supported natively in browser preview (Remux or Encode Mode can still process it)';
+          break;
+      }
+    }
+    setLoadError(detail);
+  };
+
   return (
     <div className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-6 overflow-hidden">
       {!videoUrl ? (
@@ -173,6 +203,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             ver 3.5.0.1
           </div>
         </div>
+      ) : loadError ? (
+        <div className="flex flex-col items-center justify-center p-6 bg-slate-900/90 border border-amber-500/40 rounded-xl max-w-md text-center shadow-xl backdrop-blur-sm">
+          <AlertTriangle className="w-10 h-10 text-amber-400 mb-3" />
+          <h3 className="text-sm font-semibold text-white mb-1">Preview Notice</h3>
+          <p className="text-xs text-slate-300 mb-4 leading-relaxed">{loadError}</p>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => {
+                setLoadError(null);
+                if (videoRef.current) {
+                  videoRef.current.load();
+                }
+              }}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg border border-white/10 flex items-center space-x-1 transition cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Retry Load</span>
+            </button>
+          </div>
+        </div>
       ) : (
         <div className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center ${getAspectClass()}`}>
           <video
@@ -191,16 +241,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             onLoadedMetadata={(e) => {
               const video = e.target as HTMLVideoElement;
               const dur = video.duration;
-              onDurationLoaded(dur);
+              if (!isNaN(dur) && dur > 0) {
+                onDurationLoaded(dur);
+              }
               // Force mobile browsers to render the first frame
               if (video.currentTime === 0) {
                 video.currentTime = 0.001;
               }
             }}
+            onError={handleVideoError}
             onEnded={() => onTogglePlay()}
             playsInline
             preload="auto"
-            crossOrigin="anonymous"
             muted={settings.muteAudio}
           />
 

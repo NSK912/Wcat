@@ -786,13 +786,13 @@ async function processMediabunnyTrimStream(
     if (vTracks.length > 0) {
       vCodec = (await vTracks[0].getCodec()) || 'unknown';
       vDecConfig = await vTracks[0].getDecoderConfig();
-      vSource = new EncodedVideoPacketSource(vCodec!);
+      vSource = new EncodedVideoPacketSource(vCodec as any);
     }
 
     if (aTracks.length > 0) {
       aCodec = (await aTracks[0].getCodec()) || 'unknown';
       aDecConfig = await aTracks[0].getDecoderConfig();
-      aSource = new EncodedAudioPacketSource(aCodec!);
+      aSource = new EncodedAudioPacketSource(aCodec as any);
     }
 
     if (!vSource && !aSource) {
@@ -1087,13 +1087,13 @@ async function processMediabunnyRemuxStream(
     if (vTracks.length > 0) {
       vCodec = (await vTracks[0].getCodec()) || 'unknown';
       vDecConfig = await vTracks[0].getDecoderConfig();
-      vSource = new EncodedVideoPacketSource(vCodec!);
+      vSource = new EncodedVideoPacketSource(vCodec as any);
     }
 
     if (aTracks.length > 0) {
       aCodec = (await aTracks[0].getCodec()) || 'unknown';
       aDecConfig = await aTracks[0].getDecoderConfig();
-      aSource = new EncodedAudioPacketSource(aCodec!);
+      aSource = new EncodedAudioPacketSource(aCodec as any);
     }
 
     if (!vSource && !aSource) {
