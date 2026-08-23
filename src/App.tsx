@@ -108,7 +108,8 @@ export default function App() {
   // Master timeline playback clock to advance across blank gaps and when no video element is active
   useEffect(() => {
     if (!isPlaying) return;
-    if (hasActiveClip && videoUrl) return; // Active video element drives time updates with exact frame/audio sync
+    const isImage = isEncodeMode && videoName && /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(videoName);
+    if (hasActiveClip && videoUrl && !isImage) return; // Active video element drives time updates with exact frame/audio sync
 
     let lastTime = performance.now();
     let animId: number;
@@ -133,7 +134,7 @@ export default function App() {
 
     animId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(animId);
-  }, [isPlaying, duration, settings.speed, hasActiveClip, videoUrl]);
+  }, [isPlaying, duration, settings.speed, hasActiveClip, videoUrl, isEncodeMode, videoName]);
 
   // Prevent right click context menu globally
   useEffect(() => {
