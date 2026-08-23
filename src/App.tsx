@@ -355,7 +355,31 @@ export default function App() {
     let targetY = 50;
 
     const halfWPct = (currentScale * 100) / 2;
-    const halfHPct = (currentScale * 100 * 0.5625) / 2;
+    let halfHPct = (currentScale * 100 * 0.5625) / 2;
+
+    const container = document.getElementById('canvas-container');
+    const layerEl = document.querySelector(`[data-layer-id="${activeSelectedLayer.clip.id}"]`);
+    if (container && layerEl) {
+      const containerRect = container.getBoundingClientRect();
+      const Rc = containerRect.height > 0 ? containerRect.width / containerRect.height : 16 / 9;
+      
+      const mediaEl = layerEl.querySelector('img, video');
+      if (mediaEl) {
+        let Rm = 16 / 9;
+        if (mediaEl.tagName === 'IMG') {
+          const img = mediaEl as HTMLImageElement;
+          if (img.naturalWidth && img.naturalHeight) {
+            Rm = img.naturalWidth / img.naturalHeight;
+          }
+        } else if (mediaEl.tagName === 'VIDEO') {
+          const vid = mediaEl as HTMLVideoElement;
+          if (vid.videoWidth && vid.videoHeight) {
+            Rm = vid.videoWidth / vid.videoHeight;
+          }
+        }
+        halfHPct = (Rc / Rm) * currentScale * 50;
+      }
+    }
 
     switch (position) {
       case 'tl':
