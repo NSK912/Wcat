@@ -26,10 +26,13 @@ import {
 } from 'mediabunny';
 import { EditSettings, ClipTransform, TimelineTrackData, TimelineClip } from '../types';
 
+const MASTER_AUDIO_SAMPLE_RATE = 48000;
+const MASTER_AUDIO_CHANNELS = 2;
+
 /**
  * Creates a silent AudioSample of zero PCM values to maintain container track audio/video synchronization
  */
-function createSilentAudioSample(timestamp: number, duration: number, sampleRate = 48000, channels = 2): AudioSample {
+function createSilentAudioSample(timestamp: number, duration: number, sampleRate = MASTER_AUDIO_SAMPLE_RATE, channels = MASTER_AUDIO_CHANNELS): AudioSample {
   const numberOfFrames = Math.max(1, Math.round(duration * sampleRate));
   const pcmData = new Float32Array(numberOfFrames * channels);
   return new AudioSample({
@@ -38,6 +41,84 @@ function createSilentAudioSample(timestamp: number, duration: number, sampleRate
     numberOfChannels: channels,
     timestamp,
     data: pcmData,
+  });
+}
+
+/**
+ * Extracts float32 planar PCM data from any AudioSample safely without DOM/AudioContext dependence
+ */
+function extractPCMFloat32(sample: AudioSample): { pcm: Float32Array; frames: number; channels: number; rate: number } {
+  const frames = sample.numberOfFrames || 0;
+  const channels = sample.numberOfChannels || 2;
+  const rate = sample.sampleRate || MASTER_AUDIO_SAMPLE_RATE;
+
+  if (frames <= 0 || channels <= 0) {
+    return { pcm: new Float32Array(0), frames: 0, channels: 1, rate };
+  }
+
+  const totalFloats = frames * channels;
+  const pcm = new Float32Array(totalFloats);
+
+  try {
+    for (let ch = 0; ch < channels; ch++) {
+      const planeBuf = new Float32Array(pcm.buffer, ch * frames * 4, frames);
+      sample.copyTo(planeBuf, { planeIndex: ch, format: 'f32-planar' });
+    }
+  } catch (e) {
+    try {
+      sample.copyTo(pcm, { planeIndex: 0, format: 'f32' });
+    } catch (e2) {
+      pcm.fill(0);
+    }
+  }
+
+  return { pcm, frames, channels, rate };
+}
+
+/**
+ * Adapts an AudioSample to match target sampleRate and numberOfChannels
+ */
+function adaptAudioSample(
+  sample: AudioSample,
+  targetSampleRate: number = MASTER_AUDIO_SAMPLE_RATE,
+  targetChannels: number = MASTER_AUDIO_CHANNELS
+): AudioSample {
+  if (sample.sampleRate === targetSampleRate && sample.numberOfChannels === targetChannels) {
+    return sample;
+  }
+
+  const { pcm, frames: srcFrames, channels: srcChannels, rate: srcRate } = extractPCMFloat32(sample);
+
+  if (srcFrames <= 0) {
+    return createSilentAudioSample(sample.timestamp, sample.duration || 0.02, targetSampleRate, targetChannels);
+  }
+
+  const ratio = targetSampleRate / (srcRate || targetSampleRate);
+  const dstFrames = Math.max(1, Math.round(srcFrames * ratio));
+  const dstPCM = new Float32Array(dstFrames * targetChannels);
+
+  for (let ch = 0; ch < targetChannels; ch++) {
+    const srcCh = Math.min(ch, srcChannels - 1);
+    const srcOffset = srcCh * srcFrames;
+    const dstOffset = ch * dstFrames;
+
+    for (let i = 0; i < dstFrames; i++) {
+      const srcIdx = i / ratio;
+      const i0 = Math.floor(srcIdx);
+      const i1 = Math.min(i0 + 1, srcFrames - 1);
+      const frac = srcIdx - i0;
+      const v0 = pcm[srcOffset + i0] || 0;
+      const v1 = pcm[srcOffset + i1] || 0;
+      dstPCM[dstOffset + i] = v0 + (v1 - v0) * frac;
+    }
+  }
+
+  return new AudioSample({
+    format: 'f32-planar',
+    sampleRate: targetSampleRate,
+    numberOfChannels: targetChannels,
+    timestamp: sample.timestamp,
+    data: dstPCM,
   });
 }
 
@@ -1539,11 +1620,13 @@ export async function processWebCodecsMultiTrackTimeline(
           if (audioDecoder) {
             const { value: aSample, done } = await audioDecoder.iterator.next();
             if (!done && aSample) {
-              const stepDur = aSample.duration > 0 ? aSample.duration : 0.02;
-              aSample.setTimestamp(currentAudioTime);
-              await aSource.add(aSample);
+              const adaptedSample = adaptAudioSample(aSample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
+              const stepDur = adaptedSample.duration > 0 ? adaptedSample.duration : 0.02;
+              adaptedSample.setTimestamp(currentAudioTime);
+              await aSource.add(adaptedSample);
               currentAudioTime += stepDur;
-              aSample.close();
+              if (adaptedSample !== aSample) adaptedSample.close();
+              try { aSample.close(); } catch {}
               continue;
             }
           }
@@ -1552,7 +1635,7 @@ export async function processWebCodecsMultiTrackTimeline(
         // No audio clip active at currentTimelinePos -> fill silence buffer to keep audio track synchronized
         const gapDur = Math.min(0.04, targetAudioEnd - currentAudioTime);
         if (gapDur > 0.0001) {
-          const silentSample = createSilentAudioSample(currentAudioTime, gapDur);
+          const silentSample = createSilentAudioSample(currentAudioTime, gapDur, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
           await aSource.add(silentSample);
           currentAudioTime += silentSample.duration;
           silentSample.close();
@@ -2140,9 +2223,12 @@ export async function processWebCodecsConcatStream(
               break;
             }
 
-            sample.setTimestamp(Math.max(0, sample.timestamp - sourceStart) + currentAudioTime);
-            await aSource.add(sample);
+            const sampleTime = Math.max(0, sample.timestamp - sourceStart);
+            const adaptedSample = adaptAudioSample(sample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
+            adaptedSample.setTimestamp(sampleTime + currentAudioTime);
+            await aSource.add(adaptedSample);
             maxAudDur = Math.max(maxAudDur, (sample.timestamp + origDuration) - currentAudioTime);
+            if (adaptedSample !== sample) adaptedSample.close();
             sample.close();
           }
         }
@@ -2158,7 +2244,7 @@ export async function processWebCodecsConcatStream(
         let silencePos = 0;
         while (silencePos < segDur) {
           const step = Math.min(0.1, segDur - silencePos);
-          const silentSample = createSilentAudioSample(currentAudioTime + silencePos, step);
+          const silentSample = createSilentAudioSample(currentAudioTime + silencePos, step, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
           await aSource.add(silentSample);
           silencePos += step;
           silentSample.close();
