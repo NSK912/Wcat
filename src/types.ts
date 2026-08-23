@@ -19,6 +19,7 @@ export interface TimelineClip {
   mediaType: MediaType;
   startTime: number;
   endTime: number;
+  duration?: number;
   sourceStartTime?: number;
   sourceEndTime?: number;
   fileDuration?: number;
