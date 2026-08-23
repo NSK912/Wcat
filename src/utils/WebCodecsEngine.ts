@@ -1475,36 +1475,7 @@ export async function processWebCodecsMultiTrackTimeline(
     iterator: AsyncIterator<AudioSample>;
   }>();
   
-  onProgress({ percentage: 5, statusText: 'Pre-warming media decoders...', speedMBs: 0 });
-
-  for (const track of visibleTracks) {
-    for (const clip of track.clips) {
-      if (clip.file && clip.mediaType !== 'image') {
-        const isImg = clip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name);
-        if (isImg) continue;
-        try {
-          const input = new Input({ source: new BlobSource(clip.file), formats: ALL_FORMATS });
-          const vTracks = await input.getVideoTracks();
-          if (vTracks.length > 0) {
-            const vSink = new VideoSampleSink(vTracks[0]);
-            const sourceStart = clip.sourceStartTime || 0;
-            const dur = clip.endTime !== undefined && clip.endTime > (clip.startTime || 0)
-              ? clip.endTime - (clip.startTime || 0)
-              : clip.duration || clip.fileDuration || 10;
-            const sourceEnd = (clip.sourceEndTime !== undefined ? clip.sourceEndTime : sourceStart + dur) + 5;
-            clipDecoders.set(clip.id, {
-              vSink,
-              iterator: vSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
-              currentSample: null,
-              lastDrawnSample: null,
-            });
-          }
-        } catch (e) {
-          console.warn('Failed to pre-warm decoder', clip.name, e);
-        }
-      }
-    }
-  }
+  onProgress({ percentage: 5, statusText: 'Initializing media compositing engine...', speedMBs: 0 });
 
   let lastProgressTime = performance.now();
   let lastBytes = 0;
@@ -1570,9 +1541,15 @@ export async function processWebCodecsMultiTrackTimeline(
               let sampleToDraw = decoder.currentSample;
               while (true) {
                 if (!sampleToDraw) {
-                  const { value, done } = await decoder.iterator.next();
-                  if (done) break;
-                  sampleToDraw = value;
+                  try {
+                    const { value, done } = await decoder.iterator.next();
+                    if (done) break;
+                    sampleToDraw = value;
+                  } catch (err) {
+                    console.warn('Decoder iterator error, resetting decoder for clip:', activeClip.id, err);
+                    clipDecoders.delete(activeClip.id);
+                    break;
+                  }
                 }
                 if (!sampleToDraw) break;
 
@@ -1663,7 +1640,16 @@ export async function processWebCodecsMultiTrackTimeline(
           }
 
           if (audioDecoder) {
-            const { value: aSample, done } = await audioDecoder.iterator.next();
+            let aSample = null;
+            let done = true;
+            try {
+              const res = await audioDecoder.iterator.next();
+              aSample = res.value;
+              done = res.done;
+            } catch (err) {
+              console.warn('Audio decoder iterator error:', err);
+              audioClipDecoders.delete(activeAudioClip.id);
+            }
             if (!done && aSample) {
               const adaptedSample = adaptAudioSample(aSample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
               const stepDur = adaptedSample.duration > 0 ? adaptedSample.duration : 0.02;
