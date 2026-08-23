@@ -256,7 +256,7 @@ async function negotiateVideoCodec(
   height: number,
   quality: Quality,
   hwAcceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'prefer-hardware'
-): Promise<VideoCodec> {
+): Promise<{ codec: VideoCodec; hwAccel: 'no-preference' | 'prefer-hardware' | 'prefer-software' }> {
   const safeWidth = Math.max(8, width - (width % 8));
   const safeHeight = Math.max(8, height - (height % 8));
 
@@ -267,7 +267,7 @@ async function negotiateVideoCodec(
       quality,
       hardwareAcceleration: hwAcceleration,
     });
-    if (isSupported) return preferredCodec;
+    if (isSupported) return { codec: preferredCodec, hwAccel: hwAcceleration };
   } catch {
     // Continue to fallback candidates
   }
@@ -282,7 +282,7 @@ async function negotiateVideoCodec(
         quality,
         hardwareAcceleration: hwAcceleration,
       });
-      if (supported) return candidate;
+      if (supported) return { codec: candidate, hwAccel: hwAcceleration };
     } catch {}
   }
 
@@ -291,7 +291,7 @@ async function negotiateVideoCodec(
     return negotiateVideoCodec(preferredCodec, width, height, quality, 'no-preference');
   }
 
-  return preferredCodec;
+  return { codec: preferredCodec, hwAccel: hwAcceleration };
 }
 
 /**
@@ -511,13 +511,15 @@ export async function processWebCodecsEncodeStream(
   const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
   const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
   const targetQuality = resolveQuality(settings.videoQuality);
-  const targetVideoCodec = await negotiateVideoCodec(
+  const negotiated = await negotiateVideoCodec(
     preferredVideoCodec,
     canvasWidth,
     canvasHeight,
     targetQuality,
     speedConfig.hardwareAcceleration
   );
+  const targetVideoCodec = negotiated.codec;
+  const targetHwAccel = negotiated.hwAccel;
 
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
@@ -525,7 +527,7 @@ export async function processWebCodecsEncodeStream(
   // Determine Output Format compatible with negotiated codecs
   const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
   let outputFormat;
-  if (ext === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8') {
+  if (ext === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') {
     outputFormat = new WebMOutputFormat();
   } else if (ext === 'mkv') {
     outputFormat = new MkvOutputFormat();
@@ -570,7 +572,7 @@ export async function processWebCodecsEncodeStream(
       forceTranscode: true, // Forces WebCodecs VideoDecoder -> VideoEncoder pipeline
       codec: targetVideoCodec,
       quality: targetQuality,
-      hardwareAcceleration: speedConfig.hardwareAcceleration,
+      hardwareAcceleration: targetHwAccel,
       width: canvasWidth,
       height: canvasHeight,
       processedWidth: canvasWidth,
@@ -718,10 +720,30 @@ export async function processWebCodecsEncodeStream(
     percentage: 10,
     statusText: 'WebCodecs VideoEncoder actively processing frames...',
     speedMBs: 0,
-    log: `[WebCodecs API] VideoEncoder started with Codec: ${targetVideoCodec.toUpperCase()} (Audio: ${targetAudioCodec.toUpperCase()}) | Quality: ${settings.videoQuality || 'high'}`,
+    log: `[WebCodecs API] VideoEncoder started with Codec: ${targetVideoCodec.toUpperCase()} (HW: ${targetHwAccel}) (Audio: ${targetAudioCodec.toUpperCase()}) | Quality: ${settings.videoQuality || 'high'}`,
   });
 
-  await conversion.execute();
+  try {
+    await conversion.execute();
+  } catch (err: any) {
+    if (err?.message?.includes('not supported') && targetHwAccel !== 'no-preference') {
+      onProgress({
+        percentage: 10,
+        statusText: 'Hardware encoder rejected. Retrying with software encoder...',
+        speedMBs: 0,
+        log: `[WebCodecs API] Hardware encoder failed. Retrying with no-preference (Software). Error: ${err.message}`,
+      });
+      // Patch conversion object to use no-preference and retry
+      if ((conversion as any).options?.video) {
+        (conversion as any).options.video.hardwareAcceleration = 'no-preference';
+        await conversion.execute();
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
@@ -870,13 +892,15 @@ export async function processWebCodecsConcatStream(
     canvasHeight = targetDims.height;
   }
 
-  const targetVideoCodec = await negotiateVideoCodec(preferredVideoCodec, canvasWidth, canvasHeight, targetQuality);
+  const negotiated = await negotiateVideoCodec(preferredVideoCodec, canvasWidth, canvasHeight, targetQuality);
+  const targetVideoCodec = negotiated.codec;
+  const targetHwAccel = negotiated.hwAccel;
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
 
   const ext = firstFile.name.split('.').pop()?.toLowerCase() || 'mp4';
   const format =
-    ext === 'webm' || targetVideoCodec === 'vp8'
+    ext === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9'
       ? new WebMOutputFormat()
       : ext === 'mkv'
       ? new MkvOutputFormat()
@@ -895,7 +919,7 @@ export async function processWebCodecsConcatStream(
     quality: targetQuality,
     width: canvasWidth,
     height: canvasHeight,
-    hardwareAcceleration: 'no-preference'
+    hardwareAcceleration: targetHwAccel
   });
   const aSource = new AudioSampleSource({
     codec: targetAudioCodec,
