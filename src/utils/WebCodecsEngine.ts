@@ -613,7 +613,7 @@ async function processImageToVideo(
   output.addVideoTrack(vSource);
   await output.start();
 
-  const fps = 30;
+  const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
   const durationSecs = (settings.duration && settings.duration > 0) ? settings.duration : 5;
   const actualDuration = (settings.endTime > 0 && settings.endTime < durationSecs) ? settings.endTime : durationSecs;
   const frames = Math.ceil(actualDuration * fps);
@@ -945,6 +945,7 @@ export async function processWebCodecsEncodeStream(
       codec: targetVideoCodec,
       quality: targetQuality,
       hardwareAcceleration: targetHwAccel,
+      frameRate: (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : undefined,
       width: canvasWidth,
       height: canvasHeight,
       processedWidth: canvasWidth,
@@ -1058,7 +1059,9 @@ export async function processWebCodecsEncodeStream(
       discard: settings.muteAudio,
       forceTranscode: true, // Forces WebCodecs AudioDecoder -> AudioEncoder
       codec: targetAudioCodec,
-      quality: resolveQuality('high'),
+      ...(settings.audioBitrate && settings.audioBitrate > 0
+        ? { bitrate: settings.audioBitrate * 1000 }
+        : { quality: resolveQuality('high') }),
     },
   });
 
@@ -1343,7 +1346,9 @@ export async function processWebCodecsMultiTrackTimeline(
   if (!settings.muteAudio) {
     aSource = new AudioSampleSource({
       codec: targetAudioCodec,
-      quality: resolveQuality('high'),
+      ...(settings.audioBitrate && settings.audioBitrate > 0
+        ? { bitrate: settings.audioBitrate * 1000 }
+        : { quality: resolveQuality('high') }),
     });
     output.addAudioTrack(aSource);
   }
@@ -1372,7 +1377,7 @@ export async function processWebCodecsMultiTrackTimeline(
   let lastProgressTime = performance.now();
   let lastBytes = 0;
 
-  const fps = 30;
+  const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
   const frameDur = 1 / fps;
 
   // Helper to render overlays at time t
@@ -1861,7 +1866,9 @@ export async function processWebCodecsConcatStream(
   });
   const aSource = new AudioSampleSource({
     codec: targetAudioCodec,
-    quality: resolveQuality('high')
+    ...(settings.audioBitrate && settings.audioBitrate > 0
+      ? { bitrate: settings.audioBitrate * 1000 }
+      : { quality: resolveQuality('high') }),
   });
 
   output.addVideoTrack(vSource);
@@ -1892,7 +1899,7 @@ export async function processWebCodecsConcatStream(
       const imgWidth = bmp.width;
       const imgHeight = bmp.height;
       const segDuration = seg.duration > 0 ? seg.duration : 5;
-      const fps = 30;
+      const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
       const frames = Math.ceil(segDuration * fps);
       const frameDurationSec = 1 / fps;
 

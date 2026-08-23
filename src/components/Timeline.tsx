@@ -1518,7 +1518,7 @@ export const Timeline: React.FC<TimelineProps> = ({
         isResizingHeight ? 'transition-none' : 'transition-[height] duration-100 ease-out'
       }`}
     >
-      {/* Top Splitter / Resize Drag Bar (จับเลื่อนขึ้น-ลงเพื่อปรับขนาดความสูงกล่องเครื่องมือ) */}
+      {/* Top Splitter / Resize Drag Bar (Drag up/down to resize tools panel) */}
       <div
         className="absolute -top-2 left-0 right-0 h-4.5 z-50 cursor-row-resize flex items-center justify-center group select-none"
         onMouseDown={(e) => {
@@ -1734,13 +1734,6 @@ export const Timeline: React.FC<TimelineProps> = ({
           </button>
         </div>
       </div>
-
-      {/* Drag Tooltip Indicator */}
-      {dragTooltip && (
-        <div className="absolute left-1/2 -top-7 -translate-x-1/2 z-50 bg-slate-900/95 border border-indigo-400 text-indigo-200 text-[11px] font-mono font-semibold px-3 py-0.5 rounded shadow-xl animate-fadeIn pointer-events-none">
-          {dragTooltip}
-        </div>
-      )}
 
       {/* Universal Timeline Workspace (Same unified layout & calculation for Copy Mode and Encode Mode) */}
       {!computedTimelineDuration || computedTimelineDuration <= 0 ? (

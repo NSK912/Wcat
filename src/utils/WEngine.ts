@@ -1358,7 +1358,7 @@ async function processMediabunnyConcatStream(
       const file = files[fIdx];
       onProgress({
         percentage: Math.round(((fIdx) / files.length) * 90) + 8,
-        statusText: `กำลังรวมไฟล์ ${fIdx + 1}/${files.length} (${file.name})...`,
+        statusText: `Merging file ${fIdx + 1}/${files.length} (${file.name})...`,
         speedMBs: 0,
         log: `[PROCESS] Processing input file ${fIdx + 1}/${files.length}: ${file.name} (size: ${(file.size / (1024 * 1024)).toFixed(2)} MB, base offsets: V=${vOffset.toFixed(3)}s, A=${aOffset.toFixed(3)}s)`
       });
@@ -1696,7 +1696,7 @@ async function processNativeEBMLConcatStream(
             
             // Update Progress
             const overallProg = ((fIdx / files.length) + ((cIdx + 1) / meta.clusters.length) * (1 / files.length)) * 100;
-            onProgress({ percentage: overallProg, statusText: `กำลังรวมไฟล์ที่ ${fIdx + 1}/${files.length}... (Standard Engine)`, speedMBs: 0 });
+            onProgress({ percentage: overallProg, statusText: `Merging file ${fIdx + 1}/${files.length}... (Standard Engine)`, speedMBs: 0 });
         }
 
         // Advance global timecode offset
@@ -1709,7 +1709,7 @@ async function processNativeEBMLConcatStream(
     }
 
     if (writable && cuePoints.length > 0) {
-        onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
+        onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
         const cuesOffset = totalBytesWritten - segmentDataOffset;
         const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
         await writable.write(cuesBuffer);
@@ -1727,7 +1727,7 @@ async function processNativeEBMLConcatStream(
         }
     }
 
-    onProgress({ percentage: 100, statusText: 'สำเร็จ! (Standard Engine)', speedMBs: 0 });
+    onProgress({ percentage: 100, statusText: 'Success! (Standard Engine)', speedMBs: 0 });
     return { success: true, totalBytesWritten };
   } catch (error) {
     console.error("Concat Stream Error:", error);
@@ -1790,7 +1790,7 @@ async function executeNativeEBMLTrimStream(
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
-     onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์เพื่อตัดวิดีโอ (Standard Engine)...', speedMBs: 0 });
+     onProgress({ percentage: 0, statusText: 'Analyzing file structure for trimming (Standard Engine)...', speedMBs: 0 });
      
      const meta = await parseWebMFile(file);
      let totalBytesWritten = 0;
@@ -1924,11 +1924,11 @@ async function executeNativeEBMLTrimStream(
          }
 
          const prog = (cIdx / meta.clusters.length) * 100;
-         onProgress({ percentage: prog, statusText: 'กำลังตัดและสตรีมวิดีโอ (Standard Engine)...', speedMBs: 0 });
+         onProgress({ percentage: prog, statusText: 'Trimming and streaming video (Standard Engine)...', speedMBs: 0 });
      }
 
      if (writable && cuePoints.length > 0) {
-         onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
+         onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
          const cuesOffset = totalBytesWritten - segmentDataOffset;
          const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
          await writable.write(cuesBuffer);
@@ -1946,7 +1946,7 @@ async function executeNativeEBMLTrimStream(
          }
      }
 
-     onProgress({ percentage: 100, statusText: 'ตัดไฟล์สำเร็จ! (Standard Engine)', speedMBs: 0 });
+     onProgress({ percentage: 100, statusText: 'Trimming successful! (Standard Engine)', speedMBs: 0 });
      return { success: true, totalBytesWritten };
   } catch (err) {
      console.error("Trim Stream Error:", err);
@@ -2005,7 +2005,7 @@ async function executeNativeEBMLRemuxStream(
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
-     onProgress({ percentage: 0, statusText: 'กำลังวิเคราะห์โครงสร้างไฟล์เพื่อซ่อมแซม (Standard Remux Engine)...', speedMBs: 0 });
+     onProgress({ percentage: 0, statusText: 'Analyzing file structure for remuxing (Standard Remux Engine)...', speedMBs: 0 });
      
      const meta = await parseWebMFile(file);
      let totalBytesWritten = 0;
@@ -2119,11 +2119,11 @@ async function executeNativeEBMLRemuxStream(
          }
 
          const prog = (cIdx / meta.clusters.length) * 100;
-         onProgress({ percentage: prog, statusText: 'กำลังรีมิกซ์โครงสร้างไฟล์ (Standard Remux)...', speedMBs: 0 });
+         onProgress({ percentage: prog, statusText: 'Remuxing file structure (Standard Remux)...', speedMBs: 0 });
      }
 
      if (writable && cuePoints.length > 0) {
-         onProgress({ percentage: 99, statusText: 'กำลังสร้างสารบัญ (Cues Index)...', speedMBs: 0 });
+         onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
          const cuesOffset = totalBytesWritten - segmentDataOffset;
          const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
          await writable.write(cuesBuffer);
@@ -2141,7 +2141,7 @@ async function executeNativeEBMLRemuxStream(
          }
      }
 
-     onProgress({ percentage: 100, statusText: 'รีมิกซ์ไฟล์สำเร็จ! (Standard Remux)', speedMBs: 0 });
+     onProgress({ percentage: 100, statusText: 'Remuxing successful! (Standard Remux)', speedMBs: 0 });
      return { success: true, totalBytesWritten };
   } catch (err) {
      console.error("Remux Stream Error:", err);

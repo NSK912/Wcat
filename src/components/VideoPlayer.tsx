@@ -27,7 +27,6 @@ import {
   ZoomIn,
   ZoomOut,
   Sliders,
-  Layers,
   Image as ImageIcon,
   Video as VideoIcon,
   X,
@@ -37,12 +36,6 @@ import {
   ArrowUpRight,
   ArrowDownLeft,
   ArrowDownRight,
-  ArrowUp,
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  LayoutGrid,
-  ChevronDown,
 } from 'lucide-react';
 
 interface VideoPlayerProps {
@@ -67,6 +60,8 @@ interface VideoPlayerProps {
   selectedFile?: File;
   tracks?: TimelineTrackData[];
   onUpdateClipTransform?: (trackId: string, clipId: string, transform: ClipTransform) => void;
+  selectedClipId?: string | null;
+  onSelectClipId?: (clipId: string | null) => void;
 }
 
 interface AspectOption {
@@ -282,6 +277,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   videoName,
   tracks = [],
   onUpdateClipTransform,
+  selectedClipId: propSelectedClipId,
+  onSelectClipId,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoWrapperRef = useRef<HTMLDivElement>(null);
@@ -291,7 +288,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Selected layer for direct manipulation (drag & transform)
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [localSelectedClipId, setLocalSelectedClipId] = useState<string | null>(null);
+  const selectedClipId = propSelectedClipId !== undefined ? propSelectedClipId : localSelectedClipId;
+  const setSelectedClipId = useCallback(
+    (id: string | null) => {
+      setLocalSelectedClipId(id);
+      onSelectClipId?.(id);
+    },
+    [onSelectClipId]
+  );
   const [isDraggingLayer, setIsDraggingLayer] = useState<boolean>(false);
   const [isResizingLayerCorner, setIsResizingLayerCorner] = useState<string | null>(null);
   const layerDragStateRef = useRef<{
@@ -524,7 +529,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }, [activeLayers, selectedClipId]);
 
   // =========================================================================
-  // 🖐️ DIRECT DRAG & DROP FOR PREVIEW LAYERS (ภาพและวีดีโอจับลากได้เลย)
+  // 🖐️ DIRECT DRAG & DROP FOR PREVIEW LAYERS (drag and drop supported)
   // =========================================================================
   const handlePointerDownLayer = (
     e: React.PointerEvent,
@@ -690,39 +695,39 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     let targetY = 50;
 
     switch (position) {
-      case 'tl': // Top-Left corner (มุมซ้ายบน)
+      case 'tl': // Top-Left corner 
         targetX = halfWPct + margin;
         targetY = halfHPct + margin;
         break;
-      case 'tr': // Top-Right corner (มุมขวาบน)
+      case 'tr': // Top-Right corner 
         targetX = 100 - (halfWPct + margin);
         targetY = halfHPct + margin;
         break;
-      case 'bl': // Bottom-Left corner (มุมซ้ายล่าง)
+      case 'bl': // Bottom-Left corner 
         targetX = halfWPct + margin;
         targetY = 100 - (halfHPct + margin);
         break;
-      case 'br': // Bottom-Right corner (มุมขวาล่าง)
+      case 'br': // Bottom-Right corner 
         targetX = 100 - (halfWPct + margin);
         targetY = 100 - (halfHPct + margin);
         break;
-      case 'tc': // Top-Center (กึ่งกลางบน)
+      case 'tc': // Top-Center 
         targetX = 50;
         targetY = halfHPct + margin;
         break;
-      case 'bc': // Bottom-Center (กึ่งกลางล่าง)
+      case 'bc': // Bottom-Center 
         targetX = 50;
         targetY = 100 - (halfHPct + margin);
         break;
-      case 'lc': // Left-Center (กึ่งกลางซ้าย)
+      case 'lc': // Left-Center 
         targetX = halfWPct + margin;
         targetY = 50;
         break;
-      case 'rc': // Right-Center (กึ่งกลางขวา)
+      case 'rc': // Right-Center 
         targetX = 100 - (halfWPct + margin);
         targetY = 50;
         break;
-      case 'center': // Center (ตรงกลาง)
+      case 'center': // Center 
       default:
         targetX = 50;
         targetY = 50;
@@ -1364,382 +1369,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* Floating Selected Layer Quick Controls Bar */}
-      {isEncodeMode && activeSelectedLayer && onUpdateClipTransform && (
-        <div className="absolute top-4 right-4 z-40 bg-slate-900/95 border border-violet-500/50 rounded-xl p-2 shadow-2xl backdrop-blur-xl flex items-center space-x-2 animate-in fade-in duration-150 text-xs text-slate-200">
-          <div className="flex items-center space-x-1.5 px-2 py-1 bg-violet-600/20 text-violet-300 rounded-lg border border-violet-500/30 font-medium">
-            <Layers className="w-3.5 h-3.5 text-violet-400" />
-            <span>Layer: {activeSelectedLayer.trackName}</span>
-          </div>
-
-          <div className="h-4 w-px bg-white/10" />
-
-          {/* Quick scale down */}
-          <button
-            onClick={() => {
-              const currentScale = activeSelectedLayer.transform.scale;
-              const nextScale = Math.max(0.1, Math.round((currentScale - 0.1) * 10) / 10);
-              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-                ...activeSelectedLayer.transform,
-                scale: nextScale,
-              });
-            }}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
-            title="Scale Down (-10%)"
-          >
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-
-          <span className="font-mono text-[11px] text-slate-300 w-10 text-center">
-            {Math.round(activeSelectedLayer.transform.scale * 100)}%
-          </span>
-
-          {/* Quick scale up */}
-          <button
-            onClick={() => {
-              const currentScale = activeSelectedLayer.transform.scale;
-              const nextScale = Math.min(3.0, Math.round((currentScale + 0.1) * 10) / 10);
-              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-                ...activeSelectedLayer.transform,
-                scale: nextScale,
-              });
-            }}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
-            title="Scale Up (+10%)"
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
-
-          <div className="h-4 w-px bg-white/10" />
-
-          {/* Quick Corner Snap Direct Buttons */}
-          <div className="flex items-center space-x-0.5 bg-slate-800/80 p-0.5 rounded-lg border border-white/5">
-            <button
-              onClick={() => handleAlignLayer('tl')}
-              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
-              title="Align to Top-Left Corner (มุมซ้ายบน)"
-            >
-              <ArrowUpLeft className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => handleAlignLayer('tr')}
-              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
-              title="Align to Top-Right Corner (มุมขวาบน)"
-            >
-              <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => handleAlignLayer('center')}
-              className="p-1 rounded hover:bg-slate-700 text-violet-400 hover:text-violet-300 transition cursor-pointer"
-              title="Center Layer (ตรงกลาง)"
-            >
-              <Target className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => handleAlignLayer('bl')}
-              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
-              title="Align to Bottom-Left Corner (มุมซ้ายล่าง)"
-            >
-              <ArrowDownLeft className="w-3.5 h-3.5" />
-            </button>
-            <button
-              onClick={() => handleAlignLayer('br')}
-              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
-              title="Align to Bottom-Right Corner (มุมขวาล่าง)"
-            >
-              <ArrowDownRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {/* Alignment & PiP Corner Menu Trigger */}
-          <div className="relative" ref={alignMenuRef}>
-            <button
-              onClick={() => setIsAlignMenuOpen((prev) => !prev)}
-              className={`p-1.5 rounded-lg transition cursor-pointer border flex items-center space-x-1 ${
-                isAlignMenuOpen
-                  ? 'bg-violet-600 text-white border-violet-400 shadow-md shadow-violet-600/30'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border-white/5'
-              }`}
-              title="Align & Corner Layouts (จัดตำแหน่งตามมุม)"
-            >
-              <LayoutGrid className="w-3.5 h-3.5 text-violet-400" />
-              <span className="text-[10px] font-medium hidden sm:inline">Align</span>
-              <ChevronDown className="w-3 h-3 text-slate-400" />
-            </button>
-
-            {/* Alignment Popover Menu */}
-            {isAlignMenuOpen && (
-              <div className="absolute right-0 top-full mt-2 w-64 bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl backdrop-blur-xl p-2.5 z-50 text-slate-200 animate-in fade-in zoom-in-95 duration-150">
-                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1 flex items-center justify-between">
-                  <span>Corner & Position (มุม & ตำแหน่ง)</span>
-                </div>
-
-                {/* 3x3 Position Grid */}
-                <div className="grid grid-cols-3 gap-1 bg-slate-950/80 p-1.5 rounded-lg border border-white/5 mb-2.5">
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('tl');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Top-Left (มุมซ้ายบน)"
-                  >
-                    <ArrowUpLeft className="w-3.5 h-3.5 mb-0.5" />
-                    <span>ซ้ายบน</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('tc');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Top-Center (กึ่งกลางบน)"
-                  >
-                    <ArrowUp className="w-3.5 h-3.5 mb-0.5" />
-                    <span>บน</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('tr');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Top-Right (มุมขวาบน)"
-                  >
-                    <ArrowUpRight className="w-3.5 h-3.5 mb-0.5" />
-                    <span>ขวาบน</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('lc');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Left-Center (กึ่งกลางซ้าย)"
-                  >
-                    <ArrowLeft className="w-3.5 h-3.5 mb-0.5" />
-                    <span>ซ้าย</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('center');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded bg-violet-600/20 text-violet-300 hover:bg-violet-600 hover:text-white transition text-[10px] border border-violet-500/30 font-medium"
-                    title="Center (ตรงกลาง 50%, 50%)"
-                  >
-                    <Target className="w-3.5 h-3.5 mb-0.5 text-violet-400" />
-                    <span>กึ่งกลาง</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('rc');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Right-Center (กึ่งกลางขวา)"
-                  >
-                    <ArrowRight className="w-3.5 h-3.5 mb-0.5" />
-                    <span>ขวา</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('bl');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Bottom-Left (มุมซ้ายล่าง)"
-                  >
-                    <ArrowDownLeft className="w-3.5 h-3.5 mb-0.5" />
-                    <span>ซ้ายล่าง</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('bc');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Bottom-Center (กึ่งกลางล่าง)"
-                  >
-                    <ArrowDown className="w-3.5 h-3.5 mb-0.5" />
-                    <span>ล่าง</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('br');
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
-                    title="Bottom-Right (มุมขวาล่าง)"
-                  >
-                    <ArrowDownRight className="w-3.5 h-3.5 mb-0.5" />
-                    <span>ขวาล่าง</span>
-                  </button>
-                </div>
-
-                {/* PiP Corner Quick Presets (Scale 35% at 4 corners) */}
-                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1">
-                  Picture-in-Picture (PiP 35% ชิดมุม)
-                </div>
-                <div className="grid grid-cols-2 gap-1 mb-2">
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('tl', 0.35);
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
-                  >
-                    <ArrowUpLeft className="w-3 h-3 text-cyan-400" />
-                    <span>PiP มุมบนซ้าย</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('tr', 0.35);
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
-                  >
-                    <ArrowUpRight className="w-3 h-3 text-cyan-400" />
-                    <span>PiP มุมบนขวา</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('bl', 0.35);
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
-                  >
-                    <ArrowDownLeft className="w-3 h-3 text-cyan-400" />
-                    <span>PiP มุมล่างซ้าย</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      handleAlignLayer('br', 0.35);
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
-                  >
-                    <ArrowDownRight className="w-3 h-3 text-cyan-400" />
-                    <span>PiP มุมขวาล่าง</span>
-                  </button>
-                </div>
-
-                {/* Split Screen & Fit Presets */}
-                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1">
-                  Layout & Fit (แบ่งจอ & เต็มกรอบ)
-                </div>
-                <div className="grid grid-cols-3 gap-1">
-                  <button
-                    onClick={() => {
-                      if (onUpdateClipTransform) {
-                        onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-                          ...activeSelectedLayer.transform,
-                          x: 25,
-                          y: 50,
-                          scale: 0.5,
-                          rotation: 0,
-                        });
-                      }
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex items-center justify-center py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-[10px] border border-white/5"
-                  >
-                    <span>ครึ่งซ้าย</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      if (onUpdateClipTransform) {
-                        onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-                          ...activeSelectedLayer.transform,
-                          x: 75,
-                          y: 50,
-                          scale: 0.5,
-                          rotation: 0,
-                        });
-                      }
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex items-center justify-center py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-[10px] border border-white/5"
-                  >
-                    <span>ครึ่งขวา</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      if (onUpdateClipTransform) {
-                        onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-                          ...activeSelectedLayer.transform,
-                          x: 50,
-                          y: 50,
-                          scale: 1.0,
-                          rotation: 0,
-                        });
-                      }
-                      setIsAlignMenuOpen(false);
-                    }}
-                    className="flex items-center justify-center py-1 rounded bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600 hover:text-white text-[10px] border border-emerald-500/30 font-medium"
-                  >
-                    <span>เต็มกรอบ 100%</span>
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Full Fit / Reset */}
-          <button
-            onClick={() => {
-              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-                ...activeSelectedLayer.transform,
-                x: 50,
-                y: 50,
-                scale: 1.0,
-                rotation: 0,
-              });
-            }}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5 flex items-center space-x-1"
-            title="Reset to 100% Fit"
-          >
-            <Maximize2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="text-[10px]">Fit</span>
-          </button>
-
-          {/* Rotate 90 deg */}
-          <button
-            onClick={() => {
-              const currentRot = activeSelectedLayer.transform.rotation || 0;
-              const nextRot = (currentRot + 90) % 360;
-              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-                ...activeSelectedLayer.transform,
-                rotation: nextRot,
-              });
-            }}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
-            title="Rotate 90°"
-          >
-            <RotateCw className="w-3.5 h-3.5 text-cyan-400" />
-          </button>
-
-          {/* Close / Deselect */}
-          <button
-            onClick={() => setSelectedClipId(null)}
-            className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
-            title="Deselect"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
         </div>
       )}
 

@@ -21,6 +21,17 @@ input, textarea {
   scrollbar-color: rgba(71, 85, 105, 0.7) rgba(15, 23, 42, 0.6);
 }
 
+/* Remove default white spin button from number inputs */
+input[type=number]::-webkit-inner-spin-button, 
+input[type=number]::-webkit-outer-spin-button { 
+  -webkit-appearance: none; 
+  margin: 0; 
+}
+input[type=number] { 
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 ::-webkit-scrollbar {
   width: 5px;
   height: 5px;

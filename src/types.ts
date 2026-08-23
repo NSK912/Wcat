@@ -64,10 +64,12 @@ export interface EditSettings {
   outputFormat: 'mp4' | 'webm' | 'gif' | 'mp3';
   encodeMode?: boolean; // When true, uses WebCodecs API Hardware Acceleration Pipeline
   videoCodec?: 'avc' | 'hevc' | 'vp9' | 'av1';
-  audioCodec?: 'aac' | 'opus';
+  audioCodec?: 'aac' | 'opus' | 'flac' | 'pcm-s16le' | 'mp3';
+  audioBitrate?: number; // kbps: 64, 96, 128, 192, 256, 320
   videoQuality?: 'low' | 'medium' | 'high' | 'very-high';
   resolution?: VideoResolution;
   encodeSpeed?: EncodeSpeed;
+  fps?: number; // 30, 60, 120 or custom fps (1 - 240)
 }
 
 export type ActiveTab = 'trim' | 'filters' | 'adjust' | 'text' | 'audio' | 'export';
