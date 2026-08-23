@@ -473,13 +473,19 @@ function createWebCodecsTarget(writable: FileSystemWritableFileStream | null): S
     async write(chunk) {
       if (writable && typeof writable.write === 'function') {
         try {
-          await writable.write(chunk);
+          if (typeof chunk.position === 'number' && typeof (writable as any).seek === 'function') {
+            await (writable as any).seek(chunk.position);
+            await writable.write(chunk.data);
+          } else {
+            await writable.write(chunk);
+          }
         } catch {
           try {
-            if (typeof (writable as any).seek === 'function' && typeof chunk.position === 'number') {
-              await (writable as any).seek(chunk.position);
+            if (typeof chunk.position === 'number') {
+              await writable.write({ type: 'write', data: chunk.data, position: chunk.position } as any);
+            } else {
+              await writable.write(chunk.data);
             }
-            await writable.write(chunk.data);
           } catch (innerErr) {
             console.error('Writable write failure in WebCodecs target:', innerErr);
             throw innerErr;
@@ -906,10 +912,13 @@ export async function processWebCodecsEncodeStream(
 
   // Determine Output Format compatible with negotiated codecs
   const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
+  const reqFormat = (settings.outputFormat || settings.containerFormat || '').toLowerCase();
+  const targetExt = reqFormat || ext;
+
   let outputFormat;
-  if (ext === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') {
+  if (targetExt === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') {
     outputFormat = new WebMOutputFormat();
-  } else if (ext === 'mkv') {
+  } else if (targetExt === 'mkv' || settings.outputFormat === 'mkv') {
     outputFormat = new MkvOutputFormat();
   } else {
     // Standard MP4 with FastStart in-memory for 100% video preview thumbnail compatibility
@@ -1273,9 +1282,12 @@ export async function processWebCodecsMultiTrackTimeline(
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
 
   let outputFormat;
+  const requestedFormat = (settings.outputFormat || settings.containerFormat || '').toLowerCase();
   const firstFileExt = visibleTracks[0]?.clips[0]?.file?.name.split('.').pop()?.toLowerCase() || 'mp4';
-  if (firstFileExt === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') outputFormat = new WebMOutputFormat();
-  else if (firstFileExt === 'mkv') outputFormat = new MkvOutputFormat();
+  const effectiveFormat = requestedFormat || firstFileExt;
+
+  if (effectiveFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') outputFormat = new WebMOutputFormat();
+  else if (effectiveFormat === 'mkv') outputFormat = new MkvOutputFormat();
   else outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' });
 
   const target = createWebCodecsTarget(writable);
@@ -1502,6 +1514,9 @@ export async function processWebCodecsMultiTrackTimeline(
     }
   }
 
+  // Finalize multiplexer output to ensure container headers (moov/cues) are written
+  await output.finalize();
+
   let blobUrl: string | undefined;
   if (target instanceof BufferTarget && target.buffer) {
     const isMp4 = outputFormat instanceof Mp4OutputFormat;
@@ -1509,6 +1524,7 @@ export async function processWebCodecsMultiTrackTimeline(
     const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
     const blob = new Blob([target.buffer], { type: mime });
     blobUrl = URL.createObjectURL(blob);
+    totalWritten = target.buffer.byteLength;
   }
 
   return { success: true, totalBytesWritten: totalWritten, blobUrl };
