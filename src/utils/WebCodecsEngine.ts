@@ -868,33 +868,40 @@ export async function processWebCodecsConcatStream(
     let maxAudDur = 0;
 
     const vTracks = await input.getVideoTracks();
-    if (vTracks.length > 0) {
-      const vSink = new VideoSampleSink(vTracks[0]);
-      for await (const sample of vSink.samples()) {
-        const origDuration = sample.duration;
-        let pSample = sample;
-        if (sample.squarePixelWidth !== 1920 || sample.squarePixelHeight !== 1080) {
-            pSample = await sample.transform({ width: 1920, height: 1080, fit: 'cover' });
-        }
-        pSample.setTimestamp(pSample.timestamp + currentVideoTime);
-        await vSource.add(pSample);
-        maxVidDur = Math.max(maxVidDur, pSample.timestamp + origDuration - currentVideoTime);
-        if (pSample !== sample) pSample.close();
-        sample.close();
-      }
-    }
-
     const aTracks = await input.getAudioTracks();
-    if (aTracks.length > 0 && !settings.muteAudio) {
-      const aSink = new AudioSampleSink(aTracks[0]);
-      for await (const sample of aSink.samples()) {
-        const origDuration = sample.duration;
-        sample.setTimestamp(sample.timestamp + currentAudioTime);
-        await aSource.add(sample);
-        maxAudDur = Math.max(maxAudDur, sample.timestamp + origDuration - currentAudioTime);
-        sample.close();
+
+    const videoPromise = (async () => {
+      if (vTracks.length > 0) {
+        const vSink = new VideoSampleSink(vTracks[0]);
+        for await (const sample of vSink.samples()) {
+          const origDuration = sample.duration;
+          let pSample = sample;
+          if (sample.squarePixelWidth !== 1920 || sample.squarePixelHeight !== 1080) {
+              pSample = await sample.transform({ width: 1920, height: 1080, fit: 'cover' });
+          }
+          pSample.setTimestamp(pSample.timestamp + currentVideoTime);
+          await vSource.add(pSample);
+          maxVidDur = Math.max(maxVidDur, pSample.timestamp + origDuration - currentVideoTime);
+          if (pSample !== sample) pSample.close();
+          sample.close();
+        }
       }
-    }
+    })();
+
+    const audioPromise = (async () => {
+      if (aTracks.length > 0 && !settings.muteAudio) {
+        const aSink = new AudioSampleSink(aTracks[0]);
+        for await (const sample of aSink.samples()) {
+          const origDuration = sample.duration;
+          sample.setTimestamp(sample.timestamp + currentAudioTime);
+          await aSource.add(sample);
+          maxAudDur = Math.max(maxAudDur, sample.timestamp + origDuration - currentAudioTime);
+          sample.close();
+        }
+      }
+    })();
+
+    await Promise.all([videoPromise, audioPromise]);
 
     currentVideoTime += maxVidDur;
     currentAudioTime += maxAudDur;
