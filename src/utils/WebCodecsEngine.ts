@@ -10,6 +10,7 @@ import {
   Conversion,
   ALL_FORMATS,
   VideoSample,
+  AudioSample,
   Quality,
   canEncodeVideo,
   canEncodeAudio,
@@ -23,7 +24,22 @@ import {
   type AudioCodec,
   type QualityLevel,
 } from 'mediabunny';
-import { EditSettings, ClipTransform, TimelineTrackData } from '../types';
+import { EditSettings, ClipTransform, TimelineTrackData, TimelineClip } from '../types';
+
+/**
+ * Creates a silent AudioSample of zero PCM values to maintain container track audio/video synchronization
+ */
+function createSilentAudioSample(timestamp: number, duration: number, sampleRate = 48000, channels = 2): AudioSample {
+  const numberOfFrames = Math.max(1, Math.round(duration * sampleRate));
+  const pcmData = new Float32Array(numberOfFrames * channels);
+  return new AudioSample({
+    format: 'f32-planar',
+    sampleRate,
+    numberOfChannels: channels,
+    timestamp,
+    data: pcmData,
+  });
+}
 
 /**
  * Draws image source onto canvas with aspect ratio fit/cover and transforms/filters
@@ -912,7 +928,7 @@ export async function processWebCodecsEncodeStream(
 
   // Determine Output Format compatible with negotiated codecs
   const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
-  const reqFormat = (settings.outputFormat || settings.containerFormat || '').toLowerCase();
+  const reqFormat = (settings.outputFormat || (settings as any).containerFormat || '').toLowerCase();
   const targetExt = reqFormat || ext;
 
   let outputFormat;
@@ -1282,7 +1298,7 @@ export async function processWebCodecsMultiTrackTimeline(
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
 
   let outputFormat;
-  const requestedFormat = (settings.outputFormat || settings.containerFormat || '').toLowerCase();
+  const requestedFormat = (settings.outputFormat || (settings as any).containerFormat || '').toLowerCase();
   const firstFileExt = visibleTracks[0]?.clips[0]?.file?.name.split('.').pop()?.toLowerCase() || 'mp4';
   const effectiveFormat = requestedFormat || firstFileExt;
 
@@ -1321,9 +1337,19 @@ export async function processWebCodecsMultiTrackTimeline(
     canvasCtx = offscreenCanvas.getContext('2d');
   }
 
-  const clipDecoders = new Map<string, { vSink: VideoSampleSink; iterator: AsyncIterator<VideoSample>; currentSample: VideoSample | null }>();
+  const clipDecoders = new Map<string, {
+    vSink: VideoSampleSink;
+    iterator: AsyncIterator<VideoSample>;
+    currentSample: VideoSample | null;
+    lastDrawnSample: VideoSample | null;
+  }>();
+
+  const audioClipDecoders = new Map<string, {
+    aSink: AudioSampleSink;
+    iterator: AsyncIterator<AudioSample>;
+  }>();
   
-  onProgress({ percentage: 5, statusText: 'Pre-warming video decoders...', speedMBs: 0 });
+  onProgress({ percentage: 5, statusText: 'Pre-warming media decoders...', speedMBs: 0 });
 
   for (const track of visibleTracks) {
     for (const clip of track.clips) {
@@ -1339,11 +1365,12 @@ export async function processWebCodecsMultiTrackTimeline(
             const dur = clip.endTime !== undefined && clip.endTime > (clip.startTime || 0)
               ? clip.endTime - (clip.startTime || 0)
               : clip.duration || clip.fileDuration || 10;
-            const sourceEnd = clip.sourceEndTime !== undefined ? clip.sourceEndTime + 0.5 : sourceStart + dur + 0.5;
+            const sourceEnd = (clip.sourceEndTime !== undefined ? clip.sourceEndTime : sourceStart + dur) + 5;
             clipDecoders.set(clip.id, {
               vSink,
               iterator: vSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
               currentSample: null,
+              lastDrawnSample: null,
             });
           }
         } catch (e) {
@@ -1358,10 +1385,12 @@ export async function processWebCodecsMultiTrackTimeline(
   const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
   const frameDur = 1 / fps;
   const frames = Math.ceil(exportDuration * fps);
+  let currentAudioTime = 0;
 
-  // Compose Video Frame-by-Frame
+  // Synchronous Lockstep Audio/Video Compositing Loop
   for (let f = 0; f < frames; f++) {
     const t = exportStart + f * frameDur;
+    const outT = f * frameDur;
 
     if (canvasCtx) {
       canvasCtx.save();
@@ -1396,11 +1425,12 @@ export async function processWebCodecsMultiTrackTimeline(
                   const dur = activeClip.endTime !== undefined && activeClip.endTime > (activeClip.startTime || 0)
                     ? activeClip.endTime - (activeClip.startTime || 0)
                     : activeClip.duration || activeClip.fileDuration || 10;
-                  const sourceEnd = activeClip.sourceEndTime !== undefined ? activeClip.sourceEndTime + 0.5 : sourceStart + dur + 0.5;
+                  const sourceEnd = (activeClip.sourceEndTime !== undefined ? activeClip.sourceEndTime : sourceStart + dur) + 5;
                   decoder = {
                     vSink,
                     iterator: vSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
                     currentSample: null,
+                    lastDrawnSample: null,
                   };
                   clipDecoders.set(activeClip.id, decoder);
                 }
@@ -1424,17 +1454,26 @@ export async function processWebCodecsMultiTrackTimeline(
                 const sampleEndTime = sampleToDraw.timestamp + sampleDuration;
 
                 if (sampleEndTime <= timeInClip + 0.001) {
-                  sampleToDraw.close();
+                  if (decoder.lastDrawnSample && decoder.lastDrawnSample !== sampleToDraw) {
+                    decoder.lastDrawnSample.close();
+                  }
+                  decoder.lastDrawnSample = sampleToDraw;
                   sampleToDraw = null;
                   continue;
                 }
                 break;
               }
               decoder.currentSample = sampleToDraw;
-              if (sampleToDraw) {
-                const img = sampleToDraw.toCanvasImageSource();
-                if (activeClip.transform) drawLayerToCanvas(canvasCtx, img, sampleToDraw.squarePixelWidth, sampleToDraw.squarePixelHeight, activeClip.transform, canvasWidth, canvasHeight);
-                else drawFitCover(canvasCtx, img, sampleToDraw.squarePixelWidth, sampleToDraw.squarePixelHeight, canvasWidth, canvasHeight, settings);
+              const sampleToRender = sampleToDraw || decoder.lastDrawnSample;
+              if (sampleToRender) {
+                const img = sampleToRender.toCanvasImageSource();
+                const sqW = sampleToRender.squarePixelWidth || canvasWidth;
+                const sqH = sampleToRender.squarePixelHeight || canvasHeight;
+                if (activeClip.transform) {
+                  drawLayerToCanvas(canvasCtx, img, sqW, sqH, activeClip.transform, canvasWidth, canvasHeight);
+                } else {
+                  drawFitCover(canvasCtx, img, sqW, sqH, canvasWidth, canvasHeight, settings);
+                }
               }
             }
           }
@@ -1444,9 +1483,84 @@ export async function processWebCodecsMultiTrackTimeline(
       canvasCtx.restore();
     }
 
-    const outSample = new VideoSample(offscreenCanvas, { timestamp: Math.max(0, t - exportStart), duration: frameDur });
+    // Write Video Frame
+    const outSample = new VideoSample(offscreenCanvas, { timestamp: outT, duration: frameDur });
     await vSource.add(outSample);
     outSample.close();
+
+    // Write Interleaved Audio Frame(s) Synchronously
+    if (aSource && !settings.muteAudio) {
+      const targetAudioEnd = outT + frameDur;
+      while (currentAudioTime < targetAudioEnd - 0.0005) {
+        const currentTimelinePos = exportStart + currentAudioTime;
+
+        // Find active audio clip across non-muted tracks
+        let activeAudioClip: TimelineClip | null = null;
+        for (const track of visibleTracks) {
+          if (track.muted) continue;
+          const clip = track.clips.find((c) => {
+            if (!c.file) return false;
+            const isImg = c.mediaType === 'image' || c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name);
+            if (isImg) return false;
+            const start = c.startTime || 0;
+            const dur = c.endTime !== undefined && c.endTime > start ? c.endTime - start : c.duration || c.fileDuration || 10;
+            return currentTimelinePos >= start && currentTimelinePos < start + dur;
+          });
+          if (clip) {
+            activeAudioClip = clip;
+            break;
+          }
+        }
+
+        if (activeAudioClip && activeAudioClip.file) {
+          let audioDecoder = audioClipDecoders.get(activeAudioClip.id);
+          if (!audioDecoder) {
+            try {
+              const input = new Input({ source: new BlobSource(activeAudioClip.file), formats: ALL_FORMATS });
+              const aTracks = await input.getAudioTracks();
+              if (aTracks.length > 0) {
+                const aSink = new AudioSampleSink(aTracks[0]);
+                const sourceStart = activeAudioClip.sourceStartTime || 0;
+                const dur = activeAudioClip.endTime !== undefined && activeAudioClip.endTime > (activeAudioClip.startTime || 0)
+                  ? activeAudioClip.endTime - (activeAudioClip.startTime || 0)
+                  : activeAudioClip.duration || activeAudioClip.fileDuration || 10;
+                const sourceEnd = (activeAudioClip.sourceEndTime !== undefined ? activeAudioClip.sourceEndTime : sourceStart + dur) + 5;
+                audioDecoder = {
+                  aSink,
+                  iterator: aSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
+                };
+                audioClipDecoders.set(activeAudioClip.id, audioDecoder);
+              }
+            } catch (e) {
+              console.warn('Failed on-demand audio decoder creation', activeAudioClip.id, e);
+            }
+          }
+
+          if (audioDecoder) {
+            const { value: aSample, done } = await audioDecoder.iterator.next();
+            if (!done && aSample) {
+              const stepDur = aSample.duration > 0 ? aSample.duration : 0.02;
+              aSample.setTimestamp(currentAudioTime);
+              await aSource.add(aSample);
+              currentAudioTime += stepDur;
+              aSample.close();
+              continue;
+            }
+          }
+        }
+
+        // No audio clip active at currentTimelinePos -> fill silence buffer to keep audio track synchronized
+        const gapDur = Math.min(0.04, targetAudioEnd - currentAudioTime);
+        if (gapDur > 0.0001) {
+          const silentSample = createSilentAudioSample(currentAudioTime, gapDur);
+          await aSource.add(silentSample);
+          currentAudioTime += silentSample.duration;
+          silentSample.close();
+        } else {
+          break;
+        }
+      }
+    }
 
     const now = performance.now();
     const elapsed = (now - lastProgressTime) / 1000;
@@ -1466,52 +1580,7 @@ export async function processWebCodecsMultiTrackTimeline(
 
   for (const decoder of clipDecoders.values()) {
     if (decoder.currentSample) { decoder.currentSample.close(); decoder.currentSample = null; }
-  }
-
-  if (aSource && !settings.muteAudio) {
-    onProgress({ percentage: 95, statusText: 'Processing Audio Tracks...', speedMBs: 0, log: `[WebCodecs] Flattening audio streams...` });
-    const allAudioClips = [];
-    for (const track of visibleTracks) {
-      if (track.muted) continue;
-      for (const clip of track.clips) {
-        if (!clip.file) continue;
-        const isImg = clip.mediaType === 'image' || clip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name);
-        if (!isImg) allAudioClips.push(clip);
-      }
-    }
-    allAudioClips.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
-
-    let currentAudioTime = 0;
-    for (const clip of allAudioClips) {
-      const clipStart = clip.startTime || 0;
-      const clipDur = clip.endTime !== undefined && clip.endTime > clipStart ? clip.endTime - clipStart : clip.duration || clip.fileDuration || 10;
-      const clipEnd = clipStart + clipDur;
-
-      if (clipEnd <= exportStart) continue;
-      if (clipStart >= exportEnd) break;
-
-      try {
-        const input = new Input({ source: new BlobSource(clip.file), formats: ALL_FORMATS });
-        const aTracks = await input.getAudioTracks();
-        if (aTracks.length === 0) continue;
-        const aSink = new AudioSampleSink(aTracks[0]);
-        const sourceStart = clip.sourceStartTime || 0;
-
-        const sourceEnd = sourceStart + clipDur; for await (const sample of aSink.samples(sourceStart, sourceEnd)) {
-          const timeInClip = sample.timestamp - sourceStart;
-          if (timeInClip < 0) { sample.close(); continue; }
-          if (timeInClip > clipDur) { sample.close(); break; }
-          const t = clipStart + timeInClip;
-          if (t < exportStart || t >= exportEnd) { sample.close(); continue; }
-          const outT = Math.max(0, t - exportStart);
-          if (outT < currentAudioTime) { sample.close(); continue; }
-          sample.setTimestamp(outT);
-          await aSource.add(sample);
-          currentAudioTime = outT + sample.duration;
-          sample.close();
-        }
-      } catch (e) { console.warn('Audio skipped', e); }
-    }
+    if (decoder.lastDrawnSample) { decoder.lastDrawnSample.close(); decoder.lastDrawnSample = null; }
   }
 
   // Finalize multiplexer output to ensure container headers (moov/cues) are written
@@ -2079,10 +2148,27 @@ export async function processWebCodecsConcatStream(
         }
       })();
 
-      await Promise.all([videoPromise, audioPromise]);
+      await videoPromise;
 
-      currentVideoTime += maxVidDur > 0 ? maxVidDur : (seg.duration || 0);
-      currentAudioTime += maxAudDur > 0 ? maxAudDur : (seg.duration || 0);
+      if (aTracks.length > 0 && !settings.muteAudio) {
+        await audioPromise;
+      } else if (!settings.muteAudio) {
+        // Generate silent audio for video segments without audio track to keep audio stream synced
+        const segDur = maxVidDur > 0 ? maxVidDur : (seg.duration || 5);
+        let silencePos = 0;
+        while (silencePos < segDur) {
+          const step = Math.min(0.1, segDur - silencePos);
+          const silentSample = createSilentAudioSample(currentAudioTime + silencePos, step);
+          await aSource.add(silentSample);
+          silencePos += step;
+          silentSample.close();
+        }
+        maxAudDur = segDur;
+      }
+
+      const segDur = Math.max(maxVidDur, maxAudDur, seg.duration || 0);
+      currentVideoTime += segDur;
+      currentAudioTime += segDur;
     }
   }
 

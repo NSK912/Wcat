@@ -62,7 +62,7 @@ export interface EditSettings {
   watermarkSize: number;
   volume: number; // 0 to 2
   muteAudio: boolean;
-  outputFormat: 'mp4' | 'webm' | 'gif' | 'mp3';
+  outputFormat: 'mp4' | 'webm' | 'gif' | 'mp3' | 'mkv';
   encodeMode?: boolean; // When true, uses WebCodecs API Hardware Acceleration Pipeline
   videoCodec?: 'avc' | 'hevc' | 'vp9' | 'av1';
   audioCodec?: 'aac' | 'opus' | 'flac' | 'pcm-s16le' | 'mp3';
