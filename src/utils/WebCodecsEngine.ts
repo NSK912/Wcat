@@ -23,7 +23,147 @@ import {
   type AudioCodec,
   type QualityLevel,
 } from 'mediabunny';
-import { EditSettings } from '../types';
+import { EditSettings, ClipTransform, TimelineTrackData } from '../types';
+
+/**
+ * Draws image source onto canvas with aspect ratio fit/cover and transforms/filters
+ */
+function drawFitCover(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  img: CanvasImageSource,
+  srcWidth: number,
+  srcHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  settings: EditSettings
+) {
+  ctx.save();
+  ctx.filter = buildCanvasFilterString(settings);
+
+  if (settings.flipH || settings.flipV) {
+    ctx.translate(settings.flipH ? canvasWidth : 0, settings.flipV ? canvasHeight : 0);
+    ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
+  }
+
+  const srcRatio = srcWidth / srcHeight;
+  const dstRatio = canvasWidth / canvasHeight;
+
+  let sx = 0;
+  let sy = 0;
+  let sw = srcWidth;
+  let sh = srcHeight;
+
+  if (settings.cropAspect === 'free' && settings.freeCropRect) {
+    const rect = settings.freeCropRect;
+    sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+    sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+    sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+    sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+  } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+    if (srcRatio > dstRatio) {
+      sw = srcHeight * dstRatio;
+      sx = (srcWidth - sw) / 2;
+    } else {
+      sh = srcWidth / dstRatio;
+      sy = (srcHeight - sh) / 2;
+    }
+  }
+
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
+  ctx.restore();
+}
+
+/**
+ * Draws a layer onto canvas respecting x/y percentage, rotation, scale, and opacity
+ */
+function drawLayerToCanvas(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  img: CanvasImageSource,
+  srcWidth: number,
+  srcHeight: number,
+  transform: ClipTransform | undefined,
+  canvasWidth: number,
+  canvasHeight: number,
+  settings?: EditSettings
+) {
+  const t = transform || { x: 50, y: 50, scale: 1, rotation: 0, opacity: 1 };
+  const posX = (t.x / 100) * canvasWidth;
+  const posY = (t.y / 100) * canvasHeight;
+  const scale = t.scale ?? 1;
+  const rotationDeg = t.rotation ?? 0;
+  const opacity = t.opacity ?? 1;
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+  if (settings) {
+    ctx.filter = buildCanvasFilterString(settings);
+  }
+
+  ctx.translate(posX, posY);
+  if (rotationDeg !== 0) {
+    ctx.rotate((rotationDeg * Math.PI) / 180);
+  }
+  ctx.scale(scale, scale);
+
+  const drawW = canvasWidth;
+  const drawH = (srcHeight / srcWidth) * canvasWidth;
+
+  ctx.drawImage(img, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
+  ctx.restore();
+}
+
+/**
+ * Renders watermark overlay text onto canvas
+ */
+function drawWatermark(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  canvasWidth: number,
+  canvasHeight: number,
+  settings: EditSettings
+) {
+  if (!settings.watermarkText || !settings.watermarkText.trim()) return;
+
+  ctx.save();
+  const fontSize = settings.watermarkSize || 24;
+  ctx.font = `bold ${fontSize}px sans-serif`;
+  ctx.fillStyle = settings.watermarkColor || '#ffffff';
+  ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur = 4;
+  ctx.shadowOffsetX = 1;
+  ctx.shadowOffsetY = 1;
+
+  const text = settings.watermarkText;
+  const textMetrics = ctx.measureText(text);
+  const padding = 20;
+  let x = padding;
+  let y = canvasHeight - padding;
+
+  switch (settings.watermarkPosition) {
+    case 'top-left':
+      x = padding;
+      y = padding + fontSize;
+      break;
+    case 'top-right':
+      x = canvasWidth - textMetrics.width - padding;
+      y = padding + fontSize;
+      break;
+    case 'bottom-left':
+      x = padding;
+      y = canvasHeight - padding;
+      break;
+    case 'bottom-right':
+      x = canvasWidth - textMetrics.width - padding;
+      y = canvasHeight - padding;
+      break;
+    case 'center':
+      x = (canvasWidth - textMetrics.width) / 2;
+      y = (canvasHeight + fontSize) / 2;
+      break;
+  }
+
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
 
 /**
  * Checks if the browser natively supports WebCodecs API (VideoEncoder, VideoDecoder)
@@ -1003,6 +1143,550 @@ export async function processWebCodecsEncodeStream(
 }
 
 /**
+ * Multi-Track Timeline Compositing & Transcoding Engine
+ * Composites multiple timeline tracks (Base Track 0 + Overlays Track 1, 2, ... N-1)
+ * concurrently across timeline time, respecting Z-index, transforms, and duration.
+ */
+export async function processWebCodecsMultiTrackTimeline(
+  tracks: TimelineTrackData[],
+  settings: EditSettings,
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  if (!isWebCodecsSupported()) {
+    throw new Error('WebCodecs API is not supported in this browser.');
+  }
+
+  const visibleTracks = tracks.filter((t) => !t.hidden && t.clips && t.clips.length > 0);
+  if (visibleTracks.length === 0) {
+    throw new Error('No visible tracks or clips to export.');
+  }
+
+  // Calculate global timeline duration
+  let maxTimelineEnd = 0;
+  visibleTracks.forEach((t) => {
+    t.clips.forEach((c) => {
+      const dur =
+        c.endTime !== undefined && c.startTime !== undefined && c.endTime > c.startTime
+          ? c.endTime - c.startTime
+          : c.duration || c.fileDuration || (c.mediaType === 'image' ? 5 : 10);
+      const clipEnd = (c.startTime || 0) + dur;
+      if (clipEnd > maxTimelineEnd) maxTimelineEnd = clipEnd;
+    });
+  });
+
+  const exportStart = settings.startTime > 0 ? settings.startTime : 0;
+  const exportEnd =
+    settings.endTime > 0 && settings.endTime < maxTimelineEnd ? settings.endTime : maxTimelineEnd;
+  const exportDuration = Math.max(0.1, exportEnd - exportStart);
+
+  onProgress({
+    percentage: 1,
+    statusText: `Initializing Multi-Track Timeline Compositor (${visibleTracks.length} tracks, ${exportDuration.toFixed(2)}s)...`,
+    speedMBs: 0,
+    log: `[WebCodecs Multi-Track] Starting Timeline Compositing Engine: ${visibleTracks.length} active tracks, Duration: ${exportDuration.toFixed(2)}s (${exportStart.toFixed(2)}s -> ${exportEnd.toFixed(2)}s)`,
+  });
+
+  // Preload Image Bitmaps across all tracks
+  const bitmapMap = new Map<string, ImageBitmap>();
+  for (const track of visibleTracks) {
+    for (const clip of track.clips) {
+      const isImg =
+        clip.mediaType === 'image' ||
+        (clip.file &&
+          (clip.file.type.startsWith('image/') ||
+            /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name)));
+      if (isImg && clip.file) {
+        try {
+          const bmp = await createImageBitmap(clip.file);
+          bitmapMap.set(clip.id, bmp);
+          onProgress({
+            percentage: 2,
+            statusText: `Preloaded layer bitmap: ${clip.name}...`,
+            speedMBs: 0,
+            log: `  [Preload Image Layer] ${clip.name} (${bmp.width}x${bmp.height})`,
+          });
+        } catch (e) {
+          console.warn('Failed to preload bitmap for clip', clip.name, e);
+        }
+      }
+    }
+  }
+
+  // Determine Master Dimensions from first video or image clip
+  let sourceWidth = 1920;
+  let sourceHeight = 1080;
+  let hasValidDims = false;
+
+  for (const track of visibleTracks) {
+    for (const clip of track.clips) {
+      if (!clip.file) continue;
+      const isImg =
+        clip.mediaType === 'image' ||
+        clip.file.type.startsWith('image/') ||
+        /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name);
+      if (isImg) {
+        const bmp = bitmapMap.get(clip.id);
+        if (bmp && bmp.width > 0 && bmp.height > 0) {
+          if (!hasValidDims) {
+            sourceWidth = bmp.width;
+            sourceHeight = bmp.height;
+            hasValidDims = true;
+          }
+        }
+      } else {
+        try {
+          const probeInput = new Input({
+            source: new BlobSource(clip.file),
+            formats: ALL_FORMATS,
+          });
+          const probeVTracks = await probeInput.getVideoTracks();
+          if (probeVTracks.length > 0) {
+            sourceWidth = probeVTracks[0].displayWidth || probeVTracks[0].codedWidth || 1920;
+            sourceHeight = probeVTracks[0].displayHeight || probeVTracks[0].codedHeight || 1080;
+            hasValidDims = true;
+            break;
+          }
+        } catch (e) {
+          console.warn('Failed to probe video track dimensions', e);
+        }
+      }
+    }
+    if (hasValidDims) break;
+  }
+
+  sourceWidth = Math.max(8, sourceWidth - (sourceWidth % 8));
+  sourceHeight = Math.max(8, sourceHeight - (sourceHeight % 8));
+
+  // Calculate target canvas dimensions
+  const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
+  const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
+
+  let canvasWidth = sourceWidth;
+  let canvasHeight = sourceHeight;
+
+  if (hasCustomAspect) {
+    if (settings.cropAspect === 'free' && settings.freeCropRect) {
+      const rect = settings.freeCropRect;
+      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
+      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
+    } else {
+      let aspectMultiplier = 16 / 9;
+      switch (settings.cropAspect) {
+        case '16:9': aspectMultiplier = 16 / 9; break;
+        case '4:3': aspectMultiplier = 4 / 3; break;
+        case '1:1': aspectMultiplier = 1 / 1; break;
+        case '4:5': aspectMultiplier = 4 / 5; break;
+        case '9:16': aspectMultiplier = 9 / 16; break;
+        case '21:9': aspectMultiplier = 21 / 9; break;
+      }
+      if (sourceWidth / sourceHeight > aspectMultiplier) {
+        canvasHeight = sourceHeight;
+        canvasWidth = Math.round(sourceHeight * aspectMultiplier);
+      } else {
+        canvasWidth = sourceWidth;
+        canvasHeight = Math.round(sourceWidth / aspectMultiplier);
+      }
+    }
+    canvasWidth = Math.max(8, canvasWidth - (canvasWidth % 8));
+    canvasHeight = Math.max(8, canvasHeight - (canvasHeight % 8));
+  }
+
+  if (hasResolutionPreset) {
+    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
+    canvasWidth = targetDims.width;
+    canvasHeight = targetDims.height;
+  }
+
+  // Codecs Negotiation
+  const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
+  const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
+  const targetQuality = resolveQuality(settings.videoQuality);
+  const negotiated = await negotiateVideoCodec(
+    preferredVideoCodec,
+    canvasWidth,
+    canvasHeight,
+    targetQuality,
+    speedConfig.hardwareAcceleration
+  );
+  const targetVideoCodec = negotiated.codec;
+  const targetHwAccel = negotiated.hwAccel;
+
+  const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
+  const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
+
+  let outputFormat;
+  if ((settings.outputFormat as string) === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') {
+    outputFormat = new WebMOutputFormat();
+  } else if ((settings.outputFormat as string) === 'mkv') {
+    outputFormat = new MkvOutputFormat();
+  } else {
+    outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' });
+  }
+
+  const target = createWebCodecsTarget(writable);
+  let totalWritten = 0;
+  target.on('write', ({ end }) => {
+    totalWritten = Math.max(totalWritten, end);
+  });
+
+  const output = new Output({ format: outputFormat, target });
+  const vSource = new VideoSampleSource({
+    codec: targetVideoCodec,
+    quality: targetQuality,
+    hardwareAcceleration: targetHwAccel,
+    latencyMode: speedConfig.latencyMode,
+  });
+  output.addVideoTrack(vSource);
+
+  let aSource: AudioSampleSource | null = null;
+  if (!settings.muteAudio) {
+    aSource = new AudioSampleSource({
+      codec: targetAudioCodec,
+      quality: resolveQuality('high'),
+    });
+    output.addAudioTrack(aSource);
+  }
+
+  await output.start();
+
+  // Create Canvas for compositing
+  let offscreenCanvas: OffscreenCanvas | HTMLCanvasElement;
+  let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    offscreenCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
+    canvasCtx = offscreenCanvas.getContext('2d');
+  } else {
+    offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = canvasWidth;
+    offscreenCanvas.height = canvasHeight;
+    canvasCtx = offscreenCanvas.getContext('2d');
+  }
+
+  // Base track is visibleTracks[0], Overlay tracks are visibleTracks[1..N-1]
+  const baseTrack = visibleTracks[0];
+  const overlayTracks = visibleTracks.slice(1);
+  const baseClips = [...(baseTrack.clips || [])].sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+
+  let currentTimelinePos = exportStart;
+  let lastProgressTime = performance.now();
+  let lastBytes = 0;
+
+  const fps = 30;
+  const frameDur = 1 / fps;
+
+  // Helper to render overlays at time t
+  const renderOverlaysAtTime = (t: number) => {
+    if (!canvasCtx) return;
+    for (let oIdx = 0; oIdx < overlayTracks.length; oIdx++) {
+      const track = overlayTracks[oIdx];
+      const activeClip = track.clips.find((c) => {
+        const start = c.startTime || 0;
+        const dur =
+          c.endTime !== undefined && c.endTime > start
+            ? c.endTime - start
+            : c.duration || c.fileDuration || (c.mediaType === 'image' ? 5 : 10);
+        return t >= start && t < start + dur;
+      });
+
+      if (activeClip && activeClip.file) {
+        const isImg =
+          activeClip.mediaType === 'image' ||
+          activeClip.file.type.startsWith('image/') ||
+          /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
+        if (isImg) {
+          const bmp = bitmapMap.get(activeClip.id);
+          if (bmp) {
+            drawLayerToCanvas(
+              canvasCtx,
+              bmp,
+              bmp.width,
+              bmp.height,
+              activeClip.transform,
+              canvasWidth,
+              canvasHeight
+            );
+          }
+        }
+      }
+    }
+  };
+
+  // Helper to update progress
+  const emitProgress = (currentTimelineT: number) => {
+    const now = performance.now();
+    const elapsed = (now - lastProgressTime) / 1000;
+    if (elapsed > 0.5) {
+      const speedMBs = (totalWritten - lastBytes) / (1024 * 1024) / elapsed;
+      lastProgressTime = now;
+      lastBytes = totalWritten;
+      const pct = Math.min(99, Math.max(3, Math.round(((currentTimelineT - exportStart) / exportDuration) * 100)));
+      onProgress({
+        percentage: pct,
+        statusText: `Encoding Multi-Track Timeline (${pct}%)...`,
+        speedMBs,
+        log: `[WebCodecs Multi-Track] Progress: ${pct}% | Time: ${(currentTimelineT - exportStart).toFixed(1)}s / ${exportDuration.toFixed(1)}s | Speed: ${speedMBs.toFixed(1)} MB/s`,
+      });
+    }
+  };
+
+  // Helper to fill gap with background + overlays
+  const fillGap = async (fromT: number, toT: number) => {
+    const gapDur = toT - fromT;
+    if (gapDur <= 0.001) return;
+    const gapFrames = Math.ceil(gapDur * fps);
+    for (let f = 0; f < gapFrames; f++) {
+      const t = fromT + f * frameDur;
+      if (t >= exportEnd) break;
+      if (t < exportStart) continue;
+
+      if (canvasCtx) {
+        canvasCtx.save();
+        canvasCtx.fillStyle = '#000000';
+        canvasCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+        renderOverlaysAtTime(t);
+        drawWatermark(canvasCtx, canvasWidth, canvasHeight, settings);
+        canvasCtx.restore();
+      }
+
+      const outSample = new VideoSample(offscreenCanvas, {
+        timestamp: Math.max(0, t - exportStart),
+        duration: frameDur,
+      });
+      await vSource.add(outSample);
+      outSample.close();
+      emitProgress(t);
+    }
+  };
+
+  for (const baseClip of baseClips) {
+    if (!baseClip.file) continue;
+
+    const clipStart = baseClip.startTime || 0;
+    const clipDur =
+      baseClip.endTime !== undefined && baseClip.endTime > clipStart
+        ? baseClip.endTime - clipStart
+        : baseClip.duration || baseClip.fileDuration || (baseClip.mediaType === 'image' ? 5 : 10);
+    const clipEnd = clipStart + clipDur;
+
+    if (clipEnd <= exportStart) continue;
+    if (clipStart >= exportEnd) break;
+
+    // Fill gap before this clip if any
+    if (clipStart > currentTimelinePos) {
+      await fillGap(currentTimelinePos, clipStart);
+      currentTimelinePos = clipStart;
+    }
+
+    const isImg =
+      baseClip.mediaType === 'image' ||
+      baseClip.file.type.startsWith('image/') ||
+      /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(baseClip.file.name);
+
+    if (isImg) {
+      const baseBmp = bitmapMap.get(baseClip.id);
+      const frames = Math.ceil(clipDur * fps);
+      for (let f = 0; f < frames; f++) {
+        const t = clipStart + f * frameDur;
+        if (t < exportStart) continue;
+        if (t >= exportEnd) break;
+
+        if (canvasCtx) {
+          canvasCtx.save();
+          canvasCtx.fillStyle = '#000000';
+          canvasCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+          if (baseBmp) {
+            if (baseClip.transform) {
+              drawLayerToCanvas(
+                canvasCtx,
+                baseBmp,
+                baseBmp.width,
+                baseBmp.height,
+                baseClip.transform,
+                canvasWidth,
+                canvasHeight
+              );
+            } else {
+              drawFitCover(
+                canvasCtx,
+                baseBmp,
+                baseBmp.width,
+                baseBmp.height,
+                canvasWidth,
+                canvasHeight,
+                settings
+              );
+            }
+          }
+
+          renderOverlaysAtTime(t);
+          drawWatermark(canvasCtx, canvasWidth, canvasHeight, settings);
+          canvasCtx.restore();
+        }
+
+        const outSample = new VideoSample(offscreenCanvas, {
+          timestamp: Math.max(0, t - exportStart),
+          duration: frameDur,
+        });
+        await vSource.add(outSample);
+        outSample.close();
+        emitProgress(t);
+      }
+      currentTimelinePos = clipEnd;
+    } else {
+      // Base clip is Video
+      const input = new Input({
+        source: new BlobSource(baseClip.file),
+        formats: ALL_FORMATS,
+      });
+
+      const vTracks = await input.getVideoTracks();
+      const aTracks = await input.getAudioTracks();
+
+      const sourceStart = baseClip.sourceStartTime || 0;
+
+      if (vTracks.length > 0) {
+        const vSink = new VideoSampleSink(vTracks[0]);
+        for await (const sample of vSink.samples()) {
+          const sampleTimeInClip = sample.timestamp - sourceStart;
+          if (sampleTimeInClip < 0) {
+            sample.close();
+            continue;
+          }
+          if (sampleTimeInClip > clipDur) {
+            sample.close();
+            break;
+          }
+
+          const t = clipStart + sampleTimeInClip;
+          if (t < exportStart) {
+            sample.close();
+            continue;
+          }
+          if (t >= exportEnd) {
+            sample.close();
+            break;
+          }
+
+          if (canvasCtx) {
+            canvasCtx.save();
+            canvasCtx.fillStyle = '#000000';
+            canvasCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+            const img = sample.toCanvasImageSource();
+            const srcW = sample.squarePixelWidth;
+            const srcH = sample.squarePixelHeight;
+
+            if (baseClip.transform) {
+              drawLayerToCanvas(
+                canvasCtx,
+                img,
+                srcW,
+                srcH,
+                baseClip.transform,
+                canvasWidth,
+                canvasHeight
+              );
+            } else {
+              drawFitCover(
+                canvasCtx,
+                img,
+                srcW,
+                srcH,
+                canvasWidth,
+                canvasHeight,
+                settings
+              );
+            }
+
+            renderOverlaysAtTime(t);
+            drawWatermark(canvasCtx, canvasWidth, canvasHeight, settings);
+            canvasCtx.restore();
+          }
+
+          const outSample = new VideoSample(offscreenCanvas, {
+            timestamp: Math.max(0, t - exportStart),
+            duration: sample.duration,
+          });
+          await vSource.add(outSample);
+          outSample.close();
+          sample.close();
+          emitProgress(t);
+        }
+      }
+
+      // Handle audio for base video
+      if (aSource && aTracks.length > 0 && !baseTrack.muted && !settings.muteAudio) {
+        const aSink = new AudioSampleSink(aTracks[0]);
+        for await (const aSample of aSink.samples()) {
+          const aTimeInClip = aSample.timestamp - sourceStart;
+          if (aTimeInClip < 0) {
+            aSample.close();
+            continue;
+          }
+          if (aTimeInClip > clipDur) {
+            aSample.close();
+            break;
+          }
+
+          const aT = clipStart + aTimeInClip;
+          if (aT < exportStart) {
+            aSample.close();
+            continue;
+          }
+          if (aT >= exportEnd) {
+            aSample.close();
+            break;
+          }
+
+          aSample.setTimestamp(Math.max(0, aT - exportStart));
+          await aSource.add(aSample);
+          aSample.close();
+        }
+      }
+
+      currentTimelinePos = clipEnd;
+    }
+  }
+
+  // If timeline has leftover gap after all base clips until exportEnd
+  if (currentTimelinePos < exportEnd) {
+    await fillGap(currentTimelinePos, exportEnd);
+  }
+
+  // Clean up preloaded bitmaps
+  for (const bmp of bitmapMap.values()) {
+    bmp.close();
+  }
+
+  await output.finalize();
+
+  let blobUrl: string | undefined;
+  if (target instanceof BufferTarget && target.buffer) {
+    const isMp4 = outputFormat instanceof Mp4OutputFormat;
+    const isMkv = outputFormat instanceof MkvOutputFormat;
+    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
+    const blob = new Blob([target.buffer], { type: mime });
+    blobUrl = URL.createObjectURL(blob);
+    totalWritten = target.buffer.byteLength;
+  }
+
+  onProgress({
+    percentage: 100,
+    statusText: 'Multi-Track Timeline Encoding Complete!',
+    speedMBs: 0,
+    log: `[WebCodecs Multi-Track] Multi-track timeline composited & encoded successfully! Total: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`,
+  });
+
+  return {
+    success: true,
+    totalBytesWritten: totalWritten,
+    blobUrl,
+  };
+}
+
+/**
  * Concat multiple files / clips / tracks using WebCodecs API transcoding
  */
 export async function processWebCodecsConcatStream(
@@ -1011,85 +1695,34 @@ export async function processWebCodecsConcatStream(
   writable: FileSystemWritableFileStream | null,
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
-  // 1. Flatten if inputItems are tracks or files, preserving layer transform and track properties
-  let segments: Array<{
-    file: File;
-    name: string;
-    startTime: number;
-    endTime?: number;
-    sourceStartTime?: number;
-    sourceEndTime?: number;
-    duration: number;
-    isImage: boolean;
-    isVideo: boolean;
-    isAudio: boolean;
-    transform?: ClipTransform;
-    trackIndex?: number;
-    trackVolume?: number;
-    trackMuted?: boolean;
-  }> = [];
-
   const isTracks = inputItems.length > 0 && inputItems[0].clips !== undefined;
   
   if (isTracks) {
-    const allClips: any[] = [];
-    inputItems.forEach((t: any, trackIdx: number) => {
-      if (!t.hidden && t.clips) {
-        t.clips.forEach((c: any) => {
-          allClips.push({
-            ...c,
-            trackIndex: trackIdx,
-            trackVolume: t.volume ?? 1,
-            trackMuted: !!t.muted,
-          });
-        });
-      }
-    });
-    // Sort by timeline start time
-    allClips.sort((a, b) => a.startTime - b.startTime);
-    allClips.forEach((c: any) => {
-      if (c.file) {
-        const isImg = c.mediaType === 'image' || c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name);
-        const isAud = c.mediaType === 'audio' || c.file.type.startsWith('audio/') || /\.(mp3|wav|aac|m4a|flac|ogg|opus)$/i.test(c.file.name);
-        const clipDur = (c.endTime !== undefined && c.startTime !== undefined && c.endTime > c.startTime)
-          ? (c.endTime - c.startTime)
-          : (c.duration || c.fileDuration || (isImg ? 5 : 10));
-
-        segments.push({
-          file: c.file,
-          name: c.name || c.file.name,
-          startTime: c.startTime || 0,
-          endTime: c.endTime,
-          sourceStartTime: c.sourceStartTime || 0,
-          sourceEndTime: c.sourceEndTime,
-          duration: clipDur,
-          isImage: isImg,
-          isAudio: isAud,
-          isVideo: !isImg && !isAud,
-          transform: c.transform,
-          trackIndex: c.trackIndex,
-          trackVolume: c.trackVolume,
-          trackMuted: c.trackMuted,
-        });
-      }
-    });
-  } else {
-    const files = inputItems as File[];
-    segments = files.map(f => {
-      const isImg = f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name);
-      const isAud = f.type.startsWith('audio/') || /\.(mp3|wav|aac|m4a|flac|ogg|opus)$/i.test(f.name);
-      return {
-        file: f,
-        name: f.name,
-        startTime: 0,
-        sourceStartTime: settings.startTime || 0,
-        duration: (settings.endTime ? settings.endTime - (settings.startTime || 0) : (isImg ? 5 : 0)),
-        isImage: isImg,
-        isAudio: isAud,
-        isVideo: !isImg && !isAud,
-      };
-    });
+    return processWebCodecsMultiTrackTimeline(
+      inputItems as TimelineTrackData[],
+      settings,
+      writable,
+      onProgress
+    );
   }
+
+  // 1. Flatten if inputItems are raw files
+  const files = inputItems as File[];
+  const segments = files.map((f) => {
+    const isImg = f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name);
+    const isAud = f.type.startsWith('audio/') || /\.(mp3|wav|aac|m4a|flac|ogg|opus)$/i.test(f.name);
+    return {
+      file: f,
+      name: f.name,
+      startTime: 0,
+      sourceStartTime: settings.startTime || 0,
+      duration: settings.endTime ? settings.endTime - (settings.startTime || 0) : isImg ? 5 : 0,
+      isImage: isImg,
+      isAudio: isAud,
+      isVideo: !isImg && !isAud,
+      transform: undefined as ClipTransform | undefined,
+    };
+  });
 
   if (segments.length === 0) {
     throw new Error('No valid video or image files/clips provided for concatenation');
