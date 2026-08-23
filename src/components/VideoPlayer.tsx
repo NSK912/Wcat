@@ -966,7 +966,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
           <div className="text-slate-500 text-xs font-medium font-mono">
             <span className="font-bold mr-2">NSK App</span>
-            ver 3.5.0.4
+            ver 3.5.0.5
           </div>
         </div>
       ) : loadError ? (

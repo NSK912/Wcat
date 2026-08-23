@@ -198,7 +198,9 @@ function drawLayerToCanvas(
   if (t.blur && t.blur > 0) {
     const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
     // Scale blur relative to a standard 640px preview width so it encodes visually similar to preview
-    const scaledBlur = Math.max(1, Math.round(t.blur * (canvasWidth / 640)));
+    // CSS blur(R) has standard deviation R. Poisson disk blur visually matches at roughly 2x - 2.5x the radius.
+    const cssSigmaToPoissonRadius = 2.4; 
+    const scaledBlur = Math.max(1, Math.round(t.blur * (canvasWidth / 640) * cssSigmaToPoissonRadius));
     
     sourceToDraw = HardwareBlurEngine.instance.applyBlur(img, srcWidth, srcHeight, scaledBlur);
     // Remove the blur from CSS filter since we've already applied it to the source
@@ -1514,8 +1516,8 @@ export async function processWebCodecsMultiTrackTimeline(
           if (isImg) {
             const bmp = bitmapMap.get(activeClip.id);
             if (bmp) {
-              if (activeClip.transform) drawLayerToCanvas(canvasCtx, bmp, bmp.width, bmp.height, activeClip.transform, canvasWidth, canvasHeight);
-              else drawFitCover(canvasCtx, bmp, bmp.width, bmp.height, canvasWidth, canvasHeight, settings);
+              const transform = activeClip.transform || { x: 50, y: 50, scale: i === 0 ? 1.0 : 0.45, rotation: 0, opacity: 1 };
+              drawLayerToCanvas(canvasCtx, bmp, bmp.width, bmp.height, transform, canvasWidth, canvasHeight, settings);
             }
           } else {
             let decoder = clipDecoders.get(activeClip.id);
@@ -1579,11 +1581,8 @@ export async function processWebCodecsMultiTrackTimeline(
                 const img = sampleToRender.toCanvasImageSource();
                 const sqW = sampleToRender.squarePixelWidth || canvasWidth;
                 const sqH = sampleToRender.squarePixelHeight || canvasHeight;
-                if (activeClip.transform) {
-                  drawLayerToCanvas(canvasCtx, img, sqW, sqH, activeClip.transform, canvasWidth, canvasHeight);
-                } else {
-                  drawFitCover(canvasCtx, img, sqW, sqH, canvasWidth, canvasHeight, settings);
-                }
+                const transform = activeClip.transform || { x: 50, y: 50, scale: i === 0 ? 1.0 : 0.45, rotation: 0, opacity: 1 };
+                drawLayerToCanvas(canvasCtx, img, sqW, sqH, transform, canvasWidth, canvasHeight, settings);
               }
             }
           }
