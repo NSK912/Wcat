@@ -68,7 +68,7 @@ const DEFAULT_SETTINGS: EditSettings = {
   outputFormat: 'mp4',
   encodeMode: false,
   videoCodec: 'av1',
-  audioCodec: 'aac',
+  audioCodec: 'opus',
   audioBitrate: 192,
   videoQuality: 'high',
   resolution: '1080',
@@ -220,7 +220,7 @@ export default function App() {
       watermarkText: '',
       muteAudio: false,
       fps: 60,
-      audioCodec: 'aac',
+      audioCodec: 'opus',
       audioBitrate: 192,
     }));
   }, []);
@@ -1183,10 +1183,8 @@ export default function App() {
                         value={settings.videoCodec || 'av1'}
                         onChange={(val) => updateSettings({ videoCodec: val as any })}
                         options={[
-                          { value: 'avc', label: 'H.264 / AVC' },
-                          { value: 'hevc', label: 'H.265 / HEVC' },
-                          { value: 'vp9', label: 'VP9' },
                           { value: 'av1', label: 'AV1' },
+                          { value: 'vp9', label: 'VP9' },
                         ]}
                       />
                     </div>
@@ -1312,14 +1310,12 @@ export default function App() {
                       <span className="text-[11px] text-slate-400 font-mono">Audio Codec:</span>
                       <Dropdown
                         id="select-audio-codec"
-                        value={settings.audioCodec || 'aac'}
+                        value={settings.audioCodec || 'opus'}
                         onChange={(val) => updateSettings({ audioCodec: val as any })}
                         options={[
-                          { value: 'aac', label: 'AAC (Default)' },
                           { value: 'opus', label: 'Opus (WebM / Modern)' },
                           { value: 'flac', label: 'FLAC (Lossless Audio)' },
                           { value: 'pcm-s16', label: 'PCM 16-bit (Uncompressed)' },
-                          { value: 'mp3', label: 'MP3 (MPEG Audio)' },
                         ]}
                       />
                     </div>
