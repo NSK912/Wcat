@@ -238,7 +238,7 @@ const LayerVideoElement: React.FC<{
       muted={layer.muted}
       className="w-full h-auto max-w-none block pointer-events-none select-none rounded shadow-md object-cover"
       style={{
-        filter: filterStyle,
+        filter: [filterStyle, layer.transform.blur ? `blur(${layer.transform.blur}px)` : ''].filter(Boolean).join(' ') || undefined,
         opacity: layer.transform.opacity ?? 1,
       }}
       onTimeUpdate={() => {
@@ -966,7 +966,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           </div>
           <div className="text-slate-500 text-xs font-medium font-mono">
             <span className="font-bold mr-2">NSK App</span>
-            ver 3.5.0.2
+            ver 3.5.0.1
           </div>
         </div>
       ) : loadError ? (
@@ -1042,7 +1042,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         alt={layer.clip.name}
                         className="w-full h-auto max-w-none block pointer-events-none select-none rounded shadow-md object-contain"
                         style={{
-                          filter: getCssFilter(),
+                          filter: [getCssFilter(), layer.transform.blur ? `blur(${layer.transform.blur}px)` : ''].filter(Boolean).join(' ') || undefined,
                           opacity: layer.transform.opacity ?? 1,
                         }}
                       />

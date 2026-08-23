@@ -9,6 +9,7 @@ export interface ClipTransform {
   scale: number; // 1.0 is default size (0.1 to 3.0)
   rotation?: number; // 0, 90, 180, 270 deg
   opacity?: number; // 0 to 1
+  blur?: number; // in pixels (e.g. 0 to 50)
   widthPct?: number; // optional custom width percentage
   heightPct?: number;
 }

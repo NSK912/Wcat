@@ -1503,6 +1503,54 @@ export default function App() {
                             </div>
                           </div>
 
+                          {/* Opacity Control */}
+                          <div className="flex flex-col gap-1.5 pt-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-slate-400 font-mono">Opacity:</span>
+                              <span className="text-[10px] text-violet-300 font-mono font-semibold">
+                                {Math.round((activeSelectedLayer.transform.opacity ?? 1) * 100)}%
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="1"
+                              step="0.05"
+                              value={activeSelectedLayer.transform.opacity ?? 1}
+                              onChange={(e) => {
+                                handleUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                                  ...activeSelectedLayer.transform,
+                                  opacity: parseFloat(e.target.value),
+                                });
+                              }}
+                              className="flex-1 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-violet-500"
+                            />
+                          </div>
+
+                          {/* Blur Control */}
+                          <div className="flex flex-col gap-1.5 pt-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-slate-400 font-mono">Blur:</span>
+                              <span className="text-[10px] text-violet-300 font-mono font-semibold">
+                                {activeSelectedLayer.transform.blur ?? 0}px
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="50"
+                              step="1"
+                              value={activeSelectedLayer.transform.blur ?? 0}
+                              onChange={(e) => {
+                                handleUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                                  ...activeSelectedLayer.transform,
+                                  blur: parseInt(e.target.value, 10),
+                                });
+                              }}
+                              className="flex-1 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-violet-500"
+                            />
+                          </div>
+
                           {/* 3x3 Position & Corner Alignment Snap Grid */}
                           <div className="flex flex-col gap-1 pt-1">
                             <span className="text-[10px] text-slate-400 font-mono">Corner & Snap:</span>

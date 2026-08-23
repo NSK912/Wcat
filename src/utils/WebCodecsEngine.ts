@@ -95,8 +95,16 @@ function drawLayerToCanvas(
 
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+  
+  let filterStr = '';
   if (settings) {
-    ctx.filter = buildCanvasFilterString(settings);
+    filterStr = buildCanvasFilterString(settings) || '';
+  }
+  if (t.blur && t.blur > 0) {
+    filterStr = `${filterStr} blur(${t.blur}px)`.trim();
+  }
+  if (filterStr) {
+    ctx.filter = filterStr;
   }
 
   ctx.translate(posX, posY);
@@ -1939,6 +1947,10 @@ export async function processWebCodecsConcatStream(
 
             ctx.save();
             ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+            if (t.blur && t.blur > 0) {
+              const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
+              ctx.filter = `${currentFilter} blur(${t.blur}px)`.trim();
+            }
             ctx.translate(posX, posY);
             if (rotationDeg !== 0) {
               ctx.rotate((rotationDeg * Math.PI) / 180);
@@ -2110,6 +2122,10 @@ export async function processWebCodecsConcatStream(
 
                 ctx.save();
                 ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+                if (t.blur && t.blur > 0) {
+                  const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
+                  ctx.filter = `${currentFilter} blur(${t.blur}px)`.trim();
+                }
                 ctx.translate(posX, posY);
                 if (rotationDeg !== 0) {
                   ctx.rotate((rotationDeg * Math.PI) / 180);
