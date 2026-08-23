@@ -1323,7 +1323,16 @@ export async function processWebCodecsMultiTrackTimeline(
           const vTracks = await input.getVideoTracks();
           if (vTracks.length > 0) {
             const vSink = new VideoSampleSink(vTracks[0]);
-            const sourceStart = clip.sourceStartTime || 0; const dur = clip.endTime !== undefined && clip.endTime > (clip.startTime || 0) ? clip.endTime - (clip.startTime || 0) : clip.duration || clip.fileDuration || 10; clipDecoders.set(clip.id, { vSink, iterator: vSink.samples(sourceStart, sourceStart + dur)[Symbol.asyncIterator](), currentSample: null });
+            const sourceStart = clip.sourceStartTime || 0;
+            const dur = clip.endTime !== undefined && clip.endTime > (clip.startTime || 0)
+              ? clip.endTime - (clip.startTime || 0)
+              : clip.duration || clip.fileDuration || 10;
+            const sourceEnd = clip.sourceEndTime !== undefined ? clip.sourceEndTime + 0.5 : sourceStart + dur + 0.5;
+            clipDecoders.set(clip.id, {
+              vSink,
+              iterator: vSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
+              currentSample: null,
+            });
           }
         } catch (e) {
           console.warn('Failed to pre-warm decoder', clip.name, e);
@@ -1347,9 +1356,6 @@ export async function processWebCodecsMultiTrackTimeline(
       canvasCtx.fillStyle = '#000000';
       canvasCtx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-      // Render tracks bottom to top. visibleTracks is top-down in UI usually? 
-      // Reversing it so index 0 (top track) is rendered last. Wait, visibleTracks[0] was used as baseTrack (bottom).
-      // If visibleTracks[0] is base, we iterate 0 to N.
       for (let i = 0; i < visibleTracks.length; i++) {
         const track = visibleTracks[i];
         const activeClip = track.clips.find((c) => {
@@ -1367,7 +1373,30 @@ export async function processWebCodecsMultiTrackTimeline(
               else drawFitCover(canvasCtx, bmp, bmp.width, bmp.height, canvasWidth, canvasHeight, settings);
             }
           } else {
-            const decoder = clipDecoders.get(activeClip.id);
+            let decoder = clipDecoders.get(activeClip.id);
+            if (!decoder) {
+              try {
+                const input = new Input({ source: new BlobSource(activeClip.file), formats: ALL_FORMATS });
+                const vTracks = await input.getVideoTracks();
+                if (vTracks.length > 0) {
+                  const vSink = new VideoSampleSink(vTracks[0]);
+                  const sourceStart = activeClip.sourceStartTime || 0;
+                  const dur = activeClip.endTime !== undefined && activeClip.endTime > (activeClip.startTime || 0)
+                    ? activeClip.endTime - (activeClip.startTime || 0)
+                    : activeClip.duration || activeClip.fileDuration || 10;
+                  const sourceEnd = activeClip.sourceEndTime !== undefined ? activeClip.sourceEndTime + 0.5 : sourceStart + dur + 0.5;
+                  decoder = {
+                    vSink,
+                    iterator: vSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
+                    currentSample: null,
+                  };
+                  clipDecoders.set(activeClip.id, decoder);
+                }
+              } catch (e) {
+                console.warn('Failed on-demand decoder creation for clip', activeClip.id, e);
+              }
+            }
+
             if (decoder) {
               const timeInClip = t - (activeClip.startTime || 0) + (activeClip.sourceStartTime || 0);
               let sampleToDraw = decoder.currentSample;
@@ -1377,7 +1406,12 @@ export async function processWebCodecsMultiTrackTimeline(
                   if (done) break;
                   sampleToDraw = value;
                 }
-                if (sampleToDraw.timestamp < timeInClip - 0.05) {
+                if (!sampleToDraw) break;
+
+                const sampleDuration = sampleToDraw.duration > 0 ? sampleToDraw.duration : frameDur;
+                const sampleEndTime = sampleToDraw.timestamp + sampleDuration;
+
+                if (sampleEndTime <= timeInClip + 0.001) {
                   sampleToDraw.close();
                   sampleToDraw = null;
                   continue;
