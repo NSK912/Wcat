@@ -209,14 +209,12 @@ export function getTargetDimensions(
   let targetWidth = baseWidth;
   let targetHeight = baseHeight;
 
-  // Downscale if it exceeds bounding box, preserving aspect ratio
-  if (targetWidth > maxWidth || targetHeight > maxHeight) {
-    const widthRatio = maxWidth / targetWidth;
-    const heightRatio = maxHeight / targetHeight;
-    const scale = Math.min(widthRatio, heightRatio);
-    targetWidth = Math.round(targetWidth * scale);
-    targetHeight = Math.round(targetHeight * scale);
-  }
+  // Scale to fit the requested bounding box, preserving aspect ratio (supports both upscale & downscale)
+  const widthRatio = maxWidth / targetWidth;
+  const heightRatio = maxHeight / targetHeight;
+  const scale = Math.min(widthRatio, heightRatio);
+  targetWidth = Math.round(targetWidth * scale);
+  targetHeight = Math.round(targetHeight * scale);
 
   // Ensure dimensions are multiples of 8 for optimal hardware encoder compatibility
   targetWidth = Math.max(8, targetWidth - (targetWidth % 8));
