@@ -163,53 +163,64 @@ export function getTargetDimensions(
   resolution?: string
 ): { width: number; height: number } {
   if (!resolution || resolution === 'original') {
-    const w = Math.max(2, baseWidth - (baseWidth % 2));
-    const h = Math.max(2, baseHeight - (baseHeight % 2));
+    const w = Math.max(8, baseWidth - (baseWidth % 8));
+    const h = Math.max(8, baseHeight - (baseHeight % 8));
     return { width: w, height: h };
   }
 
-  let targetShortDim = 1080;
+  let maxLongDim = 1920;
+  let maxShortDim = 1080;
+
   switch (resolution) {
     case '480':
-      targetShortDim = 480;
+      maxLongDim = 854;
+      maxShortDim = 480;
       break;
     case '720':
-      targetShortDim = 720;
+      maxLongDim = 1280;
+      maxShortDim = 720;
       break;
     case '1080':
-      targetShortDim = 1080;
+      maxLongDim = 1920;
+      maxShortDim = 1080;
       break;
     case '2k':
-      targetShortDim = 1440;
+      maxLongDim = 2560;
+      maxShortDim = 1440;
       break;
     case '4k':
-      targetShortDim = 2160;
+      maxLongDim = 3840;
+      maxShortDim = 2160;
       break;
     case '8k':
-      targetShortDim = 4320;
+      maxLongDim = 7680;
+      maxShortDim = 4320;
       break;
     default:
-      targetShortDim = 1080;
+      maxLongDim = 1920;
+      maxShortDim = 1080;
       break;
   }
 
-  const aspectRatio = baseWidth / baseHeight;
-  let targetWidth: number;
-  let targetHeight: number;
+  const isLandscape = baseWidth >= baseHeight;
+  const maxWidth = isLandscape ? maxLongDim : maxShortDim;
+  const maxHeight = isLandscape ? maxShortDim : maxLongDim;
 
-  if (baseWidth >= baseHeight) {
-    // Landscape or square: short dimension is height
-    targetHeight = targetShortDim;
-    targetWidth = Math.round(targetShortDim * aspectRatio);
-  } else {
-    // Portrait: short dimension is width
-    targetWidth = targetShortDim;
-    targetHeight = Math.round(targetShortDim / aspectRatio);
+  let targetWidth = baseWidth;
+  let targetHeight = baseHeight;
+
+  // Downscale if it exceeds bounding box, preserving aspect ratio
+  if (targetWidth > maxWidth || targetHeight > maxHeight) {
+    const widthRatio = maxWidth / targetWidth;
+    const heightRatio = maxHeight / targetHeight;
+    const scale = Math.min(widthRatio, heightRatio);
+    targetWidth = Math.round(targetWidth * scale);
+    targetHeight = Math.round(targetHeight * scale);
   }
 
-  // Ensure dimensions are even numbers for encoder compatibility
-  targetWidth = Math.max(2, targetWidth - (targetWidth % 2));
-  targetHeight = Math.max(2, targetHeight - (targetHeight % 2));
+  // Ensure dimensions are multiples of 8 for optimal hardware encoder compatibility
+  targetWidth = Math.max(8, targetWidth - (targetWidth % 8));
+  targetHeight = Math.max(8, targetHeight - (targetHeight % 8));
 
   return { width: targetWidth, height: targetHeight };
 }
@@ -246,8 +257,8 @@ async function negotiateVideoCodec(
   quality: Quality,
   hwAcceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'prefer-hardware'
 ): Promise<VideoCodec> {
-  const safeWidth = Math.max(2, width - (width % 2));
-  const safeHeight = Math.max(2, height - (height % 2));
+  const safeWidth = Math.max(8, width - (width % 8));
+  const safeHeight = Math.max(8, height - (height % 8));
 
   try {
     const isSupported = await canEncodeVideo(preferredCodec, {
@@ -412,8 +423,8 @@ export async function processWebCodecsEncodeStream(
   }
 
   // Ensure dimensions are even numbers (vital for AVC/HEVC/VP9 hardware & software encoders)
-  const sourceWidth = Math.max(2, rawWidth - (rawWidth % 2));
-  const sourceHeight = Math.max(2, rawHeight - (rawHeight % 2));
+  const sourceWidth = Math.max(8, rawWidth - (rawWidth % 8));
+  const sourceHeight = Math.max(8, rawHeight - (rawHeight % 8));
 
   // Calculate Trim Timestamps
   let trimStart = settings.startTime > 0 ? settings.startTime : undefined;
@@ -463,8 +474,8 @@ export async function processWebCodecsEncodeStream(
     }
 
     // Ensure even dimensions
-    canvasWidth = Math.max(2, canvasWidth - (canvasWidth % 2));
-    canvasHeight = Math.max(2, canvasHeight - (canvasHeight % 2));
+    canvasWidth = Math.max(8, canvasWidth - (canvasWidth % 8));
+    canvasHeight = Math.max(8, canvasHeight - (canvasHeight % 8));
 
     onProgress({
       percentage: 7,
@@ -604,8 +615,8 @@ export async function processWebCodecsEncodeStream(
               const rect = settings.freeCropRect;
               sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
               sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-              sw = Math.max(2, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-              sh = Math.max(2, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+              sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+              sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
             } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
               if (srcRatio > dstRatio) {
                 // Source is wider than destination: crop sides
@@ -810,7 +821,56 @@ export async function processWebCodecsConcatStream(
   const firstFile = files[0];
   const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
   const targetQuality = resolveQuality(settings.videoQuality);
-  const targetVideoCodec = await negotiateVideoCodec(preferredVideoCodec, 1920, 1080, targetQuality);
+
+  const firstInput = new Input({ source: new BlobSource(firstFile), formats: ALL_FORMATS });
+  const firstVTracks = await firstInput.getVideoTracks();
+  let sourceWidth = 1920;
+  let sourceHeight = 1080;
+  if (firstVTracks.length > 0) {
+    sourceWidth = firstVTracks[0].displayWidth || firstVTracks[0].codedWidth || 1920;
+    sourceHeight = firstVTracks[0].displayHeight || firstVTracks[0].codedHeight || 1080;
+  }
+
+  const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
+  const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
+
+  let canvasWidth = sourceWidth;
+  let canvasHeight = sourceHeight;
+
+  if (hasCustomAspect) {
+    if (settings.cropAspect === 'free' && settings.freeCropRect) {
+      const rect = settings.freeCropRect;
+      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
+      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
+    } else {
+      let aspectMultiplier = 16 / 9;
+      switch (settings.cropAspect) {
+        case '16:9': aspectMultiplier = 16 / 9; break;
+        case '4:3': aspectMultiplier = 4 / 3; break;
+        case '1:1': aspectMultiplier = 1 / 1; break;
+        case '4:5': aspectMultiplier = 4 / 5; break;
+        case '9:16': aspectMultiplier = 9 / 16; break;
+        case '21:9': aspectMultiplier = 21 / 9; break;
+      }
+      if (sourceWidth / sourceHeight > aspectMultiplier) {
+        canvasHeight = sourceHeight;
+        canvasWidth = Math.round(sourceHeight * aspectMultiplier);
+      } else {
+        canvasWidth = sourceWidth;
+        canvasHeight = Math.round(sourceWidth / aspectMultiplier);
+      }
+    }
+    canvasWidth = Math.max(8, canvasWidth - (canvasWidth % 8));
+    canvasHeight = Math.max(8, canvasHeight - (canvasHeight % 8));
+  }
+
+  if (hasResolutionPreset) {
+    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
+    canvasWidth = targetDims.width;
+    canvasHeight = targetDims.height;
+  }
+
+  const targetVideoCodec = await negotiateVideoCodec(preferredVideoCodec, canvasWidth, canvasHeight, targetQuality);
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
 
@@ -833,8 +893,8 @@ export async function processWebCodecsConcatStream(
   const vSource = new VideoSampleSource({
     codec: targetVideoCodec,
     quality: targetQuality,
-    width: 1920,
-    height: 1080,
+    width: canvasWidth,
+    height: canvasHeight,
     hardwareAcceleration: 'no-preference'
   });
   const aSource = new AudioSampleSource({
@@ -870,15 +930,130 @@ export async function processWebCodecsConcatStream(
     const vTracks = await input.getVideoTracks();
     const aTracks = await input.getAudioTracks();
 
+
+    const needsCanvasProcessing =
+      settings.filter !== 'none' ||
+      settings.brightness !== 1.0 ||
+      settings.contrast !== 1.0 ||
+      settings.flipH ||
+      settings.flipV ||
+      Boolean(settings.watermarkText?.trim()) ||
+      hasCustomAspect ||
+      hasResolutionPreset;
+
+    const offscreenCanvas = needsCanvasProcessing ? new OffscreenCanvas(canvasWidth, canvasHeight) : null;
+    const canvasCtx = offscreenCanvas ? offscreenCanvas.getContext('2d') : null;
+
     const videoPromise = (async () => {
       if (vTracks.length > 0) {
         const vSink = new VideoSampleSink(vTracks[0]);
         for await (const sample of vSink.samples()) {
           const origDuration = sample.duration;
           let pSample = sample;
-          if (sample.squarePixelWidth !== 1920 || sample.squarePixelHeight !== 1080) {
-              pSample = await sample.transform({ width: 1920, height: 1080, fit: 'cover' });
+
+          if (needsCanvasProcessing && offscreenCanvas && canvasCtx) {
+            const canvas = offscreenCanvas;
+            const ctx = canvasCtx;
+            const img = pSample.toCanvasImageSource();
+            const w = canvasWidth;
+            const h = canvasHeight;
+            
+            ctx.save();
+            ctx.clearRect(0, 0, w, h);
+
+            // Apply CSS Filters (Brightness, Contrast, Grayscale, etc.)
+            ctx.filter = buildCanvasFilterString(settings);
+
+            // Apply Horizontal / Vertical Flips
+            if (settings.flipH || settings.flipV) {
+              ctx.translate(settings.flipH ? w : 0, settings.flipV ? h : 0);
+              ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
+            }
+
+            // Calculate source crop rectangle to preserve aspect ratio without distortion
+            const srcWidth = pSample.squarePixelWidth;
+            const srcHeight = pSample.squarePixelHeight;
+            const srcRatio = srcWidth / srcHeight;
+            const dstRatio = w / h;
+
+            let sx = 0;
+            let sy = 0;
+            let sw = srcWidth;
+            let sh = srcHeight;
+
+            if (settings.cropAspect === 'free' && settings.freeCropRect) {
+              const rect = settings.freeCropRect;
+              sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+              sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+              sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+              sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+            } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+              if (srcRatio > dstRatio) {
+                // Source is wider than destination: crop sides
+                sw = srcHeight * dstRatio;
+                sx = (srcWidth - sw) / 2;
+              } else {
+                // Source is taller than destination: crop top/bottom
+                sh = srcWidth / dstRatio;
+                sy = (srcHeight - sh) / 2;
+              }
+            }
+
+            ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
+            ctx.restore();
+
+            // Apply Watermark Overlay
+            if (settings.watermarkText && settings.watermarkText.trim()) {
+              ctx.save();
+              const fontSize = settings.watermarkSize || 24;
+              ctx.font = `bold ${fontSize}px sans-serif`;
+              ctx.fillStyle = settings.watermarkColor || '#ffffff';
+              ctx.shadowColor = 'rgba(0,0,0,0.8)';
+              ctx.shadowBlur = 4;
+              ctx.shadowOffsetX = 1;
+              ctx.shadowOffsetY = 1;
+
+              const text = settings.watermarkText;
+              const textMetrics = ctx.measureText(text);
+              const padding = 20;
+              let x = padding;
+              let y = h - padding;
+
+              switch (settings.watermarkPosition) {
+                case 'top-left':
+                  x = padding;
+                  y = padding + fontSize;
+                  break;
+                case 'top-right':
+                  x = w - textMetrics.width - padding;
+                  y = padding + fontSize;
+                  break;
+                case 'bottom-left':
+                  x = padding;
+                  y = h - padding;
+                  break;
+                case 'bottom-right':
+                  x = w - textMetrics.width - padding;
+                  y = h - padding;
+                  break;
+                case 'center':
+                  x = (w - textMetrics.width) / 2;
+                  y = (h + fontSize) / 2;
+                  break;
+              }
+
+              ctx.fillText(text, x, y);
+              ctx.restore();
+            }
+
+            const canvasSample = new VideoSample(canvas, { timestamp: pSample.timestamp, duration: origDuration });
+            pSample = canvasSample;
+
+          } else if (pSample.squarePixelWidth !== canvasWidth || pSample.squarePixelHeight !== canvasHeight) {
+              const scaledSample = await pSample.transform({ width: canvasWidth, height: canvasHeight, fit: 'cover' });
+              pSample = scaledSample;
           }
+
           pSample.setTimestamp(pSample.timestamp + currentVideoTime);
           await vSource.add(pSample);
           maxVidDur = Math.max(maxVidDur, pSample.timestamp + origDuration - currentVideoTime);
