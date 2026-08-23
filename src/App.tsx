@@ -850,7 +850,9 @@ export default function App() {
 
       const allVisibleClips = tracks ? tracks.filter(t => !t.hidden).flatMap(t => t.clips || []) : [];
       const hasTimelineClips = allVisibleClips.length > 0;
-      const hasMultipleClips = hasTimelineClips || selectedFiles.length > 1;
+      const hasMultipleClips = isEncodeMode
+        ? (hasTimelineClips || selectedFiles.length > 1)
+        : (allVisibleClips.length > 1 || selectedFiles.length > 1);
       const hasImageClips =
         allVisibleClips.some(c => c.mediaType === 'image' || (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)))) ||
         selectedFiles.some(f => f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name));
