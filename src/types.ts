@@ -29,6 +29,7 @@ export interface TimelineClip {
   previewUrl?: string;
   color?: TrackColor;
   transform?: ClipTransform;
+  isTrimmed?: boolean;
 }
 
 export interface TimelineTrackData {

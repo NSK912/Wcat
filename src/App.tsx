@@ -48,8 +48,8 @@ import {
 
 const DEFAULT_SETTINGS: EditSettings = {
   startTime: 0,
-  endTime: 10,
-  duration: 10,
+  endTime: 0,
+  duration: 0,
   filter: 'none',
   brightness: 1.0,
   contrast: 1.0,

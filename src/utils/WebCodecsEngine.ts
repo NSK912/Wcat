@@ -1285,6 +1285,45 @@ export async function processWebCodecsMultiTrackTimeline(
     throw new Error('No visible tracks or clips to export.');
   }
 
+  // Pre-probe clip durations to ensure untrimmed clips take full source duration
+  for (const track of visibleTracks) {
+    for (const clip of track.clips) {
+      if (clip.file) {
+        const isImg = clip.mediaType === 'image' || clip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name);
+        if (!isImg) {
+          let realDur = clip.fileDuration;
+          if (!realDur || !clip.isTrimmed || clip.endTime - clip.startTime <= 15 || clip.endTime === 10 || clip.endTime === 15) {
+            try {
+              const probeInput = new Input({ source: new BlobSource(clip.file), formats: ALL_FORMATS });
+              const vTracks = await probeInput.getVideoTracks();
+              if (vTracks.length > 0) {
+                const d = await vTracks[0].computeDuration();
+                if (d && Number.isFinite(d) && d > 0) realDur = d;
+              }
+              if (!realDur) {
+                const aTracks = await probeInput.getAudioTracks();
+                if (aTracks.length > 0) {
+                  const d = await aTracks[0].computeDuration();
+                  if (d && Number.isFinite(d) && d > 0) realDur = d;
+                }
+              }
+            } catch (e) {
+              console.warn('Demuxer probe warning in MultiTrackTimeline:', e);
+            }
+          }
+
+          if (realDur && realDur > 0) {
+            clip.fileDuration = realDur;
+            if (!clip.isTrimmed || clip.endTime <= clip.startTime || clip.endTime === 10 || clip.endTime === 15) {
+              clip.endTime = (clip.startTime || 0) + realDur;
+              clip.sourceEndTime = realDur;
+            }
+          }
+        }
+      }
+    }
+  }
+
   let maxTimelineEnd = 0;
   visibleTracks.forEach((t) => {
     t.clips.forEach((c) => {

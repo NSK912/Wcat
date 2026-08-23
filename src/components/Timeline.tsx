@@ -35,6 +35,7 @@ import {
   Magnet,
 } from 'lucide-react';
 import { formatTime } from '../utils/sampleVideos';
+import { Input, BlobSource, ALL_FORMATS } from 'mediabunny';
 import wcatSeekPng from '../../assets/Wcat seek.png';
 import wcatSeekSvg from '../../public/wcat-seek.svg';
 import {
@@ -314,13 +315,75 @@ export const Timeline: React.FC<TimelineProps> = ({
   const getFileKey = (file: File): string => `${file.name}_${file.size}_${file.lastModified}`;
 
   // Helper to extract thumbnails and exact duration for a specific video file
-  const extractThumbnailsForFile = (file: File) => {
+  const extractThumbnailsForFile = async (file: File) => {
     const key = getFileKey(file);
     if (inFlightExtractionsRef.current.has(key)) return;
-    if (fileThumbnails[key] && fileThumbnails[key].length > 0) return;
+    if (fileThumbnails[key] && fileThumbnails[key].length > 0 && fileDurations[key]) return;
 
     inFlightExtractionsRef.current.add(key);
 
+    const updateClipDurations = (fileDur: number) => {
+      if (!fileDur || fileDur <= 0) return;
+      setFileDurations((prev) => ({ ...prev, [key]: fileDur }));
+
+      setTracks((prev) => {
+        let changed = false;
+        const nextTracks = prev.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) => {
+            if (c.file && getFileKey(c.file) === key) {
+              const currentSpan = c.endTime - c.startTime;
+              const isUntrimmed =
+                !c.isTrimmed ||
+                currentSpan <= 15 ||
+                currentSpan === c.fileDuration ||
+                c.endTime === 10 ||
+                c.endTime === 15 ||
+                !c.fileDuration;
+              const newEnd = isUntrimmed ? c.startTime + fileDur : c.endTime;
+              const newSourceEnd = isUntrimmed ? fileDur : (c.sourceEndTime || fileDur);
+              if (c.fileDuration !== fileDur || c.endTime !== newEnd || c.sourceEndTime !== newSourceEnd) {
+                changed = true;
+                return {
+                  ...c,
+                  fileDuration: fileDur,
+                  endTime: newEnd,
+                  sourceEndTime: newSourceEnd,
+                };
+              }
+            }
+            return c;
+          }),
+        }));
+        return changed ? nextTracks : prev;
+      });
+    };
+
+    // 1. Fast Mediabunny Demuxer probe (100% accurate for MKV, MP4, WebM, TS, AVI)
+    let probedDur = 0;
+    try {
+      const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+      const vTracks = await input.getVideoTracks();
+      if (vTracks.length > 0) {
+        const d = await vTracks[0].computeDuration();
+        if (d && Number.isFinite(d) && d > 0) probedDur = d;
+      }
+      if (!probedDur) {
+        const aTracks = await input.getAudioTracks();
+        if (aTracks.length > 0) {
+          const d = await aTracks[0].computeDuration();
+          if (d && Number.isFinite(d) && d > 0) probedDur = d;
+        }
+      }
+    } catch (e) {
+      console.warn('Mediabunny duration extraction in Timeline:', e);
+    }
+
+    if (probedDur > 0) {
+      updateClipDurations(probedDur);
+    }
+
+    // 2. HTML5 <video> element thumbnail extraction & fallback duration check
     const video = document.createElement('video');
     const blobUrl = URL.createObjectURL(file);
     video.src = blobUrl;
@@ -344,27 +407,9 @@ export const Timeline: React.FC<TimelineProps> = ({
     };
 
     video.onloadedmetadata = () => {
-      const fileDur = video.duration || 10;
-      setFileDurations((prev) => ({ ...prev, [key]: fileDur }));
-
-      setTracks((prev) => {
-        let changed = false;
-        const nextTracks = prev.map((t) => ({
-          ...t,
-          clips: t.clips.map((c) => {
-            if (c.file && getFileKey(c.file) === key) {
-              const currentDuration = c.endTime - c.startTime;
-              const newEnd = currentDuration <= 10 || currentDuration === 0 ? c.startTime + fileDur : c.endTime;
-              if (c.fileDuration !== fileDur || c.endTime !== newEnd) {
-                changed = true;
-                return { ...c, fileDuration: fileDur, endTime: newEnd };
-              }
-            }
-            return c;
-          }),
-        }));
-        return changed ? nextTracks : prev;
-      });
+      const html5Dur = (video.duration && Number.isFinite(video.duration) && video.duration > 0) ? video.duration : 0;
+      const fileDur = html5Dur || probedDur || 10;
+      updateClipDurations(fileDur);
 
       const step = fileDur / count;
 
@@ -457,7 +502,7 @@ export const Timeline: React.FC<TimelineProps> = ({
         const newTracks: TimelineTrackData[] = selectedFiles.map((file, idx) => {
           const key = getFileKey(file);
           const detectedType = detectMediaType(file);
-          const knownDuration = fileDurations[key] || (duration > 0 ? duration : 10);
+          const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
           const trackColor = colorOrder[idx % colorOrder.length];
 
           const clip: TimelineClip = {
@@ -473,6 +518,7 @@ export const Timeline: React.FC<TimelineProps> = ({
             fileName: file.name,
             previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
             color: trackColor,
+            isTrimmed: false,
           };
 
           return {
@@ -515,7 +561,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       missingFiles.forEach((file) => {
         const key = getFileKey(file);
         const detectedType = detectMediaType(file);
-        const knownDuration = fileDurations[key] || (duration > 0 ? duration : 10);
+        const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
         const trackColor = colorOrder[updatedTracks.length % colorOrder.length];
 
         const newClip: TimelineClip = {
@@ -531,6 +577,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           fileName: file.name,
           previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
           color: trackColor,
+          isTrimmed: false,
         };
 
         // Find first empty track without clips
@@ -661,7 +708,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       prev.map((t) => {
         if (t.id === targetUploadTrackId) {
           const startVal = currentTime;
-          const dur = fileDurations[key] || (duration > 0 ? duration : 10);
+          const dur = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
           const newClip: TimelineClip = {
             id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
             name: file.name,
@@ -675,6 +722,7 @@ export const Timeline: React.FC<TimelineProps> = ({
             fileName: file.name,
             previewUrl: url,
             color: t.color,
+            isTrimmed: false,
           };
           return {
             ...t,
@@ -1281,6 +1329,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                         endTime: newEnd,
                         sourceStartTime: newSourceStart,
                         sourceEndTime: newSourceEnd,
+                        isTrimmed: type === 'left' || type === 'right' ? true : c.isTrimmed,
                       }
                     : c
                 ),
