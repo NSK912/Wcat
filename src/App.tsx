@@ -726,7 +726,7 @@ export default function App() {
     if (dur > 0 && (selectedFiles.length <= 1 || duration === 0)) {
       setDuration(dur);
       setSettings((prev) => {
-        const isDefaultOrPreset = prev.endTime === 0 || Math.abs(prev.endTime - prev.duration) < 0.1;
+        const isDefaultOrPreset = prev.endTime === 0 || prev.endTime === 10 || prev.endTime === 15 || Math.abs(prev.endTime - prev.duration) < 0.1;
         return {
           ...prev,
           duration: dur,

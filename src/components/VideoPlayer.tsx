@@ -1017,7 +1017,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
                 return (
                   <div
-                    key={`${layer.trackId}_${layer.url}`}
+                    key={layer.clip.id}
                     data-layer-id={layer.clip.id}
                     onPointerDown={(e) => handlePointerDownLayer(e, layer)}
                     className={`absolute transition-shadow ${
@@ -1127,7 +1127,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               {/* Audio tracks for all non-video audio clips */}
               {activeAudioClips?.map((clip, idx) => (
                 <AudioTrack
-                  key={clip.url ? `${clip.trackId || 'aud'}_${clip.url}` : clip.id}
+                  key={clip.id}
                   clip={clip}
                   currentTime={currentTime}
                   isPlaying={isPlaying}

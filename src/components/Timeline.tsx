@@ -332,10 +332,9 @@ export const Timeline: React.FC<TimelineProps> = ({
           ...t,
           clips: t.clips.map((c) => {
             if (c.file && getFileKey(c.file) === key) {
-              const currentSpan = c.endTime - c.startTime;
-              const isUninitialized = currentSpan <= 0 || c.endTime <= c.startTime;
-              const newEnd = isUninitialized ? c.startTime + fileDur : c.endTime;
-              const newSourceEnd = (c.sourceEndTime && c.sourceEndTime > 0) ? c.sourceEndTime : fileDur;
+              const needsInit = !c.isTrimmed && (c.endTime <= c.startTime || !c.fileDuration || c.sourceEndTime === 0);
+              const newEnd = needsInit ? c.startTime + fileDur : c.endTime;
+              const newSourceEnd = needsInit ? fileDur : (c.sourceEndTime || fileDur);
               if (c.fileDuration !== fileDur || c.endTime !== newEnd || c.sourceEndTime !== newSourceEnd) {
                 changed = true;
                 return {
