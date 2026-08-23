@@ -66,7 +66,7 @@ export interface EditSettings {
   outputFormat: 'mp4' | 'webm' | 'gif' | 'mp3' | 'mkv';
   encodeMode?: boolean; // When true, uses WebCodecs API Hardware Acceleration Pipeline
   videoCodec?: 'avc' | 'hevc' | 'vp9' | 'av1';
-  audioCodec?: 'aac' | 'opus' | 'flac' | 'pcm-s16le' | 'mp3';
+  audioCodec?: 'aac' | 'opus' | 'flac' | 'pcm-s16' | 'pcm-s16le' | 'mp3';
   audioBitrate?: number; // kbps: 64, 96, 128, 192, 256, 320
   videoQuality?: 'low' | 'medium' | 'high' | 'very-high';
   resolution?: VideoResolution;

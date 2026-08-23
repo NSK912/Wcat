@@ -494,7 +494,7 @@ function resolveSpeedConfig(speed?: string): {
 
 /**
  * Automatically negotiates a supported video codec for the given resolution/quality.
- * Falls back across AVC -> VP9 -> VP8 -> AV1 -> HEVC if a specific profile is not supported.
+ * Tries the preferred codec across all hardware acceleration modes before falling back to other candidates.
  */
 async function negotiateVideoCodec(
   preferredCodec: VideoCodec,
@@ -506,59 +506,76 @@ async function negotiateVideoCodec(
   const safeWidth = Math.max(8, width - (width % 8));
   const safeHeight = Math.max(8, height - (height % 8));
 
-  try {
-    const isSupported = await canEncodeVideo(preferredCodec, {
-      width: safeWidth,
-      height: safeHeight,
-      quality,
-      hardwareAcceleration: hwAcceleration,
-    });
-    if (isSupported) return { codec: preferredCodec, hwAccel: hwAcceleration };
-  } catch {
-    // Continue to fallback candidates
-  }
+  const accelModes: ('prefer-hardware' | 'no-preference' | 'prefer-software')[] = [
+    hwAcceleration,
+    'no-preference',
+    'prefer-software',
+  ];
+  const uniqueModes = Array.from(new Set(accelModes));
 
-  const fallbackCandidates: VideoCodec[] = ['avc', 'vp9', 'vp8', 'av1', 'hevc'];
-  for (const candidate of fallbackCandidates) {
-    if (candidate === preferredCodec) continue;
+  // 1. FIRST: Try preferred codec across all acceleration modes
+  for (const mode of uniqueModes) {
     try {
-      const supported = await canEncodeVideo(candidate, {
+      const isSupported = await canEncodeVideo(preferredCodec, {
         width: safeWidth,
         height: safeHeight,
         quality,
-        hardwareAcceleration: hwAcceleration,
+        hardwareAcceleration: mode,
       });
-      if (supported) return { codec: candidate, hwAccel: hwAcceleration };
+      if (isSupported) return { codec: preferredCodec, hwAccel: mode };
     } catch {}
   }
 
-  // Fallback to no-preference if specific hardware/software constraint fails
-  if (hwAcceleration !== 'no-preference') {
-    return negotiateVideoCodec(preferredCodec, width, height, quality, 'no-preference');
+  // 2. SECOND: If preferred codec is unsupported in all modes, try fallback candidates
+  const fallbackCandidates: VideoCodec[] = Array.from(
+    new Set([preferredCodec, 'hevc', 'av1', 'vp9', 'avc', 'vp8'])
+  );
+
+  for (const candidate of fallbackCandidates) {
+    if (candidate === preferredCodec) continue;
+    for (const mode of uniqueModes) {
+      try {
+        const supported = await canEncodeVideo(candidate, {
+          width: safeWidth,
+          height: safeHeight,
+          quality,
+          hardwareAcceleration: mode,
+        });
+        if (supported) return { codec: candidate, hwAccel: mode };
+      } catch {}
+    }
   }
 
-  return { codec: preferredCodec, hwAccel: hwAcceleration };
+  return { codec: preferredCodec, hwAccel: 'no-preference' };
 }
 
 /**
  * Automatically negotiates supported audio codec
  */
-async function negotiateAudioCodec(preferredCodec: AudioCodec): Promise<AudioCodec> {
+async function negotiateAudioCodec(preferredCodec: AudioCodec | string): Promise<AudioCodec> {
+  // Normalize PCM codec strings ('pcm-s16le' or 'pcm' -> 'pcm-s16')
+  let normalizedCodec: AudioCodec = preferredCodec as AudioCodec;
+  if ((preferredCodec as string) === 'pcm-s16le' || (preferredCodec as string) === 'pcm') {
+    normalizedCodec = 'pcm-s16' as AudioCodec;
+  }
+
+  // 1. Try normalized preferred codec
   try {
-    const isSupported = await canEncodeAudio(preferredCodec);
-    if (isSupported) return preferredCodec;
+    const isSupported = await canEncodeAudio(normalizedCodec);
+    if (isSupported) return normalizedCodec;
   } catch {}
 
-  const fallbacks: AudioCodec[] = ['aac', 'opus', 'flac'];
+  // 2. Fallbacks order if preferred codec is unsupported by browser AudioEncoder
+  const fallbacks: AudioCodec[] = ['aac', 'opus', 'flac', 'pcm-s16' as AudioCodec, 'mp3'];
   for (const candidate of fallbacks) {
-    if (candidate === preferredCodec) continue;
+    if (candidate === normalizedCodec) continue;
     try {
       const supported = await canEncodeAudio(candidate);
       if (supported) return candidate;
     } catch {}
   }
 
-  return preferredCodec;
+  return normalizedCodec;
 }
 
 /**
@@ -1016,6 +1033,21 @@ export async function processWebCodecsEncodeStream(
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
 
+  const vidLog = targetVideoCodec === preferredVideoCodec
+    ? `${targetVideoCodec.toUpperCase()} (${targetHwAccel})`
+    : `${targetVideoCodec.toUpperCase()} (Fallback from ${preferredVideoCodec.toUpperCase()})`;
+  const normPrefAud = (preferredAudioCodec as string) === 'pcm-s16le' ? 'pcm-s16' : preferredAudioCodec;
+  const audLog = targetAudioCodec === normPrefAud
+    ? `${targetAudioCodec.toUpperCase()}`
+    : `${targetAudioCodec.toUpperCase()} (Fallback from ${preferredAudioCodec.toUpperCase()})`;
+
+  onProgress({
+    percentage: 1,
+    statusText: `Encoding via WebCodecs (${targetVideoCodec.toUpperCase()} / ${targetAudioCodec.toUpperCase()})`,
+    speedMBs: 0,
+    log: `[WebCodecs Pipeline] Video Codec: ${vidLog} | Audio Codec: ${audLog}`,
+  });
+
   // Determine Output Format compatible with negotiated codecs
   const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
   const reqFormat = (settings.outputFormat || (settings as any).containerFormat || '').toLowerCase();
@@ -1431,6 +1463,21 @@ export async function processWebCodecsMultiTrackTimeline(
 
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
+
+  const vidLog = targetVideoCodec === preferredVideoCodec
+    ? `${targetVideoCodec.toUpperCase()} (${targetHwAccel})`
+    : `${targetVideoCodec.toUpperCase()} (Fallback from ${preferredVideoCodec.toUpperCase()})`;
+  const normPrefAud = (preferredAudioCodec as string) === 'pcm-s16le' ? 'pcm-s16' : preferredAudioCodec;
+  const audLog = targetAudioCodec === normPrefAud
+    ? `${targetAudioCodec.toUpperCase()}`
+    : `${targetAudioCodec.toUpperCase()} (Fallback from ${preferredAudioCodec.toUpperCase()})`;
+
+  onProgress({
+    percentage: 1,
+    statusText: `Multi-track Timeline Initialized (${targetVideoCodec.toUpperCase()} / ${targetAudioCodec.toUpperCase()})`,
+    speedMBs: 0,
+    log: `[WebCodecs Pipeline] Timeline Video Codec: ${vidLog} | Audio Codec: ${audLog}`,
+  });
 
   let outputFormat;
   const requestedFormat = (settings.outputFormat || (settings as any).containerFormat || '').toLowerCase();
@@ -1872,6 +1919,21 @@ export async function processWebCodecsConcatStream(
   const targetHwAccel = negotiated.hwAccel;
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
+
+  const vidLog = targetVideoCodec === preferredVideoCodec
+    ? `${targetVideoCodec.toUpperCase()} (${targetHwAccel})`
+    : `${targetVideoCodec.toUpperCase()} (Fallback from ${preferredVideoCodec.toUpperCase()})`;
+  const normPrefAud = (preferredAudioCodec as string) === 'pcm-s16le' ? 'pcm-s16' : preferredAudioCodec;
+  const audLog = targetAudioCodec === normPrefAud
+    ? `${targetAudioCodec.toUpperCase()}`
+    : `${targetAudioCodec.toUpperCase()} (Fallback from ${preferredAudioCodec.toUpperCase()})`;
+
+  onProgress({
+    percentage: 1,
+    statusText: `Concat Initialized (${targetVideoCodec.toUpperCase()} / ${targetAudioCodec.toUpperCase()})`,
+    speedMBs: 0,
+    log: `[WebCodecs Pipeline] Concat Video Codec: ${vidLog} | Audio Codec: ${audLog}`,
+  });
 
   const firstSeg = segments[0];
   const ext = firstSeg.file.name.split('.').pop()?.toLowerCase() || 'mp4';

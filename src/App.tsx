@@ -1318,7 +1318,7 @@ export default function App() {
                           { value: 'aac', label: 'AAC (Default)' },
                           { value: 'opus', label: 'Opus (WebM / Modern)' },
                           { value: 'flac', label: 'FLAC (Lossless Audio)' },
-                          { value: 'pcm-s16le', label: 'PCM (Uncompressed)' },
+                          { value: 'pcm-s16', label: 'PCM 16-bit (Uncompressed)' },
                           { value: 'mp3', label: 'MP3 (MPEG Audio)' },
                         ]}
                       />
