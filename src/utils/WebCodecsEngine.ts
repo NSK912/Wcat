@@ -1011,7 +1011,7 @@ export async function processWebCodecsConcatStream(
   writable: FileSystemWritableFileStream | null,
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
-  // 1. Flatten if inputItems are tracks or files
+  // 1. Flatten if inputItems are tracks or files, preserving layer transform and track properties
   let segments: Array<{
     file: File;
     name: string;
@@ -1023,15 +1023,26 @@ export async function processWebCodecsConcatStream(
     isImage: boolean;
     isVideo: boolean;
     isAudio: boolean;
+    transform?: ClipTransform;
+    trackIndex?: number;
+    trackVolume?: number;
+    trackMuted?: boolean;
   }> = [];
 
   const isTracks = inputItems.length > 0 && inputItems[0].clips !== undefined;
   
   if (isTracks) {
     const allClips: any[] = [];
-    inputItems.forEach((t: any) => {
+    inputItems.forEach((t: any, trackIdx: number) => {
       if (!t.hidden && t.clips) {
-        t.clips.forEach((c: any) => allClips.push(c));
+        t.clips.forEach((c: any) => {
+          allClips.push({
+            ...c,
+            trackIndex: trackIdx,
+            trackVolume: t.volume ?? 1,
+            trackMuted: !!t.muted,
+          });
+        });
       }
     });
     // Sort by timeline start time
@@ -1055,6 +1066,10 @@ export async function processWebCodecsConcatStream(
           isImage: isImg,
           isAudio: isAud,
           isVideo: !isImg && !isAud,
+          transform: c.transform,
+          trackIndex: c.trackIndex,
+          trackVolume: c.trackVolume,
+          trackMuted: c.trackMuted,
         });
       }
     });
@@ -1261,6 +1276,10 @@ export async function processWebCodecsConcatStream(
         ctx = segCanvas.getContext('2d');
       }
 
+      const hasLayerTransform = seg.transform !== undefined;
+      const t = seg.transform || { x: 50, y: 50, scale: 1, rotation: 0, opacity: 1 };
+      const opacity = t.opacity ?? 1;
+
       for (let f = 0; f < frames; f++) {
         if (ctx) {
           ctx.save();
@@ -1271,26 +1290,48 @@ export async function processWebCodecsConcatStream(
             ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
           }
 
-          const srcRatio = imgWidth / imgHeight;
-          const dstRatio = canvasWidth / canvasHeight;
-          let sx = 0; let sy = 0; let sw = imgWidth; let sh = imgHeight;
+          if (hasLayerTransform) {
+            // Apply layer positioning (x/y in percentage, rotation, scale, opacity)
+            const posX = (t.x / 100) * canvasWidth;
+            const posY = (t.y / 100) * canvasHeight;
+            const scale = t.scale || 1;
+            const rotationDeg = t.rotation || 0;
 
-          if (settings.cropAspect === 'free' && settings.freeCropRect) {
-            const rect = settings.freeCropRect;
-            sx = Math.max(0, Math.min(imgWidth - 2, Math.round(imgWidth * (rect.x || 0))));
-            sy = Math.max(0, Math.min(imgHeight - 2, Math.round(imgHeight * (rect.y || 0))));
-            sw = Math.max(8, Math.min(imgWidth - sx, Math.round(imgWidth * (rect.width || 1))));
-            sh = Math.max(8, Math.min(imgHeight - sy, Math.round(imgHeight * (rect.height || 1))));
-          } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
-            if (srcRatio > dstRatio) {
-              sw = imgHeight * dstRatio;
-              sx = (imgWidth - sw) / 2;
-            } else {
-              sh = imgWidth / dstRatio;
-              sy = (imgHeight - sh) / 2;
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+            ctx.translate(posX, posY);
+            if (rotationDeg !== 0) {
+              ctx.rotate((rotationDeg * Math.PI) / 180);
             }
+            ctx.scale(scale, scale);
+
+            // Layer media is sized relative to canvasWidth with native aspect ratio (matching VideoPlayer.tsx w-full h-auto)
+            const drawW = canvasWidth;
+            const drawH = (imgHeight / imgWidth) * canvasWidth;
+            ctx.drawImage(bmp, -drawW / 2, -drawH / 2, drawW, drawH);
+            ctx.restore();
+          } else {
+            const srcRatio = imgWidth / imgHeight;
+            const dstRatio = canvasWidth / canvasHeight;
+            let sx = 0; let sy = 0; let sw = imgWidth; let sh = imgHeight;
+
+            if (settings.cropAspect === 'free' && settings.freeCropRect) {
+              const rect = settings.freeCropRect;
+              sx = Math.max(0, Math.min(imgWidth - 2, Math.round(imgWidth * (rect.x || 0))));
+              sy = Math.max(0, Math.min(imgHeight - 2, Math.round(imgHeight * (rect.y || 0))));
+              sw = Math.max(8, Math.min(imgWidth - sx, Math.round(imgWidth * (rect.width || 1))));
+              sh = Math.max(8, Math.min(imgHeight - sy, Math.round(imgHeight * (rect.height || 1))));
+            } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+              if (srcRatio > dstRatio) {
+                sw = imgHeight * dstRatio;
+                sx = (imgWidth - sw) / 2;
+              } else {
+                sh = imgWidth / dstRatio;
+                sy = (imgHeight - sh) / 2;
+              }
+            }
+            ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
           }
-          ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
           ctx.restore();
 
           if (settings.watermarkText && settings.watermarkText.trim()) {
@@ -1345,7 +1386,12 @@ export async function processWebCodecsConcatStream(
       const vTracks = await input.getVideoTracks();
       const aTracks = await input.getAudioTracks();
 
+      const hasLayerTransform = seg.transform !== undefined;
+      const t = seg.transform || { x: 50, y: 50, scale: 1, rotation: 0, opacity: 1 };
+      const opacity = t.opacity ?? 1;
+
       const needsCanvasProcessing =
+        hasLayerTransform ||
         settings.filter !== 'none' ||
         settings.brightness !== 1.0 ||
         settings.contrast !== 1.0 ||
@@ -1415,28 +1461,50 @@ export async function processWebCodecsConcatStream(
               const srcRatio = srcWidth / srcHeight;
               const dstRatio = w / h;
 
-              let sx = 0;
-              let sy = 0;
-              let sw = srcWidth;
-              let sh = srcHeight;
+              if (hasLayerTransform) {
+                // Apply layer positioning (x/y in percentage, rotation, scale, opacity)
+                const posX = (t.x / 100) * w;
+                const posY = (t.y / 100) * h;
+                const scale = t.scale || 1;
+                const rotationDeg = t.rotation || 0;
 
-              if (settings.cropAspect === 'free' && settings.freeCropRect) {
-                const rect = settings.freeCropRect;
-                sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
-                sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-                sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-                sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
-              } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
-                if (srcRatio > dstRatio) {
-                  sw = srcHeight * dstRatio;
-                  sx = (srcWidth - sw) / 2;
-                } else {
-                  sh = srcWidth / dstRatio;
-                  sy = (srcHeight - sh) / 2;
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+                ctx.translate(posX, posY);
+                if (rotationDeg !== 0) {
+                  ctx.rotate((rotationDeg * Math.PI) / 180);
                 }
-              }
+                ctx.scale(scale, scale);
 
-              ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
+                // Layer media is sized relative to canvas width with native video aspect ratio
+                const drawW = w;
+                const drawH = (srcHeight / srcWidth) * w;
+                ctx.drawImage(img as any, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
+                ctx.restore();
+              } else {
+                let sx = 0;
+                let sy = 0;
+                let sw = srcWidth;
+                let sh = srcHeight;
+
+                if (settings.cropAspect === 'free' && settings.freeCropRect) {
+                  const rect = settings.freeCropRect;
+                  sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+                  sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+                  sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+                  sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+                } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+                  if (srcRatio > dstRatio) {
+                    sw = srcHeight * dstRatio;
+                    sx = (srcWidth - sw) / 2;
+                  } else {
+                    sh = srcWidth / dstRatio;
+                    sy = (srcHeight - sh) / 2;
+                  }
+                }
+
+                ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
+              }
               ctx.restore();
 
               // Apply Watermark Overlay
