@@ -25,6 +25,7 @@ import {
   type QualityLevel,
 } from 'mediabunny';
 import { EditSettings, ClipTransform, TimelineTrackData, TimelineClip } from '../types';
+import { HardwareBlurEngine } from './HardwareBlur';
 
 const MASTER_AUDIO_SAMPLE_RATE = 48000;
 const MASTER_AUDIO_CHANNELS = 2;
@@ -193,11 +194,15 @@ function drawLayerToCanvas(
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
   
+  let sourceToDraw = img;
   if (t.blur && t.blur > 0) {
     const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
     // Scale blur relative to a standard 640px preview width so it encodes visually similar to preview
     const scaledBlur = Math.max(1, Math.round(t.blur * (canvasWidth / 640)));
-    ctx.filter = `${currentFilter} blur(${scaledBlur}px)`.trim();
+    
+    sourceToDraw = HardwareBlurEngine.instance.applyBlur(img, srcWidth, srcHeight, scaledBlur);
+    // Remove the blur from CSS filter since we've already applied it to the source
+    ctx.filter = currentFilter;
   }
 
   ctx.translate(posX, posY);
@@ -209,7 +214,7 @@ function drawLayerToCanvas(
   const drawW = canvasWidth;
   const drawH = (srcHeight / srcWidth) * canvasWidth;
 
-  ctx.drawImage(img, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
+  ctx.drawImage(sourceToDraw, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
   ctx.restore();
 }
 
@@ -1272,6 +1277,7 @@ export async function processWebCodecsMultiTrackTimeline(
   writable: FileSystemWritableFileStream | null,
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  await HardwareBlurEngine.instance.init();
   if (!isWebCodecsSupported()) {
     throw new Error('WebCodecs API is not supported in this browser.');
   }
@@ -1724,6 +1730,7 @@ export async function processWebCodecsConcatStream(
   writable: FileSystemWritableFileStream | null,
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  await HardwareBlurEngine.instance.init();
   const isTracks = inputItems.length > 0 && inputItems[0].clips !== undefined;
   
   if (isTracks) {
@@ -1966,10 +1973,13 @@ export async function processWebCodecsConcatStream(
 
             ctx.save();
             ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+            let sourceToDraw: CanvasImageSource = bmp;
             if (t.blur && t.blur > 0) {
               const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
               const scaledBlur = Math.max(1, Math.round(t.blur * (canvasWidth / 640)));
-              ctx.filter = `${currentFilter} blur(${scaledBlur}px)`.trim();
+              
+              sourceToDraw = HardwareBlurEngine.instance.applyBlur(bmp, imgWidth, imgHeight, scaledBlur);
+              ctx.filter = currentFilter;
             }
             ctx.translate(posX, posY);
             if (rotationDeg !== 0) {
@@ -1980,7 +1990,7 @@ export async function processWebCodecsConcatStream(
             // Layer media is sized relative to canvasWidth with native aspect ratio (matching VideoPlayer.tsx w-full h-auto)
             const drawW = canvasWidth;
             const drawH = (imgHeight / imgWidth) * canvasWidth;
-            ctx.drawImage(bmp, -drawW / 2, -drawH / 2, drawW, drawH);
+            ctx.drawImage(sourceToDraw, -drawW / 2, -drawH / 2, drawW, drawH);
             ctx.restore();
           } else {
             const srcRatio = imgWidth / imgHeight;
@@ -2153,10 +2163,13 @@ export async function processWebCodecsConcatStream(
 
                 ctx.save();
                 ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+                let sourceToDraw: CanvasImageSource = img as any;
                 if (t.blur && t.blur > 0) {
                   const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
                   const scaledBlur = Math.max(1, Math.round(t.blur * (w / 640)));
-                  ctx.filter = `${currentFilter} blur(${scaledBlur}px)`.trim();
+                  
+                  sourceToDraw = HardwareBlurEngine.instance.applyBlur(img as any, srcWidth, srcHeight, scaledBlur);
+                  ctx.filter = currentFilter;
                 }
                 ctx.translate(posX, posY);
                 if (rotationDeg !== 0) {
@@ -2167,7 +2180,7 @@ export async function processWebCodecsConcatStream(
                 // Layer media is sized relative to canvas width with native video aspect ratio
                 const drawW = w;
                 const drawH = (srcHeight / srcWidth) * w;
-                ctx.drawImage(img as any, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
+                ctx.drawImage(sourceToDraw, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
                 ctx.restore();
               } else {
                 let sx = 0;
