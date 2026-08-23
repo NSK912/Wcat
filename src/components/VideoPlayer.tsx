@@ -162,6 +162,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onUpdateSettings,
   onToggleEncodeMode,
   isEncodeMode = false,
+  videoName,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoWrapperRef = useRef<HTMLDivElement>(null);
@@ -192,7 +193,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Reset error state and context menu when video URL or mode changes
   useEffect(() => {
     setLoadError(null);
-  }, [videoUrl]);
+  }, [videoUrl, videoName, isEncodeMode]);
 
   useEffect(() => {
     if (!isEncodeMode) {
@@ -582,6 +583,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           {hasActiveClip && (videoUrl || (isEncodeMode && activeAudioClips && activeAudioClips.length > 0)) ? (
             <>
               {videoUrl ? (
+                isEncodeMode && videoName && /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(videoName) ? (
+                  <img
+                    src={videoUrl}
+                    alt={videoName}
+                    className={`transition-all duration-200 ${
+                      isScalingActive && !isFreeCropActive
+                        ? 'w-full h-full object-cover'
+                        : 'max-h-full max-w-full object-contain'
+                    }`}
+                    style={{
+                      filter: getCssFilter(),
+                      transform: getTransform(),
+                    }}
+                  />
+                ) : (
                 <video
                   ref={videoRef}
                   src={videoUrl}
@@ -620,6 +636,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   preload="auto"
                   muted={isEncodeMode || settings.muteAudio}
                 />
+                )
               ) : (
                 <div className="flex flex-col items-center justify-center h-full w-full bg-slate-900 text-slate-500">
                   <Film className="w-12 h-12 mb-2 opacity-30" />
