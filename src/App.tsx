@@ -901,7 +901,7 @@ export default function App() {
             onExportClick={handleExport}
             onFullscreenClick={handleFullscreen}
             isLoaded={!!videoUrl}
-            isProcessing={false}
+            isProcessing={isProcessingModalOpen}
             isEncodeMode={isEncodeMode}
           />
         </div>
