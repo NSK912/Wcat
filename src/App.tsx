@@ -500,10 +500,20 @@ export default function App() {
         return { writable, opfsFileHandle };
       };
 
-      if (selectedFiles.length > 1) {
-        setProcessingMessage(`Streaming & merging ${selectedFiles.length} video files...`);
-        addLog(`Initiating multi-file concatenation for ${selectedFiles.length} files:`);
-        selectedFiles.forEach((f, idx) => addLog(`  [${idx + 1}] ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`));
+      const allVisibleClips = tracks ? tracks.filter(t => !t.hidden).flatMap(t => t.clips || []) : [];
+      const hasMultipleClips = allVisibleClips.length > 1 || selectedFiles.length > 1;
+      const hasImageClips =
+        allVisibleClips.some(c => c.mediaType === 'image' || (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)))) ||
+        selectedFiles.some(f => f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name));
+
+      if (hasMultipleClips) {
+        setProcessingMessage(`Streaming & merging ${allVisibleClips.length || selectedFiles.length} clips...`);
+        addLog(`Initiating multi-clip concatenation (${allVisibleClips.length || selectedFiles.length} clips):`);
+        if (allVisibleClips.length > 0) {
+          allVisibleClips.forEach((c, idx) => addLog(`  [${idx + 1}] ${c.name || c.file?.name} (${c.mediaType || 'clip'}, start: ${(c.startTime || 0).toFixed(2)}s, dur: ${(c.duration || 0).toFixed(2)}s)`));
+        } else {
+          selectedFiles.forEach((f, idx) => addLog(`  [${idx + 1}] ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`));
+        }
 
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
 
@@ -518,7 +528,7 @@ export default function App() {
           Boolean(settings.watermarkText?.trim()) ||
           settings.muteAudio;
 
-        const shouldUseEncodeMode = isEncodeMode || hasVisualModifications;
+        const shouldUseEncodeMode = isEncodeMode || hasVisualModifications || hasImageClips;
 
         let result;
         // =====================================================================
@@ -604,7 +614,8 @@ export default function App() {
           Boolean(settings.watermarkText?.trim()) ||
           settings.muteAudio;
 
-        const shouldUseEncodeMode = isEncodeMode || hasVisualModifications;
+        const isInputImage = inputFile.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(inputFile.name);
+        const shouldUseEncodeMode = isEncodeMode || hasVisualModifications || isInputImage;
         let result;
 
         // =====================================================================
