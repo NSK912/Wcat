@@ -1324,20 +1324,25 @@ export async function processWebCodecsMultiTrackTimeline(
     }
   }
 
+  let minTimelineStart = Infinity;
   let maxTimelineEnd = 0;
   visibleTracks.forEach((t) => {
     t.clips.forEach((c) => {
+      const start = c.startTime || 0;
       const dur =
         c.endTime !== undefined && c.startTime !== undefined && c.endTime > c.startTime
           ? c.endTime - c.startTime
           : c.duration || c.fileDuration || (c.mediaType === 'image' ? 5 : 10);
-      const clipEnd = (c.startTime || 0) + dur;
+      const clipEnd = start + dur;
+      if (start < minTimelineStart) minTimelineStart = start;
       if (clipEnd > maxTimelineEnd) maxTimelineEnd = clipEnd;
     });
   });
 
-  const exportStart = settings.startTime > 0 ? settings.startTime : 0;
-  const exportEnd = maxTimelineEnd > 0 ? maxTimelineEnd : (settings.endTime > exportStart ? settings.endTime : exportStart + 10);
+  if (minTimelineStart === Infinity) minTimelineStart = 0;
+
+  const exportStart = minTimelineStart;
+  const exportEnd = maxTimelineEnd > exportStart ? maxTimelineEnd : (settings.endTime > exportStart ? settings.endTime : exportStart + 10);
   const exportDuration = Math.max(0.1, exportEnd - exportStart);
 
   onProgress({
