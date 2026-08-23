@@ -374,6 +374,235 @@ function buildCanvasFilterString(settings: EditSettings): string {
 /**
  * Processes Single Video File using WebCodecs API (VideoDecoder & VideoEncoder)
  */
+async function processImageToVideo(
+  file: File,
+  settings: EditSettings,
+  writable: FileSystemWritableFileStream | null,
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
+  const startTime = performance.now();
+  onProgress({
+    percentage: 1,
+    statusText: 'Initializing Image-to-Video Pipeline...',
+    speedMBs: 0,
+    log: `[WebCodecs API] Image Encoding Pipeline Initialized\nSource: ${file.name}`,
+  });
+
+  const bmp = await createImageBitmap(file);
+  let sourceWidth = bmp.width;
+  let sourceHeight = bmp.height;
+  
+  const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
+  const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
+
+  let canvasWidth = sourceWidth;
+  let canvasHeight = sourceHeight;
+
+  if (hasCustomAspect) {
+    if (settings.cropAspect === 'free' && settings.freeCropRect) {
+      const rect = settings.freeCropRect;
+      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
+      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
+    } else {
+      let aspectMultiplier = 16 / 9;
+      switch (settings.cropAspect) {
+        case '16:9': aspectMultiplier = 16 / 9; break;
+        case '4:3': aspectMultiplier = 4 / 3; break;
+        case '1:1': aspectMultiplier = 1 / 1; break;
+        case '4:5': aspectMultiplier = 4 / 5; break;
+        case '9:16': aspectMultiplier = 9 / 16; break;
+        case '21:9': aspectMultiplier = 21 / 9; break;
+      }
+      if (sourceWidth / sourceHeight > aspectMultiplier) {
+        canvasHeight = sourceHeight;
+        canvasWidth = Math.round(sourceHeight * aspectMultiplier);
+      } else {
+        canvasWidth = sourceWidth;
+        canvasHeight = Math.round(sourceWidth / aspectMultiplier);
+      }
+    }
+  }
+
+  if (hasResolutionPreset) {
+    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
+    canvasWidth = targetDims.width;
+    canvasHeight = targetDims.height;
+  }
+  
+  canvasWidth = Math.max(8, canvasWidth - (canvasWidth % 8));
+  canvasHeight = Math.max(8, canvasHeight - (canvasHeight % 8));
+
+  const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
+  const preferredVideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
+  const targetQuality = resolveQuality(settings.videoQuality);
+
+  const negotiated = await negotiateVideoCodec(
+    preferredVideoCodec,
+    canvasWidth,
+    canvasHeight,
+    targetQuality,
+    speedConfig.hardwareAcceleration
+  );
+
+  const targetVideoCodec = negotiated.codec;
+  const targetHwAccel = negotiated.hwAccel;
+
+  const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
+  let outputFormat;
+  if (ext === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') {
+    outputFormat = new WebMOutputFormat();
+  } else if (ext === 'mkv') {
+    outputFormat = new MkvOutputFormat();
+  } else {
+    outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' });
+  }
+
+  const target = createWebCodecsTarget(writable);
+  let totalWritten = 0;
+  target.on('write', ({ end }) => {
+    totalWritten = Math.max(totalWritten, end);
+  });
+
+  const output = new Output({ format: outputFormat, target });
+  const vSource = new VideoSampleSource({
+    codec: targetVideoCodec,
+    quality: targetQuality,
+    hardwareAcceleration: targetHwAccel
+  });
+  
+  output.addVideoTrack(vSource);
+  await output.start();
+
+  const fps = 30;
+  const durationSecs = (settings.duration && settings.duration > 0) ? settings.duration : 5;
+  const actualDuration = (settings.endTime > 0 && settings.endTime < durationSecs) ? settings.endTime : durationSecs;
+  const frames = Math.ceil(actualDuration * fps);
+  const frameDurationSec = 1 / fps;
+
+  let offscreenCanvas: OffscreenCanvas | HTMLCanvasElement;
+  let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
+  
+  if (typeof OffscreenCanvas !== 'undefined') {
+    offscreenCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
+    canvasCtx = offscreenCanvas.getContext('2d');
+  } else {
+    offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = canvasWidth;
+    offscreenCanvas.height = canvasHeight;
+    canvasCtx = offscreenCanvas.getContext('2d');
+  }
+  
+  let lastTime = performance.now();
+  let lastBytes = 0;
+  
+  for (let f = 0; f < frames; f++) {
+    const origDuration = frameDurationSec;
+    const w = canvasWidth;
+    const h = canvasHeight;
+    
+    if (canvasCtx) {
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, w, h);
+      
+      canvasCtx.filter = buildCanvasFilterString(settings);
+      if (settings.flipH || settings.flipV) {
+        canvasCtx.translate(settings.flipH ? w : 0, settings.flipV ? h : 0);
+        canvasCtx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
+      }
+      
+      const srcRatio = sourceWidth / sourceHeight;
+      const dstRatio = w / h;
+      let sx = 0; let sy = 0; let sw = sourceWidth; let sh = sourceHeight;
+      
+      if (settings.cropAspect === 'free' && settings.freeCropRect) {
+        const rect = settings.freeCropRect;
+        sx = Math.max(0, Math.min(sourceWidth - 2, Math.round(sourceWidth * (rect.x || 0))));
+        sy = Math.max(0, Math.min(sourceHeight - 2, Math.round(sourceHeight * (rect.y || 0))));
+        sw = Math.max(8, Math.min(sourceWidth - sx, Math.round(sourceWidth * (rect.width || 1))));
+        sh = Math.max(8, Math.min(sourceHeight - sy, Math.round(sourceHeight * (rect.height || 1))));
+      } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+        if (srcRatio > dstRatio) {
+          sw = sourceHeight * dstRatio;
+          sx = (sourceWidth - sw) / 2;
+        } else {
+          sh = sourceWidth / dstRatio;
+          sy = (sourceHeight - sh) / 2;
+        }
+      }
+      canvasCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
+      canvasCtx.restore();
+      
+      if (settings.watermarkText && settings.watermarkText.trim()) {
+        canvasCtx.save();
+        const fontSize = settings.watermarkSize || 24;
+        canvasCtx.font = `bold ${fontSize}px sans-serif`;
+        canvasCtx.fillStyle = settings.watermarkColor || '#ffffff';
+        canvasCtx.shadowColor = 'rgba(0,0,0,0.8)';
+        canvasCtx.shadowBlur = 4;
+        canvasCtx.shadowOffsetX = 1;
+        canvasCtx.shadowOffsetY = 1;
+        const text = settings.watermarkText;
+        const textMetrics = canvasCtx.measureText(text);
+        const padding = 20;
+        let x = padding; let y = h - padding;
+        switch (settings.watermarkPosition) {
+          case 'top-left': x = padding; y = padding + fontSize; break;
+          case 'top-right': x = w - textMetrics.width - padding; y = padding + fontSize; break;
+          case 'bottom-left': x = padding; y = h - padding; break;
+          case 'bottom-right': x = w - textMetrics.width - padding; y = h - padding; break;
+          case 'center': x = (w - textMetrics.width) / 2; y = (h + fontSize) / 2; break;
+        }
+        canvasCtx.fillText(text, x, y);
+        canvasCtx.restore();
+      }
+    }
+    
+    const pSample = new VideoSample(offscreenCanvas, { timestamp: f * frameDurationSec, duration: origDuration });
+    await vSource.add(pSample);
+    pSample.close();
+    
+    const now = performance.now();
+    const elapsed = (now - lastTime) / 1000;
+    if (elapsed > 0.5 || f === frames - 1) {
+      const speedMBs = (totalWritten - lastBytes) / (1024 * 1024) / elapsed;
+      lastTime = now;
+      lastBytes = totalWritten;
+      const currentPercent = Math.round((f / frames) * 100);
+      onProgress({
+        percentage: currentPercent,
+        statusText: `Encoding Image (${currentPercent}%)...`,
+        speedMBs,
+      });
+    }
+  }
+  
+  bmp.close();
+  await output.finalize();
+
+  let blobUrl;
+  if (target instanceof BufferTarget && target.buffer) {
+    const isMp4 = outputFormat instanceof Mp4OutputFormat;
+    const isMkv = outputFormat instanceof MkvOutputFormat;
+    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
+    const blob = new Blob([target.buffer], { type: mime });
+    blobUrl = URL.createObjectURL(blob);
+    totalWritten = target.buffer.byteLength;
+  }
+
+  onProgress({
+    percentage: 100,
+    statusText: 'Image Encoding Complete!',
+    speedMBs: 0,
+    log: `[WebCodecs API] Image encoding finished. Total: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`,
+  });
+
+  return {
+    success: true,
+    totalBytesWritten: totalWritten,
+    blobUrl,
+  };
+}
+
 export async function processWebCodecsEncodeStream(
   file: File,
   settings: EditSettings,
@@ -382,6 +611,11 @@ export async function processWebCodecsEncodeStream(
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   if (!isWebCodecsSupported()) {
     throw new Error('WebCodecs API is not supported in this browser.');
+  }
+
+  const isImage = file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(file.name);
+  if (isImage) {
+    return processImageToVideo(file, settings, writable, onProgress);
   }
 
   const startTime = performance.now();
@@ -769,7 +1003,7 @@ export async function processWebCodecsEncodeStream(
 }
 
 /**
- * Concat multiple files using WebCodecs API transcoding
+ * Concat multiple files / clips / tracks using WebCodecs API transcoding
  */
 export async function processWebCodecsConcatStream(
   inputItems: any[],
@@ -777,79 +1011,138 @@ export async function processWebCodecsConcatStream(
   writable: FileSystemWritableFileStream | null,
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
-// 1. Flatten if inputItems are tracks
-  let files: File[] = [];
-  let segments: any[] = [];
+  // 1. Flatten if inputItems are tracks or files
+  let segments: Array<{
+    file: File;
+    name: string;
+    startTime: number;
+    endTime?: number;
+    sourceStartTime?: number;
+    sourceEndTime?: number;
+    duration: number;
+    isImage: boolean;
+    isVideo: boolean;
+    isAudio: boolean;
+  }> = [];
+
   const isTracks = inputItems.length > 0 && inputItems[0].clips !== undefined;
   
   if (isTracks) {
-    const allClips = [];
-    inputItems.forEach(t => {
-      if (!t.hidden) {
-        t.clips.forEach(c => allClips.push(c));
+    const allClips: any[] = [];
+    inputItems.forEach((t: any) => {
+      if (!t.hidden && t.clips) {
+        t.clips.forEach((c: any) => allClips.push(c));
       }
     });
     // Sort by timeline start time
     allClips.sort((a, b) => a.startTime - b.startTime);
-    allClips.forEach(c => {
-      if (c.file && (c.mediaType === 'video' || c.file.type.startsWith('video/'))) {
+    allClips.forEach((c: any) => {
+      if (c.file) {
+        const isImg = c.mediaType === 'image' || c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name);
+        const isAud = c.mediaType === 'audio' || c.file.type.startsWith('audio/') || /\.(mp3|wav|aac|m4a|flac|ogg|opus)$/i.test(c.file.name);
+        const clipDur = (c.endTime !== undefined && c.startTime !== undefined && c.endTime > c.startTime)
+          ? (c.endTime - c.startTime)
+          : (c.duration || c.fileDuration || (isImg ? 5 : 10));
+
         segments.push({
           file: c.file,
           name: c.name || c.file.name,
-          startTime: c.startTime,
+          startTime: c.startTime || 0,
+          endTime: c.endTime,
           sourceStartTime: c.sourceStartTime || 0,
-          duration: c.duration || c.fileDuration || 0
+          sourceEndTime: c.sourceEndTime,
+          duration: clipDur,
+          isImage: isImg,
+          isAudio: isAud,
+          isVideo: !isImg && !isAud,
         });
-        files.push(c.file);
       }
     });
   } else {
-    files = inputItems as File[];
-    segments = files.map(f => ({
-      file: f,
-      name: f.name,
-      sourceStartTime: settings.startTime || 0,
-      duration: (settings.endTime ? settings.endTime - (settings.startTime || 0) : 0)
-    }));
+    const files = inputItems as File[];
+    segments = files.map(f => {
+      const isImg = f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name);
+      const isAud = f.type.startsWith('audio/') || /\.(mp3|wav|aac|m4a|flac|ogg|opus)$/i.test(f.name);
+      return {
+        file: f,
+        name: f.name,
+        startTime: 0,
+        sourceStartTime: settings.startTime || 0,
+        duration: (settings.endTime ? settings.endTime - (settings.startTime || 0) : (isImg ? 5 : 0)),
+        isImage: isImg,
+        isAudio: isAud,
+        isVideo: !isImg && !isAud,
+      };
+    });
   }
 
   if (segments.length === 0) {
-    throw new Error('No valid video files/clips provided for concatenation');
+    throw new Error('No valid video or image files/clips provided for concatenation');
   }
 
   onProgress({
     percentage: 1,
-    statusText: `WebCodecs Concat Engine: Preparing ${files.length} files...`,
+    statusText: `WebCodecs Concat Engine: Preparing ${segments.length} clips...`,
     speedMBs: 0,
-    log: `[WebCodecs Concat] Merging ${files.length} video streams with WebCodecs normalization:`,
+    log: `[WebCodecs Concat] Merging ${segments.length} stream segments with WebCodecs normalization:`,
   });
 
-  files.forEach((f, i) => {
+  segments.forEach((seg, i) => {
     onProgress({
       percentage: 2,
-      statusText: `Inspecting [${i + 1}/${files.length}] ${f.name}...`,
+      statusText: `Inspecting [${i + 1}/${segments.length}] ${seg.name}...`,
       speedMBs: 0,
-      log: `  File [${i + 1}]: ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`,
+      log: `  Segment [${i + 1}]: ${seg.name} (${seg.isImage ? 'Image' : seg.isVideo ? 'Video' : 'Audio'}, Duration: ${seg.duration.toFixed(2)}s)`,
     });
   });
 
-  // If only 1 file, redirect to single encode
-  if (files.length === 1) {
-    return processWebCodecsEncodeStream(files[0], settings, writable, onProgress);
+  // If only 1 segment and it's a single file without timeline tracks, redirect to single encode
+  if (segments.length === 1 && !isTracks) {
+    return processWebCodecsEncodeStream(segments[0].file, settings, writable, onProgress);
   }
 
-  const firstFile = files[0];
   const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
   const targetQuality = resolveQuality(settings.videoQuality);
 
-  const firstInput = new Input({ source: new BlobSource(firstFile), formats: ALL_FORMATS });
-  const firstVTracks = await firstInput.getVideoTracks();
+  // Probe width & height from first valid video or image segment
   let sourceWidth = 1920;
   let sourceHeight = 1080;
-  if (firstVTracks.length > 0) {
-    sourceWidth = firstVTracks[0].displayWidth || firstVTracks[0].codedWidth || 1920;
-    sourceHeight = firstVTracks[0].displayHeight || firstVTracks[0].codedHeight || 1080;
+  let hasValidDims = false;
+
+  for (const seg of segments) {
+    if (seg.isImage) {
+      try {
+        const bmp = await createImageBitmap(seg.file);
+        if (bmp.width > 0 && bmp.height > 0) {
+          sourceWidth = bmp.width;
+          sourceHeight = bmp.height;
+          hasValidDims = true;
+          bmp.close();
+          break;
+        }
+        bmp.close();
+      } catch (e) {
+        console.warn('Probe image error', e);
+      }
+    } else if (seg.isVideo) {
+      try {
+        const firstInput = new Input({ source: new BlobSource(seg.file), formats: ALL_FORMATS });
+        const firstVTracks = await firstInput.getVideoTracks();
+        if (firstVTracks.length > 0) {
+          sourceWidth = firstVTracks[0].displayWidth || firstVTracks[0].codedWidth || 1920;
+          sourceHeight = firstVTracks[0].displayHeight || firstVTracks[0].codedHeight || 1080;
+          hasValidDims = true;
+          break;
+        }
+      } catch (e) {
+        console.warn('Probe video error', e);
+      }
+    }
   }
+
+  // Ensure source dimensions are even
+  sourceWidth = Math.max(8, sourceWidth - (sourceWidth % 8));
+  sourceHeight = Math.max(8, sourceHeight - (sourceHeight % 8));
 
   const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
   const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
@@ -896,7 +1189,8 @@ export async function processWebCodecsConcatStream(
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
   const targetAudioCodec = await negotiateAudioCodec(preferredAudioCodec);
 
-  const ext = firstFile.name.split('.').pop()?.toLowerCase() || 'mp4';
+  const firstSeg = segments[0];
+  const ext = firstSeg.file.name.split('.').pop()?.toLowerCase() || 'mp4';
   const format =
     ext === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9'
       ? new WebMOutputFormat()
@@ -904,7 +1198,7 @@ export async function processWebCodecsConcatStream(
       ? new MkvOutputFormat()
       : new Mp4OutputFormat({ fastStart: 'in-memory' });
 
-    const target = createWebCodecsTarget(writable);
+  const target = createWebCodecsTarget(writable);
   let totalWritten = 0;
   target.on('write', ({ end }) => {
     totalWritten = Math.max(totalWritten, end);
@@ -915,8 +1209,6 @@ export async function processWebCodecsConcatStream(
   const vSource = new VideoSampleSource({
     codec: targetVideoCodec,
     quality: targetQuality,
-    width: canvasWidth,
-    height: canvasHeight,
     hardwareAcceleration: targetHwAccel
   });
   const aSource = new AudioSampleSource({
@@ -932,176 +1224,310 @@ export async function processWebCodecsConcatStream(
   let currentVideoTime = 0;
   let currentAudioTime = 0;
 
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const file = seg.file;
+    const isImage = seg.isImage || file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(file.name);
+
     onProgress({
-      percentage: Math.round((i / files.length) * 100),
-      statusText: `WebCodecs Concat: Encoding segment ${i + 1}/${files.length} (${file.name})...`,
+      percentage: Math.round((i / segments.length) * 100),
+      statusText: `WebCodecs Concat: Encoding segment ${i + 1}/${segments.length} (${seg.name})...`,
       speedMBs: 0,
-      log: `[WebCodecs Concat] Processing segment ${i + 1}/${files.length}: ${file.name}`,
+      log: `[WebCodecs Concat] Processing segment ${i + 1}/${segments.length}: ${seg.name} (${isImage ? 'Image' : 'Video'})`,
     });
 
-    const input = new Input({
-      source: new BlobSource(file),
-      formats: ALL_FORMATS,
-    });
+    if (isImage) {
+      // =========================================================================
+      // 🖼️ IMAGE SEGMENT ENCODING (Generate continuous 30fps video frames)
+      // =========================================================================
+      const bmp = await createImageBitmap(file);
+      const imgWidth = bmp.width;
+      const imgHeight = bmp.height;
+      const segDuration = seg.duration > 0 ? seg.duration : 5;
+      const fps = 30;
+      const frames = Math.ceil(segDuration * fps);
+      const frameDurationSec = 1 / fps;
 
-    let maxVidDur = 0;
-    let maxAudDur = 0;
+      let segCanvas: OffscreenCanvas | HTMLCanvasElement;
+      let ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
 
-    const vTracks = await input.getVideoTracks();
-    const aTracks = await input.getAudioTracks();
+      if (typeof OffscreenCanvas !== 'undefined') {
+        segCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
+        ctx = segCanvas.getContext('2d');
+      } else {
+        segCanvas = document.createElement('canvas');
+        segCanvas.width = canvasWidth;
+        segCanvas.height = canvasHeight;
+        ctx = segCanvas.getContext('2d');
+      }
 
-
-    const needsCanvasProcessing =
-      settings.filter !== 'none' ||
-      settings.brightness !== 1.0 ||
-      settings.contrast !== 1.0 ||
-      settings.flipH ||
-      settings.flipV ||
-      Boolean(settings.watermarkText?.trim()) ||
-      hasCustomAspect ||
-      hasResolutionPreset;
-
-    const offscreenCanvas = needsCanvasProcessing ? new OffscreenCanvas(canvasWidth, canvasHeight) : null;
-    const canvasCtx = offscreenCanvas ? offscreenCanvas.getContext('2d') : null;
-
-    const videoPromise = (async () => {
-      if (vTracks.length > 0) {
-        const vSink = new VideoSampleSink(vTracks[0]);
-        for await (const sample of vSink.samples()) {
-          const origDuration = sample.duration;
-          let pSample = sample;
-
-          if (needsCanvasProcessing && offscreenCanvas && canvasCtx) {
-            const canvas = offscreenCanvas;
-            const ctx = canvasCtx;
-            const img = pSample.toCanvasImageSource();
-            const w = canvasWidth;
-            const h = canvasHeight;
-            
-            ctx.save();
-            ctx.clearRect(0, 0, w, h);
-
-            // Apply CSS Filters (Brightness, Contrast, Grayscale, etc.)
-            ctx.filter = buildCanvasFilterString(settings);
-
-            // Apply Horizontal / Vertical Flips
-            if (settings.flipH || settings.flipV) {
-              ctx.translate(settings.flipH ? w : 0, settings.flipV ? h : 0);
-              ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
-            }
-
-            // Calculate source crop rectangle to preserve aspect ratio without distortion
-            const srcWidth = pSample.squarePixelWidth;
-            const srcHeight = pSample.squarePixelHeight;
-            const srcRatio = srcWidth / srcHeight;
-            const dstRatio = w / h;
-
-            let sx = 0;
-            let sy = 0;
-            let sw = srcWidth;
-            let sh = srcHeight;
-
-            if (settings.cropAspect === 'free' && settings.freeCropRect) {
-              const rect = settings.freeCropRect;
-              sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
-              sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-              sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-              sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
-            } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
-              if (srcRatio > dstRatio) {
-                // Source is wider than destination: crop sides
-                sw = srcHeight * dstRatio;
-                sx = (srcWidth - sw) / 2;
-              } else {
-                // Source is taller than destination: crop top/bottom
-                sh = srcWidth / dstRatio;
-                sy = (srcHeight - sh) / 2;
-              }
-            }
-
-            ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
-            ctx.restore();
-
-            // Apply Watermark Overlay
-            if (settings.watermarkText && settings.watermarkText.trim()) {
-              ctx.save();
-              const fontSize = settings.watermarkSize || 24;
-              ctx.font = `bold ${fontSize}px sans-serif`;
-              ctx.fillStyle = settings.watermarkColor || '#ffffff';
-              ctx.shadowColor = 'rgba(0,0,0,0.8)';
-              ctx.shadowBlur = 4;
-              ctx.shadowOffsetX = 1;
-              ctx.shadowOffsetY = 1;
-
-              const text = settings.watermarkText;
-              const textMetrics = ctx.measureText(text);
-              const padding = 20;
-              let x = padding;
-              let y = h - padding;
-
-              switch (settings.watermarkPosition) {
-                case 'top-left':
-                  x = padding;
-                  y = padding + fontSize;
-                  break;
-                case 'top-right':
-                  x = w - textMetrics.width - padding;
-                  y = padding + fontSize;
-                  break;
-                case 'bottom-left':
-                  x = padding;
-                  y = h - padding;
-                  break;
-                case 'bottom-right':
-                  x = w - textMetrics.width - padding;
-                  y = h - padding;
-                  break;
-                case 'center':
-                  x = (w - textMetrics.width) / 2;
-                  y = (h + fontSize) / 2;
-                  break;
-              }
-
-              ctx.fillText(text, x, y);
-              ctx.restore();
-            }
-
-            const canvasSample = new VideoSample(canvas, { timestamp: pSample.timestamp, duration: origDuration });
-            pSample = canvasSample;
-
-          } else if (pSample.squarePixelWidth !== canvasWidth || pSample.squarePixelHeight !== canvasHeight) {
-              const scaledSample = await pSample.transform({ width: canvasWidth, height: canvasHeight, fit: 'cover' });
-              pSample = scaledSample;
+      for (let f = 0; f < frames; f++) {
+        if (ctx) {
+          ctx.save();
+          ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+          ctx.filter = buildCanvasFilterString(settings);
+          if (settings.flipH || settings.flipV) {
+            ctx.translate(settings.flipH ? canvasWidth : 0, settings.flipV ? canvasHeight : 0);
+            ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
           }
 
-          pSample.setTimestamp(pSample.timestamp + currentVideoTime);
-          await vSource.add(pSample);
-          maxVidDur = Math.max(maxVidDur, pSample.timestamp + origDuration - currentVideoTime);
-          if (pSample !== sample) pSample.close();
-          sample.close();
+          const srcRatio = imgWidth / imgHeight;
+          const dstRatio = canvasWidth / canvasHeight;
+          let sx = 0; let sy = 0; let sw = imgWidth; let sh = imgHeight;
+
+          if (settings.cropAspect === 'free' && settings.freeCropRect) {
+            const rect = settings.freeCropRect;
+            sx = Math.max(0, Math.min(imgWidth - 2, Math.round(imgWidth * (rect.x || 0))));
+            sy = Math.max(0, Math.min(imgHeight - 2, Math.round(imgHeight * (rect.y || 0))));
+            sw = Math.max(8, Math.min(imgWidth - sx, Math.round(imgWidth * (rect.width || 1))));
+            sh = Math.max(8, Math.min(imgHeight - sy, Math.round(imgHeight * (rect.height || 1))));
+          } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+            if (srcRatio > dstRatio) {
+              sw = imgHeight * dstRatio;
+              sx = (imgWidth - sw) / 2;
+            } else {
+              sh = imgWidth / dstRatio;
+              sy = (imgHeight - sh) / 2;
+            }
+          }
+          ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
+          ctx.restore();
+
+          if (settings.watermarkText && settings.watermarkText.trim()) {
+            ctx.save();
+            const fontSize = settings.watermarkSize || 24;
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            ctx.fillStyle = settings.watermarkColor || '#ffffff';
+            ctx.shadowColor = 'rgba(0,0,0,0.8)';
+            ctx.shadowBlur = 4;
+            ctx.shadowOffsetX = 1;
+            ctx.shadowOffsetY = 1;
+            const text = settings.watermarkText;
+            const textMetrics = ctx.measureText(text);
+            const padding = 20;
+            let x = padding; let y = canvasHeight - padding;
+            switch (settings.watermarkPosition) {
+              case 'top-left': x = padding; y = padding + fontSize; break;
+              case 'top-right': x = canvasWidth - textMetrics.width - padding; y = padding + fontSize; break;
+              case 'bottom-left': x = padding; y = canvasHeight - padding; break;
+              case 'bottom-right': x = canvasWidth - textMetrics.width - padding; y = canvasHeight - padding; break;
+              case 'center': x = (canvasWidth - textMetrics.width) / 2; y = (canvasHeight + fontSize) / 2; break;
+            }
+            ctx.fillText(text, x, y);
+            ctx.restore();
+          }
+        }
+
+        const pSample = new VideoSample(segCanvas, {
+          timestamp: currentVideoTime + (f * frameDurationSec),
+          duration: frameDurationSec,
+        });
+        await vSource.add(pSample);
+        pSample.close();
+      }
+
+      bmp.close();
+      currentVideoTime += segDuration;
+      currentAudioTime += segDuration;
+
+    } else {
+      // =========================================================================
+      // 🎥 VIDEO SEGMENT ENCODING
+      // =========================================================================
+      const input = new Input({
+        source: new BlobSource(file),
+        formats: ALL_FORMATS,
+      });
+
+      let maxVidDur = 0;
+      let maxAudDur = 0;
+
+      const vTracks = await input.getVideoTracks();
+      const aTracks = await input.getAudioTracks();
+
+      const needsCanvasProcessing =
+        settings.filter !== 'none' ||
+        settings.brightness !== 1.0 ||
+        settings.contrast !== 1.0 ||
+        settings.flipH ||
+        settings.flipV ||
+        Boolean(settings.watermarkText?.trim()) ||
+        hasCustomAspect ||
+        hasResolutionPreset;
+
+      let offscreenCanvas: OffscreenCanvas | HTMLCanvasElement | null = null;
+      let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
+
+      if (needsCanvasProcessing) {
+        if (typeof OffscreenCanvas !== 'undefined') {
+          offscreenCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
+          canvasCtx = offscreenCanvas.getContext('2d');
+        } else {
+          offscreenCanvas = document.createElement('canvas');
+          offscreenCanvas.width = canvasWidth;
+          offscreenCanvas.height = canvasHeight;
+          canvasCtx = offscreenCanvas.getContext('2d');
         }
       }
-    })();
 
-    const audioPromise = (async () => {
-      if (aTracks.length > 0 && !settings.muteAudio) {
-        const aSink = new AudioSampleSink(aTracks[0]);
-        for await (const sample of aSink.samples()) {
-          const origDuration = sample.duration;
-          sample.setTimestamp(sample.timestamp + currentAudioTime);
-          await aSource.add(sample);
-          maxAudDur = Math.max(maxAudDur, sample.timestamp + origDuration - currentAudioTime);
-          sample.close();
+      const sourceStart = seg.sourceStartTime || 0;
+      const segMaxDuration = seg.duration > 0 ? seg.duration : undefined;
+
+      const videoPromise = (async () => {
+        if (vTracks.length > 0) {
+          const vSink = new VideoSampleSink(vTracks[0]);
+          for await (const sample of vSink.samples()) {
+            const origDuration = sample.duration;
+
+            if (sourceStart > 0 && sample.timestamp < sourceStart) {
+              sample.close();
+              continue;
+            }
+            if (segMaxDuration !== undefined && sample.timestamp >= sourceStart + segMaxDuration) {
+              sample.close();
+              break;
+            }
+
+            let pSample = sample;
+
+            if (needsCanvasProcessing && offscreenCanvas && canvasCtx) {
+              const canvas = offscreenCanvas;
+              const ctx = canvasCtx;
+              const img = pSample.toCanvasImageSource();
+              const w = canvasWidth;
+              const h = canvasHeight;
+              
+              ctx.save();
+              ctx.clearRect(0, 0, w, h);
+
+              // Apply CSS Filters (Brightness, Contrast, Grayscale, etc.)
+              ctx.filter = buildCanvasFilterString(settings);
+
+              // Apply Horizontal / Vertical Flips
+              if (settings.flipH || settings.flipV) {
+                ctx.translate(settings.flipH ? w : 0, settings.flipV ? h : 0);
+                ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
+              }
+
+              // Calculate source crop rectangle to preserve aspect ratio without distortion
+              const srcWidth = pSample.squarePixelWidth;
+              const srcHeight = pSample.squarePixelHeight;
+              const srcRatio = srcWidth / srcHeight;
+              const dstRatio = w / h;
+
+              let sx = 0;
+              let sy = 0;
+              let sw = srcWidth;
+              let sh = srcHeight;
+
+              if (settings.cropAspect === 'free' && settings.freeCropRect) {
+                const rect = settings.freeCropRect;
+                sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+                sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+                sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+                sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+              } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+                if (srcRatio > dstRatio) {
+                  sw = srcHeight * dstRatio;
+                  sx = (srcWidth - sw) / 2;
+                } else {
+                  sh = srcWidth / dstRatio;
+                  sy = (srcHeight - sh) / 2;
+                }
+              }
+
+              ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
+              ctx.restore();
+
+              // Apply Watermark Overlay
+              if (settings.watermarkText && settings.watermarkText.trim()) {
+                ctx.save();
+                const fontSize = settings.watermarkSize || 24;
+                ctx.font = `bold ${fontSize}px sans-serif`;
+                ctx.fillStyle = settings.watermarkColor || '#ffffff';
+                ctx.shadowColor = 'rgba(0,0,0,0.8)';
+                ctx.shadowBlur = 4;
+                ctx.shadowOffsetX = 1;
+                ctx.shadowOffsetY = 1;
+
+                const text = settings.watermarkText;
+                const textMetrics = ctx.measureText(text);
+                const padding = 20;
+                let x = padding;
+                let y = h - padding;
+
+                switch (settings.watermarkPosition) {
+                  case 'top-left':
+                    x = padding;
+                    y = padding + fontSize;
+                    break;
+                  case 'top-right':
+                    x = w - textMetrics.width - padding;
+                    y = padding + fontSize;
+                    break;
+                  case 'bottom-left':
+                    x = padding;
+                    y = h - padding;
+                    break;
+                  case 'bottom-right':
+                    x = w - textMetrics.width - padding;
+                    y = h - padding;
+                    break;
+                  case 'center':
+                    x = (w - textMetrics.width) / 2;
+                    y = (h + fontSize) / 2;
+                    break;
+                }
+
+                ctx.fillText(text, x, y);
+                ctx.restore();
+              }
+
+              const canvasSample = new VideoSample(canvas, { timestamp: pSample.timestamp, duration: origDuration });
+              pSample = canvasSample;
+
+            } else if (pSample.squarePixelWidth !== canvasWidth || pSample.squarePixelHeight !== canvasHeight) {
+                const scaledSample = await pSample.transform({ width: canvasWidth, height: canvasHeight, fit: 'cover' });
+                pSample = scaledSample;
+            }
+
+            pSample.setTimestamp(Math.max(0, pSample.timestamp - sourceStart) + currentVideoTime);
+            await vSource.add(pSample);
+            maxVidDur = Math.max(maxVidDur, (pSample.timestamp + origDuration) - currentVideoTime);
+            if (pSample !== sample) pSample.close();
+            sample.close();
+          }
         }
-      }
-    })();
+      })();
 
-    await Promise.all([videoPromise, audioPromise]);
+      const audioPromise = (async () => {
+        if (aTracks.length > 0 && !settings.muteAudio) {
+          const aSink = new AudioSampleSink(aTracks[0]);
+          for await (const sample of aSink.samples()) {
+            const origDuration = sample.duration;
 
-    currentVideoTime += maxVidDur;
-    currentAudioTime += maxAudDur;
+            if (sourceStart > 0 && sample.timestamp < sourceStart) {
+              sample.close();
+              continue;
+            }
+            if (segMaxDuration !== undefined && sample.timestamp >= sourceStart + segMaxDuration) {
+              sample.close();
+              break;
+            }
+
+            sample.setTimestamp(Math.max(0, sample.timestamp - sourceStart) + currentAudioTime);
+            await aSource.add(sample);
+            maxAudDur = Math.max(maxAudDur, (sample.timestamp + origDuration) - currentAudioTime);
+            sample.close();
+          }
+        }
+      })();
+
+      await Promise.all([videoPromise, audioPromise]);
+
+      currentVideoTime += maxVidDur > 0 ? maxVidDur : (seg.duration || 0);
+      currentAudioTime += maxAudDur > 0 ? maxAudDur : (seg.duration || 0);
+    }
   }
 
   await output.finalize();
@@ -1120,7 +1546,7 @@ export async function processWebCodecsConcatStream(
     percentage: 100,
     statusText: 'WebCodecs Concat Complete!',
     speedMBs: 0,
-    log: `[WebCodecs Concat] All ${files.length} files merged & encoded successfully! Total: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`,
+    log: `[WebCodecs Concat] All ${segments.length} segments merged & encoded successfully! Total: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`,
   });
 
   return {
