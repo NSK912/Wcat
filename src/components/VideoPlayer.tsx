@@ -990,7 +990,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ) : (
         <div
           ref={videoWrapperRef}
-          onContextMenu={handleContextMenu}
+          onContextMenu={(e) => e.preventDefault()}
           onClick={(e) => {
             if (e.target === videoWrapperRef.current) {
               setSelectedClipId(null);
@@ -1349,8 +1349,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             </div>
           )}
 
-          {/* Floating play/pause overlay trigger (Only when not dragging layers or crop) */}
-          {!isFreeCropActive && !isDraggingLayer && !isResizingLayerCorner && (
+          {/* Floating play/pause overlay trigger (Only when not dragging layers or crop, and hidden in encode mode) */}
+          {!isFreeCropActive && !isDraggingLayer && !isResizingLayerCorner && !isEncodeMode && (
             <div
               onClick={() => {
                 if (singleVideoRef.current && !hasLayers) {
