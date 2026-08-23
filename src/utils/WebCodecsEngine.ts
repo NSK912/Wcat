@@ -912,7 +912,13 @@ export async function processWebCodecsEncodeStream(
   // Calculate Trim Timestamps
   let trimStart = settings.startTime > 0 ? settings.startTime : undefined;
   if (trimStart !== undefined && trimStart >= sourceDuration) trimStart = Math.max(0, sourceDuration - 0.1);
-  let trimEnd = settings.endTime > 0 && settings.endTime < sourceDuration ? settings.endTime : undefined;
+  let trimEnd: number | undefined = undefined;
+  if (settings.endTime > 0 && sourceDuration > 0 && settings.endTime < sourceDuration - 0.1) {
+    const isFullVideo = settings.duration > 0 && Math.abs(settings.endTime - settings.duration) < 0.1;
+    if (!isFullVideo) {
+      trimEnd = settings.endTime;
+    }
+  }
   if (trimStart !== undefined && trimEnd !== undefined && trimStart >= trimEnd) trimStart = Math.max(0, trimEnd - 0.1);
 
   onProgress({
@@ -1705,6 +1711,7 @@ export async function processWebCodecsConcatStream(
 
   // 1. Flatten if inputItems are raw files
   const files = inputItems as File[];
+  const isExplicitTrim = settings.endTime > 0 && settings.duration > 0 && settings.endTime < settings.duration - 0.1;
   const segments = files.map((f) => {
     const isImg = f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name);
     const isAud = f.type.startsWith('audio/') || /\.(mp3|wav|aac|m4a|flac|ogg|opus)$/i.test(f.name);
@@ -1713,7 +1720,7 @@ export async function processWebCodecsConcatStream(
       name: f.name,
       startTime: 0,
       sourceStartTime: settings.startTime || 0,
-      duration: settings.endTime ? settings.endTime - (settings.startTime || 0) : isImg ? 5 : 0,
+      duration: isExplicitTrim ? (settings.endTime - (settings.startTime || 0)) : (isImg ? 5 : 0),
       isImage: isImg,
       isAudio: isAud,
       isVideo: !isImg && !isAud,

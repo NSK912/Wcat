@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { EditSettings, ActiveTab, SampleVideo, TimelineTrackData, TimelineClip, ClipTransform } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
+import { Input, BlobSource, ALL_FORMATS } from 'mediabunny';
 import { processNativeConcatStream, processNativeTrimStream, processNativeRemuxStream } from './utils/WEngine';
 import {
   processWebCodecsEncodeStream,
@@ -76,23 +77,57 @@ const DEFAULT_SETTINGS: EditSettings = {
 };
 
 const getFileDuration = async (file: File): Promise<number> => {
-  return new Promise((resolve) => {
-    if (file.type.startsWith('image/')) {
-      resolve(5); // Default 5 seconds for image clips
-      return;
+  if (file.type.startsWith('image/')) {
+    return 5;
+  }
+
+  // 1. Try Mediabunny WebCodecs demuxer first (100% accurate for MKV, MP4, WebM, TS, AVI, etc.)
+  try {
+    const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+    const vTracks = await input.getVideoTracks();
+    if (vTracks.length > 0) {
+      const dur = await vTracks[0].computeDuration();
+      if (dur && Number.isFinite(dur) && dur > 0) {
+        return dur;
+      }
     }
+    const aTracks = await input.getAudioTracks();
+    if (aTracks.length > 0) {
+      const dur = await aTracks[0].computeDuration();
+      if (dur && Number.isFinite(dur) && dur > 0) {
+        return dur;
+      }
+    }
+  } catch (e) {
+    console.warn('Mediabunny duration probe fallback to HTML5 video', e);
+  }
+
+  // 2. HTML5 <video> element fallback with timeout safeguard
+  return new Promise((resolve) => {
     const video = document.createElement('video');
     video.preload = 'metadata';
     const url = URL.createObjectURL(file);
     video.src = url;
-    video.onloadedmetadata = () => {
-      const dur = video.duration || 0;
+
+    const timeout = setTimeout(() => {
       URL.revokeObjectURL(url);
-      resolve(dur > 0 ? dur : 10);
+      resolve(0); // 0 means full length (do not artificially cap at 10 or 15)
+    }, 2000);
+
+    video.onloadedmetadata = () => {
+      clearTimeout(timeout);
+      const dur = video.duration;
+      URL.revokeObjectURL(url);
+      if (dur && Number.isFinite(dur) && dur > 0) {
+        resolve(dur);
+      } else {
+        resolve(0);
+      }
     };
     video.onerror = () => {
+      clearTimeout(timeout);
       URL.revokeObjectURL(url);
-      resolve(10);
+      resolve(0);
     };
   });
 };
@@ -688,14 +723,17 @@ export default function App() {
   };
 
   const handleDurationLoaded = (dur: number) => {
-    if (selectedFiles.length <= 1 || duration === 0) {
+    if (dur > 0 && (selectedFiles.length <= 1 || duration === 0)) {
       setDuration(dur);
-      setSettings((prev) => ({
-        ...prev,
-        duration: dur,
-        startTime: 0,
-        endTime: dur,
-      }));
+      setSettings((prev) => {
+        const isDefaultOrPreset = prev.endTime === 0 || prev.endTime === 10 || prev.endTime === 15 || Math.abs(prev.endTime - prev.duration) < 0.1;
+        return {
+          ...prev,
+          duration: dur,
+          startTime: prev.startTime || 0,
+          endTime: isDefaultOrPreset ? dur : prev.endTime,
+        };
+      });
     }
   };
 
@@ -956,10 +994,16 @@ export default function App() {
           currentFileDuration = await getFileDuration(inputFile);
         }
 
-        let currentStart = settings.startTime;
-        const finalEndTime = (settings.endTime > 0 && settings.endTime < currentFileDuration) ? settings.endTime : currentFileDuration;
+        let currentStart = settings.startTime || 0;
+        // Check if the user explicitly trimmed the video (rather than leaving it at default settings duration)
+        const isUserExplicitTrim =
+          settings.endTime > 0 &&
+          currentFileDuration > 0 &&
+          settings.endTime < currentFileDuration - 0.1 &&
+          (settings.duration > 0 && Math.abs(settings.endTime - settings.duration) > 0.1);
 
-        const isFullLengthRemux = currentStart === 0 && finalEndTime >= currentFileDuration - 0.1;
+        const finalEndTime = isUserExplicitTrim ? settings.endTime : (currentFileDuration > 0 ? currentFileDuration : 0);
+        const isFullLengthRemux = currentStart === 0 && (!isUserExplicitTrim || finalEndTime === 0 || finalEndTime >= currentFileDuration - 0.1);
         const hasVisualModifications =
           Boolean(settings.cropAspect && settings.cropAspect !== 'original') ||
           settings.filter !== 'none' ||
