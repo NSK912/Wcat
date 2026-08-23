@@ -1,5 +1,45 @@
 export type VideoResolution = 'original' | '480' | '720' | '1080' | '2k' | '4k' | '8k';
 export type EncodeSpeed = 'slow' | 'medium' | 'fast' | 'ultra-fast';
+export type MediaType = 'any' | 'video' | 'audio' | 'image' | 'text';
+export type TrackColor = 'indigo' | 'violet' | 'emerald' | 'amber' | 'rose' | 'cyan' | 'fuchsia';
+
+export interface ClipTransform {
+  x: number; // percentage from center (50 = centered, 0 = left edge, 100 = right edge)
+  y: number; // percentage from center (50 = centered, 0 = top edge, 100 = bottom edge)
+  scale: number; // 1.0 is default size (0.1 to 3.0)
+  rotation?: number; // 0, 90, 180, 270 deg
+  opacity?: number; // 0 to 1
+  widthPct?: number; // optional custom width percentage
+  heightPct?: number;
+}
+
+export interface TimelineClip {
+  id: string;
+  name: string;
+  mediaType: MediaType;
+  startTime: number;
+  endTime: number;
+  sourceStartTime?: number;
+  sourceEndTime?: number;
+  fileDuration?: number;
+  file?: File;
+  fileName?: string;
+  previewUrl?: string;
+  color?: TrackColor;
+  transform?: ClipTransform;
+}
+
+export interface TimelineTrackData {
+  id: string;
+  name: string;
+  mediaType: MediaType;
+  color: TrackColor;
+  clips: TimelineClip[];
+  muted: boolean;
+  locked: boolean;
+  hidden: boolean;
+  volume?: number;
+}
 
 export interface EditSettings {
   startTime: number;
@@ -38,3 +78,4 @@ export interface SampleVideo {
   duration: number;
   thumbnail: string;
 }
+

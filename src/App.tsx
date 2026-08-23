@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { EditSettings, ActiveTab, SampleVideo } from './types';
+import { EditSettings, ActiveTab, SampleVideo, TimelineTrackData, ClipTransform } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
 import { processNativeConcatStream, processNativeTrimStream, processNativeRemuxStream } from './utils/WEngine';
 import {
@@ -64,6 +64,29 @@ const getFileDuration = async (file: File): Promise<number> => {
   });
 };
 
+const INITIAL_TIMELINE_TRACKS: TimelineTrackData[] = [
+  {
+    id: 'track-1',
+    name: 'Track 1',
+    mediaType: 'any',
+    color: 'indigo',
+    clips: [],
+    muted: false,
+    locked: false,
+    hidden: false,
+  },
+  {
+    id: 'track-2',
+    name: 'Track 2',
+    mediaType: 'any',
+    color: 'violet',
+    clips: [],
+    muted: false,
+    locked: false,
+    hidden: false,
+  },
+];
+
 export default function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoName, setVideoName] = useState<string>('');
@@ -101,6 +124,31 @@ export default function App() {
   const [clipEndTime, setClipEndTime] = useState<number>(0);
   const [hasActiveClip, setHasActiveClip] = useState<boolean>(false);
   const [activeAudioClips, setActiveAudioClips] = useState<{ id: string; url: string; startTime: number; sourceStartTime: number }[]>([]);
+  const [tracks, setTracks] = useState<TimelineTrackData[]>(INITIAL_TIMELINE_TRACKS);
+
+  const handleUpdateClipTransform = useCallback(
+    (trackId: string, clipId: string, transform: ClipTransform) => {
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id !== trackId) return t;
+          return {
+            ...t,
+            clips: t.clips.map((c) => {
+              if (c.id !== clipId) return c;
+              return {
+                ...c,
+                transform: {
+                  ...(c.transform || {}),
+                  ...transform,
+                },
+              };
+            }),
+          };
+        })
+      );
+    },
+    []
+  );
 
   const singleFileInputRef = useRef<HTMLInputElement>(null);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
@@ -287,29 +335,43 @@ export default function App() {
       audioClips: { id: string; file: File; startTime: number; sourceStartTime: number }[] = []
     ) => {
       if (!file && audioClips.length === 0) {
-        setHasActiveClip(false);
-        setVideoUrl(null);
-        setMediaOffset(0);
-        setSourceStartTime(0);
-        setClipEndTime(0);
-        setActiveAudioClips([]);
+        setHasActiveClip((prev) => (prev ? false : prev));
+        setVideoUrl((prev) => (prev !== null ? null : prev));
+        setMediaOffset((prev) => (prev !== 0 ? 0 : prev));
+        setSourceStartTime((prev) => (prev !== 0 ? 0 : prev));
+        setClipEndTime((prev) => (prev !== 0 ? 0 : prev));
+        setActiveAudioClips((prev) => (prev.length === 0 ? prev : []));
         return;
       }
       const url = file ? getOrCreateFileUrl(file) : null;
-      setHasActiveClip(true);
+      setHasActiveClip((prev) => (!prev ? true : prev));
       setVideoUrl((prev) => (prev !== url ? url : prev));
       setVideoName((prev) => (file && prev !== file.name ? file.name : prev));
       setMediaOffset((prev) => (prev !== clipStartTime ? clipStartTime : prev));
       setSourceStartTime((prev) => (prev !== clipSourceStart ? clipSourceStart : prev));
       setClipEndTime((prev) => (prev !== clipEnd ? clipEnd : prev));
-      
-      const aClips = audioClips.map(c => ({
+
+      const aClips = audioClips.map((c) => ({
         id: c.id,
         url: getOrCreateFileUrl(c.file),
         startTime: c.startTime,
-        sourceStartTime: c.sourceStartTime
+        sourceStartTime: c.sourceStartTime,
       }));
-      setActiveAudioClips(aClips);
+      setActiveAudioClips((prev) => {
+        if (
+          prev.length === aClips.length &&
+          prev.every(
+            (p, i) =>
+              p.id === aClips[i].id &&
+              p.url === aClips[i].url &&
+              Math.abs(p.startTime - aClips[i].startTime) < 0.001 &&
+              Math.abs(p.sourceStartTime - aClips[i].sourceStartTime) < 0.001
+          )
+        ) {
+          return prev;
+        }
+        return aClips;
+      });
     },
     [getOrCreateFileUrl]
   );
@@ -890,6 +952,8 @@ export default function App() {
               }}
               videoName={videoName}
               selectedFile={selectedFiles.length > 0 ? selectedFiles[0] : undefined}
+              tracks={tracks}
+              onUpdateClipTransform={handleUpdateClipTransform}
             />
           </div>
 
@@ -915,6 +979,8 @@ export default function App() {
             isLoaded={!!videoUrl}
             isProcessing={isProcessingModalOpen}
             isEncodeMode={isEncodeMode}
+            tracks={tracks}
+            onTracksChange={setTracks}
           />
         </div>
 

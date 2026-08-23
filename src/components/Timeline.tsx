@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Play,
   Pause,
@@ -37,36 +37,15 @@ import {
 import { formatTime } from '../utils/sampleVideos';
 import wcatSeekPng from '../../assets/Wcat seek.png';
 import wcatSeekSvg from '../../public/wcat-seek.svg';
+import {
+  MediaType,
+  TrackColor,
+  TimelineClip,
+  TimelineTrackData,
+  ClipTransform,
+} from '../types';
 
-export type MediaType = 'any' | 'video' | 'audio' | 'image' | 'text';
-export type TrackColor = 'indigo' | 'violet' | 'emerald' | 'amber' | 'rose' | 'cyan' | 'fuchsia';
-
-export interface TimelineClip {
-  id: string;
-  name: string;
-  mediaType: MediaType;
-  startTime: number;
-  endTime: number;
-  sourceStartTime?: number;
-  sourceEndTime?: number;
-  fileDuration?: number;
-  file?: File;
-  fileName?: string;
-  previewUrl?: string;
-  color?: TrackColor;
-}
-
-export interface TimelineTrackData {
-  id: string;
-  name: string;
-  mediaType: MediaType;
-  color: TrackColor;
-  clips: TimelineClip[];
-  muted: boolean;
-  locked: boolean;
-  hidden: boolean;
-  volume?: number;
-}
+export type { MediaType, TrackColor, TimelineClip, TimelineTrackData, ClipTransform };
 
 interface TimelineProps {
   currentTime: number;
@@ -97,6 +76,8 @@ interface TimelineProps {
   isLoaded: boolean;
   isProcessing: boolean;
   isEncodeMode?: boolean;
+  tracks?: TimelineTrackData[];
+  onTracksChange?: React.Dispatch<React.SetStateAction<TimelineTrackData[]>> | ((tracks: TimelineTrackData[]) => void);
 }
 
 const COLOR_CLASSES: Record<TrackColor, {
@@ -203,6 +184,8 @@ export const Timeline: React.FC<TimelineProps> = ({
   onFullscreenClick,
   isProcessing,
   isEncodeMode = false,
+  tracks: propsTracks,
+  onTracksChange,
 }) => {
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
@@ -212,7 +195,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [editingName, setEditingName] = useState<string>('');
 
   // Universal, Free-form Timeline Tracks (Each track holds MULTIPLE independent clips)
-  const [tracks, setTracks] = useState<TimelineTrackData[]>([
+  const [internalTracks, setInternalTracks] = useState<TimelineTrackData[]>([
     {
       id: 'track-1',
       name: 'Track 1',
@@ -234,6 +217,9 @@ export const Timeline: React.FC<TimelineProps> = ({
       hidden: false,
     },
   ]);
+
+  const tracks = propsTracks ?? internalTracks;
+  const setTracks = (onTracksChange as unknown as React.Dispatch<React.SetStateAction<TimelineTrackData[]>>) ?? setInternalTracks;
 
   const trimContainerRef = useRef<HTMLDivElement>(null);
   const tracksStackRef = useRef<HTMLDivElement>(null);
@@ -361,19 +347,24 @@ export const Timeline: React.FC<TimelineProps> = ({
       const fileDur = video.duration || 10;
       setFileDurations((prev) => ({ ...prev, [key]: fileDur }));
 
-      setTracks((prev) =>
-        prev.map((t) => ({
+      setTracks((prev) => {
+        let changed = false;
+        const nextTracks = prev.map((t) => ({
           ...t,
           clips: t.clips.map((c) => {
             if (c.file && getFileKey(c.file) === key) {
               const currentDuration = c.endTime - c.startTime;
               const newEnd = currentDuration <= 10 || currentDuration === 0 ? c.startTime + fileDur : c.endTime;
-              return { ...c, fileDuration: fileDur, endTime: newEnd };
+              if (c.fileDuration !== fileDur || c.endTime !== newEnd) {
+                changed = true;
+                return { ...c, fileDuration: fileDur, endTime: newEnd };
+              }
             }
             return c;
           }),
-        }))
-      );
+        }));
+        return changed ? nextTracks : prev;
+      });
 
       const step = fileDur / count;
 
@@ -416,7 +407,8 @@ export const Timeline: React.FC<TimelineProps> = ({
 
       // 1. Image File Preview
       if (mediaType === 'image') {
-        if (!fileThumbnails[key]) {
+        if (!inFlightExtractionsRef.current.has(key)) {
+          inFlightExtractionsRef.current.add(key);
           const imgUrl = URL.createObjectURL(file);
           setFileThumbnails((prev) => ({ ...prev, [key]: [imgUrl] }));
           setFileDurations((prev) => ({ ...prev, [key]: 5 }));
@@ -2095,8 +2087,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                   >
                     {/* Empty Track Placeholder (if no clip on this track) */}
                     {!hasClips && (
-                      <div className="absolute inset-x-2 top-2 bottom-2 rounded border border-dashed border-white/15 flex items-center justify-center space-x-2 text-slate-500 text-[10px] pointer-events-none select-none">
-                        <span>Drop clip here or click 'Media' on the left to attach</span>
+                      <div className="absolute inset-x-2 top-2 bottom-2 rounded border border-dashed border-white/15 pointer-events-none select-none">
                       </div>
                     )}
 

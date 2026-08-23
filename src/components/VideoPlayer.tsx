@@ -1,12 +1,18 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { EditSettings } from '../types';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import {
+  EditSettings,
+  TimelineTrackData,
+  TimelineClip,
+  ClipTransform,
+  MediaType,
+  TrackColor,
+} from '../types';
 import {
   Play,
   Pause,
   AlertTriangle,
   RefreshCw,
   Check,
-  Scaling,
   Monitor,
   Tv,
   Square,
@@ -16,6 +22,27 @@ import {
   Lock,
   Crop,
   Move,
+  Maximize2,
+  Minimize2,
+  ZoomIn,
+  ZoomOut,
+  Sliders,
+  Layers,
+  Image as ImageIcon,
+  Video as VideoIcon,
+  X,
+  Target,
+  RotateCw,
+  ArrowUpLeft,
+  ArrowUpRight,
+  ArrowDownLeft,
+  ArrowDownRight,
+  ArrowUp,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  LayoutGrid,
+  ChevronDown,
 } from 'lucide-react';
 
 interface VideoPlayerProps {
@@ -38,6 +65,8 @@ interface VideoPlayerProps {
   isEncodeMode?: boolean;
   videoName?: string;
   selectedFile?: File;
+  tracks?: TimelineTrackData[];
+  onUpdateClipTransform?: (trackId: string, clipId: string, transform: ClipTransform) => void;
 }
 
 interface AspectOption {
@@ -86,6 +115,20 @@ const ASPECT_OPTIONS: AspectOption[] = [
 
 type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
 
+interface ActiveLayerItem {
+  trackId: string;
+  trackName: string;
+  trackColor: TrackColor;
+  trackIndex: number;
+  clip: TimelineClip;
+  mediaType: 'video' | 'image';
+  url: string;
+  transform: ClipTransform;
+  muted: boolean;
+  locked: boolean;
+  volume: number;
+}
+
 const AudioTrack: React.FC<{
   clip: { id: string; url: string; startTime: number; sourceStartTime: number };
   currentTime: number;
@@ -122,7 +165,7 @@ const AudioTrack: React.FC<{
   useEffect(() => {
     if (audioRef.current) {
       if (isPlaying) {
-        audioRef.current.play().catch(err => console.warn('Audio play failed:', err));
+        audioRef.current.play().catch((err) => console.warn('Audio play failed:', err));
       } else {
         audioRef.current.pause();
       }
@@ -139,6 +182,80 @@ const AudioTrack: React.FC<{
         if (isMasterTimekeeper && audioRef.current && isPlaying && onTimeUpdate) {
           const mappedTime = clip.startTime + (audioRef.current.currentTime - clip.sourceStartTime);
           onTimeUpdate(mappedTime);
+        }
+      }}
+    />
+  );
+};
+
+// Layer Video Player Component for Multi-Track Playback in Encode Mode
+const LayerVideoElement: React.FC<{
+  layer: ActiveLayerItem;
+  currentTime: number;
+  isPlaying: boolean;
+  playbackRate: number;
+  filterStyle?: string;
+  isMaster?: boolean;
+  onTimeUpdate?: (time: number) => void;
+  onDurationLoaded?: (dur: number) => void;
+}> = ({ layer, currentTime, isPlaying, playbackRate, filterStyle, isMaster, onTimeUpdate, onDurationLoaded }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = playbackRate;
+      videoRef.current.volume = layer.muted ? 0 : layer.volume;
+      videoRef.current.muted = layer.muted;
+    }
+  }, [playbackRate, layer.muted, layer.volume]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      const targetTime = Math.max(0, (layer.clip.sourceStartTime || 0) + (currentTime - layer.clip.startTime));
+      if (!isPlaying) {
+        if (Math.abs(videoRef.current.currentTime - targetTime) > 0.005) {
+          videoRef.current.currentTime = targetTime;
+        }
+      } else {
+        if (Math.abs(videoRef.current.currentTime - targetTime) > 0.25) {
+          videoRef.current.currentTime = targetTime;
+        }
+      }
+    }
+  }, [currentTime, layer.clip.startTime, layer.clip.sourceStartTime, isPlaying]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      if (isPlaying) {
+        videoRef.current.play().catch((err) => console.warn('Layer video playback paused:', err));
+      } else {
+        videoRef.current.pause();
+      }
+    }
+  }, [isPlaying, layer.url]);
+
+  return (
+    <video
+      ref={videoRef}
+      src={layer.url}
+      playsInline
+      preload="auto"
+      muted={layer.muted}
+      className="w-full h-auto max-w-none block pointer-events-none select-none rounded shadow-md object-cover"
+      style={{
+        filter: filterStyle,
+        opacity: layer.transform.opacity ?? 1,
+      }}
+      onTimeUpdate={() => {
+        if (isMaster && videoRef.current && isPlaying && onTimeUpdate) {
+          const mappedTime = layer.clip.startTime + (videoRef.current.currentTime - (layer.clip.sourceStartTime || 0));
+          onTimeUpdate(mappedTime);
+        }
+      }}
+      onLoadedMetadata={(e) => {
+        const v = e.target as HTMLVideoElement;
+        if (isMaster && onDurationLoaded && v.duration > 0) {
+          onDurationLoaded(v.duration);
         }
       }}
     />
@@ -163,13 +280,41 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onToggleEncodeMode,
   isEncodeMode = false,
   videoName,
+  tracks = [],
+  onUpdateClipTransform,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoWrapperRef = useRef<HTMLDivElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const singleVideoRef = useRef<HTMLVideoElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+
+  // Selected layer for direct manipulation (drag & transform)
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [isDraggingLayer, setIsDraggingLayer] = useState<boolean>(false);
+  const [isResizingLayerCorner, setIsResizingLayerCorner] = useState<string | null>(null);
+  const layerDragStateRef = useRef<{
+    clipId: string;
+    trackId: string;
+    startX: number;
+    startY: number;
+    initialTransform: ClipTransform;
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
+
+  // File URL Cache to prevent redundant object URLs
+  const fileUrlCacheRef = useRef<Map<File, string>>(new Map());
+  const getFileUrl = useCallback((file?: File): string => {
+    if (!file) return '';
+    let existing = fileUrlCacheRef.current.get(file);
+    if (!existing) {
+      existing = URL.createObjectURL(file);
+      fileUrlCacheRef.current.set(file, existing);
+    }
+    return existing;
+  }, []);
 
   const effectiveAspect = isEncodeMode
     ? (!settings.cropAspect || settings.cropAspect === 'original' ? '16:9' : settings.cropAspect)
@@ -181,6 +326,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Dragging state for free crop
   const [isDraggingCrop, setIsDraggingCrop] = useState<boolean>(false);
+  const [isAlignMenuOpen, setIsAlignMenuOpen] = useState<boolean>(false);
+  const alignMenuRef = useRef<HTMLDivElement>(null);
   const dragInfoRef = useRef<{
     handle: DragHandle;
     startX: number;
@@ -193,76 +340,41 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // Reset error state and context menu when video URL or mode changes
   useEffect(() => {
     setLoadError(null);
-  }, [videoUrl, videoName, isEncodeMode]);
+  }, [videoUrl]);
 
   useEffect(() => {
     if (!isEncodeMode) {
       setContextMenu(null);
+      setSelectedClipId(null);
+      setIsAlignMenuOpen(false);
     }
   }, [isEncodeMode]);
 
-  // Handle outside clicks to close context menu
+  // Handle outside clicks to close context menu and align menu
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setContextMenu(null);
       }
+      if (alignMenuRef.current && !alignMenuRef.current.contains(e.target as Node)) {
+        setIsAlignMenuOpen(false);
+      }
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setContextMenu(null);
+        setSelectedClipId(null);
+        setIsAlignMenuOpen(false);
       }
     };
 
-    if (contextMenu) {
-      document.addEventListener('mousedown', handleOutsideClick);
-      document.addEventListener('keydown', handleKeyDown);
-      return () => {
-        document.removeEventListener('mousedown', handleOutsideClick);
-        document.removeEventListener('keydown', handleKeyDown);
-      };
-    }
-  }, [contextMenu]);
-
-  useEffect(() => {
-    if (videoRef.current) {
-      if (isPlaying && hasActiveClip && videoUrl && !loadError) {
-        const promise = videoRef.current.play();
-        if (promise !== undefined) {
-          promise.catch((err) => {
-            console.warn('Playback paused or not permitted:', err);
-          });
-        }
-      } else {
-        videoRef.current.pause();
-      }
-    }
-  }, [isPlaying, videoUrl, loadError, hasActiveClip]);
-
-  useEffect(() => {
-    if (videoRef.current && hasActiveClip && videoUrl) {
-      const localTarget = Math.max(0, sourceStartTime + (currentTime - mediaOffset));
-      if (!isPlaying) {
-        // Immediate seek when paused or scrubbing
-        if (Math.abs(videoRef.current.currentTime - localTarget) > 0.005) {
-          videoRef.current.currentTime = localTarget;
-        }
-      } else {
-        // During playback, resync only if drift is significant
-        if (Math.abs(videoRef.current.currentTime - localTarget) > 0.25) {
-          videoRef.current.currentTime = localTarget;
-        }
-      }
-    }
-  }, [currentTime, mediaOffset, sourceStartTime, hasActiveClip, videoUrl, isPlaying]);
-
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = settings.speed;
-      videoRef.current.volume = settings.muteAudio ? 0 : settings.volume;
-      videoRef.current.muted = isEncodeMode || settings.muteAudio;
-    }
-  }, [settings.speed, settings.volume, settings.muteAudio, isEncodeMode]);
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   // Compute CSS filter string for live preview
   const getCssFilter = () => {
@@ -292,8 +404,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return f;
   };
 
-  // Compute transform
-  const getTransform = () => {
+  // Compute global transform
+  const getGlobalTransform = () => {
     if (!settings.rotation && !settings.flipH && !settings.flipV) {
       return undefined;
     }
@@ -346,34 +458,334 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
-  const handleVideoError = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
-    const mediaErr = e.currentTarget.error;
-    let detail = 'Browser cannot preview this video directly';
-    if (mediaErr) {
-      switch (mediaErr.code) {
-        case 1: // MEDIA_ERR_ABORTED
-          detail = 'Video playback was aborted';
-          break;
-        case 2: // MEDIA_ERR_NETWORK
-          detail = 'Network error loading video';
-          break;
-        case 3: // MEDIA_ERR_DECODE
-          detail = 'Decode error (unsupported audio/video codec)';
-          break;
-        case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
-          detail = 'Video format not supported natively in browser preview (Remux or Encode Mode can still process it)';
-          break;
-      }
-    }
-    setLoadError(detail);
-  };
+  // =========================================================================
+  // 🎛️ ACTIVE VISUAL LAYERS RESOLUTION (ENCODE MODE)
+  // =========================================================================
+  const activeLayers: ActiveLayerItem[] = useMemo(() => {
+    if (!isEncodeMode || !tracks || tracks.length === 0) return [];
 
-  // Right-click context menu handler (Only activates on the video preview box when Encode Mode is enabled)
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    // In default Copy Mode, encode features/context menus are completely disabled
-    if (!isEncodeMode || !videoUrl || loadError) {
+    const list: ActiveLayerItem[] = [];
+
+    tracks.forEach((track, trackIdx) => {
+      if (track.hidden) return;
+
+      // Find clip on this track at current time
+      const match = track.clips.find(
+        (c) => c.startTime <= currentTime && currentTime <= c.endTime
+      );
+
+      if (!match) return;
+
+      const isVideo =
+        match.mediaType === 'video' ||
+        (match.file && (match.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(match.file.name)));
+
+      const isImage =
+        match.mediaType === 'image' ||
+        (match.file && (match.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(match.file.name)));
+
+      if (!isVideo && !isImage) return;
+
+      const url = match.previewUrl || (match.file ? getFileUrl(match.file) : '');
+      if (!url) return;
+
+      // Default transform if none set:
+      // Track 1 (base layer): center full frame 1.0
+      // Track 2+ (overlay layers): default nice overlay scale (e.g. 0.4) centered
+      const defaultTransform: ClipTransform = {
+        x: 50,
+        y: 50,
+        scale: trackIdx === 0 ? 1.0 : 0.45,
+        rotation: 0,
+        opacity: 1,
+      };
+
+      list.push({
+        trackId: track.id,
+        trackName: track.name,
+        trackColor: track.color,
+        trackIndex: trackIdx,
+        clip: match,
+        mediaType: isVideo ? 'video' : 'image',
+        url,
+        transform: match.transform ? { ...defaultTransform, ...match.transform } : defaultTransform,
+        muted: track.muted || settings.muteAudio,
+        locked: !!track.locked,
+        volume: track.volume ?? 1,
+      });
+    });
+
+    return list;
+  }, [isEncodeMode, tracks, currentTime, settings.muteAudio, getFileUrl]);
+
+  // Selected layer item reference
+  const activeSelectedLayer = useMemo(() => {
+    return activeLayers.find((l) => l.clip.id === selectedClipId) || null;
+  }, [activeLayers, selectedClipId]);
+
+  // =========================================================================
+  // 🖐️ DIRECT DRAG & DROP FOR PREVIEW LAYERS (ภาพและวีดีโอจับลากได้เลย)
+  // =========================================================================
+  const handlePointerDownLayer = (
+    e: React.PointerEvent,
+    layer: ActiveLayerItem,
+    corner?: string
+  ) => {
+    if (!isEncodeMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    setSelectedClipId(layer.clip.id);
+
+    if (layer.locked) {
+      layerDragStateRef.current = null;
       return;
     }
+
+    if (!videoWrapperRef.current) return;
+    const rect = videoWrapperRef.current.getBoundingClientRect();
+
+    layerDragStateRef.current = {
+      clipId: layer.clip.id,
+      trackId: layer.trackId,
+      startX: e.clientX,
+      startY: e.clientY,
+      initialTransform: { ...layer.transform },
+      containerWidth: rect.width,
+      containerHeight: rect.height,
+    };
+
+    if (corner) {
+      setIsResizingLayerCorner(corner);
+    } else {
+      setIsDraggingLayer(true);
+    }
+  };
+
+  useEffect(() => {
+    if (!isDraggingLayer && !isResizingLayerCorner) return;
+
+    const handlePointerMove = (e: MouseEvent) => {
+      if (!layerDragStateRef.current) return;
+      const {
+        clipId,
+        trackId,
+        startX,
+        startY,
+        initialTransform,
+        containerWidth,
+        containerHeight,
+      } = layerDragStateRef.current;
+
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
+
+      if (isDraggingLayer) {
+        // Calculate new X & Y position in container percentage
+        const pctX = (deltaX / Math.max(10, containerWidth)) * 100;
+        const pctY = (deltaY / Math.max(10, containerHeight)) * 100;
+
+        const newX = Math.max(-20, Math.min(120, Math.round((initialTransform.x + pctX) * 10) / 10));
+        const newY = Math.max(-20, Math.min(120, Math.round((initialTransform.y + pctY) * 10) / 10));
+
+        if (onUpdateClipTransform) {
+          onUpdateClipTransform(trackId, clipId, {
+            ...initialTransform,
+            x: newX,
+            y: newY,
+          });
+        }
+      } else if (isResizingLayerCorner) {
+        // Determine directional multiplier based on the corner being dragged
+        let dirX = 1;
+        let dirY = 1;
+        if (isResizingLayerCorner === 'nw') {
+          dirX = -1;
+          dirY = -1;
+        } else if (isResizingLayerCorner === 'ne') {
+          dirX = 1;
+          dirY = -1;
+        } else if (isResizingLayerCorner === 'sw') {
+          dirX = -1;
+          dirY = 1;
+        } else if (isResizingLayerCorner === 'se') {
+          dirX = 1;
+          dirY = 1;
+        }
+
+        // Account for layer rotation if any
+        const rotRad = ((initialTransform.rotation || 0) * Math.PI) / 180;
+        const cos = Math.cos(rotRad);
+        const sin = Math.sin(rotRad);
+
+        // Vector from center outward along corner
+        const rotatedDirX = dirX * cos - dirY * sin;
+        const rotatedDirY = dirX * sin + dirY * cos;
+
+        // Project mouse displacement onto the outward corner axis
+        const projectedDelta = (deltaX * rotatedDirX + deltaY * rotatedDirY) / Math.SQRT2;
+        
+        // Base sensitivity on container width for smooth responsive scaling
+        const sensitivity = Math.max(120, containerWidth * 0.35);
+        const scaleChange = projectedDelta / sensitivity;
+        const newScale = Math.max(
+          0.05,
+          Math.min(4.0, Math.round((initialTransform.scale + scaleChange) * 100) / 100)
+        );
+
+        if (onUpdateClipTransform) {
+          onUpdateClipTransform(trackId, clipId, {
+            ...initialTransform,
+            scale: newScale,
+          });
+        }
+      }
+    };
+
+    const handlePointerUp = () => {
+      setIsDraggingLayer(false);
+      setIsResizingLayerCorner(null);
+      layerDragStateRef.current = null;
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [isDraggingLayer, isResizingLayerCorner, onUpdateClipTransform]);
+
+  // Corner & Position Alignment calculation helper for encode preview box
+  const handleAlignLayer = (
+    position: 'tl' | 'tr' | 'bl' | 'br' | 'tc' | 'bc' | 'lc' | 'rc' | 'center',
+    customScale?: number
+  ) => {
+    if (!activeSelectedLayer || !onUpdateClipTransform) return;
+    const currentScale = customScale ?? activeSelectedLayer.transform.scale;
+
+    const wrapper = videoWrapperRef.current;
+    const layerEl = wrapper?.querySelector(`[data-layer-id="${activeSelectedLayer.clip.id}"]`) as HTMLElement | null;
+
+    let halfWPct = (currentScale * 100) / 2;
+    let halfHPct = (currentScale * 100 * 0.5625) / 2;
+
+    if (wrapper && layerEl) {
+      const wrapperRect = wrapper.getBoundingClientRect();
+      const unscaledW = layerEl.offsetWidth;
+      const unscaledH = layerEl.offsetHeight;
+
+      if (wrapperRect.width > 0 && wrapperRect.height > 0 && unscaledW > 0 && unscaledH > 0) {
+        const visualWPx = unscaledW * currentScale;
+        const visualHPx = unscaledH * currentScale;
+        halfWPct = (visualWPx / 2 / wrapperRect.width) * 100;
+        halfHPct = (visualHPx / 2 / wrapperRect.height) * 100;
+      }
+    }
+
+    // Neat margin from the edge of the preview container (e.g. 1.0%)
+    const margin = 1.0;
+
+    let targetX = 50;
+    let targetY = 50;
+
+    switch (position) {
+      case 'tl': // Top-Left corner (มุมซ้ายบน)
+        targetX = halfWPct + margin;
+        targetY = halfHPct + margin;
+        break;
+      case 'tr': // Top-Right corner (มุมขวาบน)
+        targetX = 100 - (halfWPct + margin);
+        targetY = halfHPct + margin;
+        break;
+      case 'bl': // Bottom-Left corner (มุมซ้ายล่าง)
+        targetX = halfWPct + margin;
+        targetY = 100 - (halfHPct + margin);
+        break;
+      case 'br': // Bottom-Right corner (มุมขวาล่าง)
+        targetX = 100 - (halfWPct + margin);
+        targetY = 100 - (halfHPct + margin);
+        break;
+      case 'tc': // Top-Center (กึ่งกลางบน)
+        targetX = 50;
+        targetY = halfHPct + margin;
+        break;
+      case 'bc': // Bottom-Center (กึ่งกลางล่าง)
+        targetX = 50;
+        targetY = 100 - (halfHPct + margin);
+        break;
+      case 'lc': // Left-Center (กึ่งกลางซ้าย)
+        targetX = halfWPct + margin;
+        targetY = 50;
+        break;
+      case 'rc': // Right-Center (กึ่งกลางขวา)
+        targetX = 100 - (halfWPct + margin);
+        targetY = 50;
+        break;
+      case 'center': // Center (ตรงกลาง)
+      default:
+        targetX = 50;
+        targetY = 50;
+        break;
+    }
+
+    // Clamp within container boundaries so layer never overflows
+    if (halfWPct * 2 < 100) {
+      targetX = Math.max(halfWPct + margin, Math.min(100 - (halfWPct + margin), targetX));
+    }
+    if (halfHPct * 2 < 100) {
+      targetY = Math.max(halfHPct + margin, Math.min(100 - (halfHPct + margin), targetY));
+    }
+
+    onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+      ...activeSelectedLayer.transform,
+      x: Math.round(targetX * 10) / 10,
+      y: Math.round(targetY * 10) / 10,
+      ...(customScale !== undefined ? { scale: customScale } : {}),
+    });
+  };
+
+  // Single video player event handlers for Copy Mode / standard playback
+  useEffect(() => {
+    if (!isEncodeMode || activeLayers.length === 0) {
+      if (singleVideoRef.current) {
+        if (isPlaying && hasActiveClip && videoUrl && !loadError) {
+          singleVideoRef.current.play().catch((err) => console.warn('Playback paused:', err));
+        } else {
+          singleVideoRef.current.pause();
+        }
+      }
+    }
+  }, [isPlaying, videoUrl, loadError, hasActiveClip, isEncodeMode, activeLayers.length]);
+
+  useEffect(() => {
+    if (!isEncodeMode || activeLayers.length === 0) {
+      if (singleVideoRef.current && hasActiveClip && videoUrl) {
+        const localTarget = Math.max(0, sourceStartTime + (currentTime - mediaOffset));
+        if (!isPlaying) {
+          if (Math.abs(singleVideoRef.current.currentTime - localTarget) > 0.005) {
+            singleVideoRef.current.currentTime = localTarget;
+          }
+        } else {
+          if (Math.abs(singleVideoRef.current.currentTime - localTarget) > 0.25) {
+            singleVideoRef.current.currentTime = localTarget;
+          }
+        }
+      }
+    }
+  }, [currentTime, mediaOffset, sourceStartTime, hasActiveClip, videoUrl, isPlaying, isEncodeMode, activeLayers.length]);
+
+  useEffect(() => {
+    if (singleVideoRef.current) {
+      singleVideoRef.current.playbackRate = settings.speed;
+      singleVideoRef.current.volume = settings.muteAudio ? 0 : settings.volume;
+      singleVideoRef.current.muted = isEncodeMode || settings.muteAudio;
+    }
+  }, [settings.speed, settings.volume, settings.muteAudio, isEncodeMode]);
+
+  // Right-click context menu handler (Aspect ratio picker)
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    if (!isEncodeMode || !videoUrl || loadError) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -405,20 +817,15 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
 
     if (!isEncodeMode && aspect !== 'original') {
-      // Auto enable Encode Mode if user chooses a scaled/crop aspect ratio
-      if (onToggleEncodeMode) {
-        onToggleEncodeMode();
-      }
+      if (onToggleEncodeMode) onToggleEncodeMode();
       newSettings.encodeMode = true;
     }
 
-    if (onUpdateSettings) {
-      onUpdateSettings(newSettings);
-    }
+    if (onUpdateSettings) onUpdateSettings(newSettings);
     setContextMenu(null);
   };
 
-  // --- Interactive Dragging & Resizing Handles for Free Crop ---
+  // Free Crop mouse handlers
   const handleMouseDownCrop = (e: React.MouseEvent, handle: DragHandle) => {
     e.preventDefault();
     e.stopPropagation();
@@ -449,18 +856,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       const dy = (e.clientY - startY) / Math.max(10, containerHeight);
 
       let { x, y, width, height } = { ...startRect };
-      const minSize = 0.1; // 10% min crop size
+      const minSize = 0.1;
 
       if (handle === 'move') {
         x = Math.max(0, Math.min(1 - width, startRect.x + dx));
         y = Math.max(0, Math.min(1 - height, startRect.y + dy));
       } else {
-        if (handle.includes('e')) {
-          width = Math.max(minSize, Math.min(1 - x, startRect.width + dx));
-        }
-        if (handle.includes('s')) {
-          height = Math.max(minSize, Math.min(1 - y, startRect.height + dy));
-        }
+        if (handle.includes('e')) width = Math.max(minSize, Math.min(1 - x, startRect.width + dx));
+        if (handle.includes('s')) height = Math.max(minSize, Math.min(1 - y, startRect.height + dy));
         if (handle.includes('w')) {
           const maxLeftShift = startRect.x + startRect.width - minSize;
           const newX = Math.max(0, Math.min(maxLeftShift, startRect.x + dx));
@@ -500,13 +903,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [isDraggingCrop, onUpdateSettings]);
 
+  const hasLayers = isEncodeMode && activeLayers.length > 0;
+
   return (
     <div
       ref={containerRef}
       className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-6 overflow-hidden select-none"
       style={{ containerType: 'size' }}
+      onClick={(e) => {
+        // Deselect layer when clicking outside preview box
+        if (e.target === containerRef.current) {
+          setSelectedClipId(null);
+        }
+      }}
     >
-      {!videoUrl && (!selectedFiles || selectedFiles.length === 0) ? (
+      {!videoUrl && (!selectedFiles || selectedFiles.length === 0) && (!tracks || tracks.every((t) => t.clips.length === 0)) ? (
         <div className="flex flex-col items-center gap-4">
           <div className="flex items-center space-x-2">
             {/* YouTube Icon Link */}
@@ -562,9 +973,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <button
               onClick={() => {
                 setLoadError(null);
-                if (videoRef.current) {
-                  videoRef.current.load();
-                }
+                if (singleVideoRef.current) singleVideoRef.current.load();
               }}
               className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg border border-white/10 flex items-center space-x-1 transition cursor-pointer"
             >
@@ -577,10 +986,156 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         <div
           ref={videoWrapperRef}
           onContextMenu={handleContextMenu}
-          className={`relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center transition-all duration-300`}
+          onClick={(e) => {
+            if (e.target === videoWrapperRef.current) {
+              setSelectedClipId(null);
+            }
+          }}
+          className="relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center transition-all duration-300 select-none"
           style={getAspectStyle()}
         >
-          {hasActiveClip && (videoUrl || (isEncodeMode && activeAudioClips && activeAudioClips.length > 0)) ? (
+          {/* ================================================================= */}
+          {/* 🔴 ENCODE MODE: MULTI-TRACK LAYER COMPOSITOR (DRAGGABLE LAYERS)   */}
+          {/* ================================================================= */}
+          {hasLayers ? (
+            <div className="relative w-full h-full overflow-hidden bg-black">
+              {activeLayers.map((layer, idx) => {
+                const isSelected = selectedClipId === layer.clip.id;
+                // STRICT TRACK ORDER HIERARCHY:
+                // Layer z-index strictly follows the timeline track order:
+                // Track 1 (Index 0) -> z-index 10 (base)
+                // Track 2 (Index 1) -> z-index 20 (overlay)
+                // Track 3 (Index 2) -> z-index 30 (top overlay)
+                // Selection NEVER elevates lower tracks above higher tracks!
+                const layerZIndex = (layer.trackIndex + 1) * 10;
+
+                return (
+                  <div
+                    key={layer.clip.id}
+                    data-layer-id={layer.clip.id}
+                    onPointerDown={(e) => handlePointerDownLayer(e, layer)}
+                    className={`absolute transition-shadow ${
+                      layer.locked ? 'cursor-default' : 'cursor-move'
+                    } ${
+                      isSelected
+                        ? 'ring-2 ring-violet-400 ring-offset-2 ring-offset-black shadow-2xl'
+                        : 'hover:ring-1 hover:ring-white/40'
+                    }`}
+                    style={{
+                      left: `${layer.transform.x}%`,
+                      top: `${layer.transform.y}%`,
+                      transform: `translate(-50%, -50%) scale(${layer.transform.scale}) rotate(${layer.transform.rotation || 0}deg)`,
+                      transformOrigin: 'center center',
+                      zIndex: layerZIndex,
+                      width: '100%',
+                    }}
+                  >
+                    {/* Layer Media Render */}
+                    {layer.mediaType === 'image' ? (
+                      <img
+                        src={layer.url}
+                        alt={layer.clip.name}
+                        className="w-full h-auto max-w-none block pointer-events-none select-none rounded shadow-md object-contain"
+                        style={{
+                          filter: getCssFilter(),
+                          opacity: layer.transform.opacity ?? 1,
+                        }}
+                      />
+                    ) : (
+                      <LayerVideoElement
+                        layer={layer}
+                        currentTime={currentTime}
+                        isPlaying={isPlaying}
+                        playbackRate={settings.speed}
+                        filterStyle={getCssFilter()}
+                        isMaster={idx === 0}
+                        onTimeUpdate={onTimeUpdate}
+                        onDurationLoaded={onDurationLoaded}
+                      />
+                    )}
+
+                    {/* Active Layer Bounding Frame & Corner Drag Handles */}
+                    {isSelected && (
+                      <div className="absolute inset-0 pointer-events-none border-2 border-violet-400 rounded">
+                        {/* Top Badge showing Track Name and Clip Name */}
+                        <div
+                          className="absolute -top-7 left-0 flex items-center space-x-1.5 bg-slate-900/95 border border-violet-400/80 text-violet-200 text-[10px] font-medium px-2 py-0.5 rounded shadow-lg backdrop-blur-md pointer-events-auto whitespace-nowrap"
+                          onPointerDown={(e) => e.stopPropagation()}
+                        >
+                          {layer.locked ? (
+                            <Lock className="w-3 h-3 text-amber-400" />
+                          ) : layer.mediaType === 'video' ? (
+                            <VideoIcon className="w-3 h-3 text-violet-400" />
+                          ) : (
+                            <ImageIcon className="w-3 h-3 text-emerald-400" />
+                          )}
+                          <span className="font-semibold text-white">{layer.trackName}:</span>
+                          <span className="max-w-[120px] truncate">{layer.clip.name}</span>
+                          <span className="text-slate-400 text-[9px]">({Math.round(layer.transform.scale * 100)}%)</span>
+                          {layer.locked && (
+                            <span className="text-amber-400 text-[9px] font-semibold">(Locked)</span>
+                          )}
+                          <button
+                            onClick={() => setSelectedClipId(null)}
+                            className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
+                            title="Deselect"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+
+                        {/* Top-Left Corner Handle (Resize/Scale) - Only when unlocked */}
+                        {!layer.locked && (
+                          <>
+                            <div
+                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'nw')}
+                              className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition pointer-events-auto touch-none"
+                              title="Drag to resize / scale layer (Top-Left)"
+                            />
+                            {/* Top-Right Corner Handle */}
+                            <div
+                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'ne')}
+                              className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition pointer-events-auto touch-none"
+                              title="Drag to resize / scale layer (Top-Right)"
+                            />
+                            {/* Bottom-Left Corner Handle */}
+                            <div
+                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'sw')}
+                              className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition pointer-events-auto touch-none"
+                              title="Drag to resize / scale layer (Bottom-Left)"
+                            />
+                            {/* Bottom-Right Corner Handle */}
+                            <div
+                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'se')}
+                              className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition pointer-events-auto touch-none"
+                              title="Drag to resize / scale layer (Bottom-Right)"
+                            />
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Audio tracks for all non-video audio clips */}
+              {activeAudioClips?.map((clip, idx) => (
+                <AudioTrack
+                  key={clip.id}
+                  clip={clip}
+                  currentTime={currentTime}
+                  isPlaying={isPlaying}
+                  playbackRate={settings.speed}
+                  volume={settings.muteAudio ? 0 : settings.volume}
+                  isMasterTimekeeper={false}
+                  onTimeUpdate={onTimeUpdate}
+                />
+              ))}
+            </div>
+          ) : hasActiveClip && (videoUrl || (isEncodeMode && activeAudioClips && activeAudioClips.length > 0)) ? (
+            /* =============================================================== */
+            /* 🔵 SINGLE MEDIA PLAYBACK (COPY MODE OR SINGLE CLIP)              */
+            /* =============================================================== */
             <>
               {videoUrl ? (
                 isEncodeMode && videoName && /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(videoName) ? (
@@ -594,48 +1149,48 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     }`}
                     style={{
                       filter: getCssFilter(),
-                      transform: getTransform(),
+                      transform: getGlobalTransform(),
                     }}
                   />
                 ) : (
-                <video
-                  ref={videoRef}
-                  src={videoUrl}
-                  className={`transition-all duration-200 ${
-                    isScalingActive && !isFreeCropActive
-                      ? 'w-full h-full object-cover'
-                      : 'max-h-full max-w-full object-contain'
-                  }`}
-                  style={{
-                    filter: getCssFilter(),
-                    transform: getTransform(),
-                  }}
-                  onTimeUpdate={() => {
-                    if (videoRef.current && isPlaying && hasActiveClip) {
-                      const mappedTime =
-                        mediaOffset + (videoRef.current.currentTime - (sourceStartTime || 0));
-                      onTimeUpdate(mappedTime);
-                    }
-                  }}
-                  onLoadedMetadata={(e) => {
-                    const video = e.target as HTMLVideoElement;
-                    const dur = video.duration;
-                    if (!isNaN(dur) && dur > 0) {
-                      onDurationLoaded(dur);
-                    }
-                    const initialLocal = Math.max(0, (sourceStartTime || 0) + (currentTime - mediaOffset));
-                    if (initialLocal > 0) {
-                      video.currentTime = initialLocal;
-                    } else if (video.currentTime === 0) {
-                      video.currentTime = 0.001;
-                    }
-                  }}
-                  onError={handleVideoError}
-                  onEnded={() => onTogglePlay()}
-                  playsInline
-                  preload="auto"
-                  muted={isEncodeMode || settings.muteAudio}
-                />
+                  <video
+                    ref={singleVideoRef}
+                    src={videoUrl}
+                    className={`transition-all duration-200 ${
+                      isScalingActive && !isFreeCropActive
+                        ? 'w-full h-full object-cover'
+                        : 'max-h-full max-w-full object-contain'
+                    }`}
+                    style={{
+                      filter: getCssFilter(),
+                      transform: getGlobalTransform(),
+                    }}
+                    onTimeUpdate={() => {
+                      if (singleVideoRef.current && isPlaying && hasActiveClip) {
+                        const mappedTime =
+                          mediaOffset + (singleVideoRef.current.currentTime - (sourceStartTime || 0));
+                        onTimeUpdate(mappedTime);
+                      }
+                    }}
+                    onLoadedMetadata={(e) => {
+                      const video = e.target as HTMLVideoElement;
+                      const dur = video.duration;
+                      if (!isNaN(dur) && dur > 0) {
+                        onDurationLoaded(dur);
+                      }
+                      const initialLocal = Math.max(0, (sourceStartTime || 0) + (currentTime - mediaOffset));
+                      if (initialLocal > 0) {
+                        video.currentTime = initialLocal;
+                      } else if (video.currentTime === 0) {
+                        video.currentTime = 0.001;
+                      }
+                    }}
+                    onError={() => setLoadError('Video format not supported natively in browser preview')}
+                    onEnded={() => onTogglePlay()}
+                    playsInline
+                    preload="auto"
+                    muted={isEncodeMode || settings.muteAudio}
+                  />
                 )
               ) : (
                 <div className="flex flex-col items-center justify-center h-full w-full bg-slate-900 text-slate-500">
@@ -656,165 +1211,153 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   onTimeUpdate={onTimeUpdate}
                 />
               ))}
-
-              {/* --- Interactive Free Crop Box with Drag Handles --- */}
-              {isFreeCropActive && (
-                <div className="absolute inset-0 pointer-events-none z-20 overflow-hidden">
-                  {/* Darkened Mask Overlays outside active crop rectangle */}
-                  <div
-                    className="absolute bg-black/60 backdrop-blur-[0.5px]"
-                    style={{ top: 0, left: 0, right: 0, height: `${currentCropRect.y * 100}%` }}
-                  />
-                  <div
-                    className="absolute bg-black/60 backdrop-blur-[0.5px]"
-                    style={{
-                      bottom: 0,
-                      left: 0,
-                      right: 0,
-                      height: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
-                    }}
-                  />
-                  <div
-                    className="absolute bg-black/60 backdrop-blur-[0.5px]"
-                    style={{
-                      top: `${currentCropRect.y * 100}%`,
-                      bottom: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
-                      left: 0,
-                      width: `${currentCropRect.x * 100}%`,
-                    }}
-                  />
-                  <div
-                    className="absolute bg-black/60 backdrop-blur-[0.5px]"
-                    style={{
-                      top: `${currentCropRect.y * 100}%`,
-                      bottom: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
-                      right: 0,
-                      width: `${Math.max(0, (1 - (currentCropRect.x + currentCropRect.width)) * 100)}%`,
-                    }}
-                  />
-
-                  {/* Active Crop Box Window */}
-                  <div
-                    className="absolute border-2 border-violet-400 shadow-[0_0_15px_rgba(167,139,250,0.5)] pointer-events-auto"
-                    style={{
-                      top: `${currentCropRect.y * 100}%`,
-                      left: `${currentCropRect.x * 100}%`,
-                      width: `${currentCropRect.width * 100}%`,
-                      height: `${currentCropRect.height * 100}%`,
-                    }}
-                  >
-                    {/* Center Move Area */}
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'move')}
-                      className="absolute inset-3 cursor-move flex items-center justify-center group/center"
-                      title="Drag to reposition crop box"
-                    >
-                      <div className="p-1.5 rounded-full bg-slate-900/80 text-violet-300 border border-violet-400/40 opacity-0 group-hover/center:opacity-100 transition shadow-lg flex items-center space-x-1 text-[10px]">
-                        <Move className="w-3.5 h-3.5" />
-                        <span>Move</span>
-                      </div>
-                    </div>
-
-                    {/* Corner Resize Handles */}
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'nw')}
-                      className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
-                      title="Resize Top-Left"
-                    />
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'ne')}
-                      className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
-                      title="Resize Top-Right"
-                    />
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'sw')}
-                      className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
-                      title="Resize Bottom-Left"
-                    />
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'se')}
-                      className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
-                      title="Resize Bottom-Right"
-                    />
-
-                    {/* Edge Resize Handles */}
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'n')}
-                      className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-6 h-2.5 bg-violet-300 border border-violet-700 rounded shadow cursor-ns-resize hover:scale-110 transition"
-                      title="Resize Top"
-                    />
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 's')}
-                      className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-6 h-2.5 bg-violet-300 border border-violet-700 rounded shadow cursor-ns-resize hover:scale-110 transition"
-                      title="Resize Bottom"
-                    />
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'w')}
-                      className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2.5 h-6 bg-violet-300 border border-violet-700 rounded shadow cursor-ew-resize hover:scale-110 transition"
-                      title="Resize Left"
-                    />
-                    <div
-                      onMouseDown={(e) => handleMouseDownCrop(e, 'e')}
-                      className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2.5 h-6 bg-violet-300 border border-violet-700 rounded shadow cursor-ew-resize hover:scale-110 transition"
-                      title="Resize Right"
-                    />
-
-                    {/* Floating Quick Action Badge on Crop Box */}
-                    <div className="absolute -top-8 left-0 flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-violet-400/50 text-violet-200 text-[10px] font-mono px-2 py-0.5 rounded-md shadow-lg pointer-events-auto">
-                      <Crop className="w-3 h-3 text-violet-400" />
-                      <span>
-                        {Math.round(currentCropRect.width * 100)}% × {Math.round(currentCropRect.height * 100)}%
-                      </span>
-                      <button
-                        onClick={() => {
-                          if (onUpdateSettings) {
-                            onUpdateSettings({
-                              freeCropRect: { x: 0, y: 0, width: 1, height: 1 },
-                            });
-                          }
-                        }}
-                        className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
-                        title="Reset to 100% Full Frame"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Live Watermark Overlay */}
-              {settings.watermarkText && (
-                <div
-                  className="absolute pointer-events-none font-bold drop-shadow-md px-3 py-1 rounded bg-black/40 backdrop-blur-xs"
-                  style={{
-                    ...getWatermarkPositionStyle(),
-                    color: settings.watermarkColor || '#ffffff',
-                    fontSize: `${settings.watermarkSize}px`,
-                  }}
-                >
-                  {settings.watermarkText}
-                </div>
-              )}
             </>
           ) : null}
 
-          {/* Floating play/pause overlay button on click (Hidden during crop drag) */}
-          {!isFreeCropActive && (
+          {/* Interactive Free Crop Box with Drag Handles */}
+          {isFreeCropActive && (
+            <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{ top: 0, left: 0, right: 0, height: `${currentCropRect.y * 100}%` }}
+              />
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  height: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
+                }}
+              />
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{
+                  top: `${currentCropRect.y * 100}%`,
+                  bottom: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
+                  left: 0,
+                  width: `${currentCropRect.x * 100}%`,
+                }}
+              />
+              <div
+                className="absolute bg-black/60 backdrop-blur-[0.5px]"
+                style={{
+                  top: `${currentCropRect.y * 100}%`,
+                  bottom: `${Math.max(0, (1 - (currentCropRect.y + currentCropRect.height)) * 100)}%`,
+                  right: 0,
+                  width: `${Math.max(0, (1 - (currentCropRect.x + currentCropRect.width)) * 100)}%`,
+                }}
+              />
+
+              <div
+                className="absolute border-2 border-violet-400 shadow-[0_0_15px_rgba(167,139,250,0.5)] pointer-events-auto"
+                style={{
+                  top: `${currentCropRect.y * 100}%`,
+                  left: `${currentCropRect.x * 100}%`,
+                  width: `${currentCropRect.width * 100}%`,
+                  height: `${currentCropRect.height * 100}%`,
+                }}
+              >
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'move')}
+                  className="absolute inset-3 cursor-move flex items-center justify-center group/center"
+                  title="Drag to reposition crop box"
+                >
+                  <div className="p-1.5 rounded-full bg-slate-900/80 text-violet-300 border border-violet-400/40 opacity-0 group-hover/center:opacity-100 transition shadow-lg flex items-center space-x-1 text-[10px]">
+                    <Move className="w-3.5 h-3.5" />
+                    <span>Move</span>
+                  </div>
+                </div>
+
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'nw')}
+                  className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
+                  title="Resize Top-Left"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'ne')}
+                  className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
+                  title="Resize Top-Right"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'sw')}
+                  className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
+                  title="Resize Bottom-Left"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'se')}
+                  className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
+                  title="Resize Bottom-Right"
+                />
+
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'n')}
+                  className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-6 h-2.5 bg-violet-300 border border-violet-700 rounded shadow cursor-ns-resize hover:scale-110 transition"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 's')}
+                  className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-6 h-2.5 bg-violet-300 border border-violet-700 rounded shadow cursor-ns-resize hover:scale-110 transition"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'w')}
+                  className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2.5 h-6 bg-violet-300 border border-violet-700 rounded shadow cursor-ew-resize hover:scale-110 transition"
+                />
+                <div
+                  onMouseDown={(e) => handleMouseDownCrop(e, 'e')}
+                  className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2.5 h-6 bg-violet-300 border border-violet-700 rounded shadow cursor-ew-resize hover:scale-110 transition"
+                />
+
+                <div className="absolute -top-8 left-0 flex items-center space-x-1.5 bg-slate-900/90 backdrop-blur-md border border-violet-400/50 text-violet-200 text-[10px] font-mono px-2 py-0.5 rounded-md shadow-lg pointer-events-auto">
+                  <Crop className="w-3 h-3 text-violet-400" />
+                  <span>
+                    {Math.round(currentCropRect.width * 100)}% × {Math.round(currentCropRect.height * 100)}%
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (onUpdateSettings) {
+                        onUpdateSettings({
+                          freeCropRect: { x: 0, y: 0, width: 1, height: 1 },
+                        });
+                      }
+                    }}
+                    className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+                    title="Reset to 100% Full Frame"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Watermark Overlay */}
+          {settings.watermarkText && (
+            <div
+              className="absolute pointer-events-none font-bold drop-shadow-md px-3 py-1 rounded bg-black/40 backdrop-blur-xs z-30"
+              style={{
+                ...getWatermarkPositionStyle(),
+                color: settings.watermarkColor || '#ffffff',
+                fontSize: `${settings.watermarkSize}px`,
+              }}
+            >
+              {settings.watermarkText}
+            </div>
+          )}
+
+          {/* Floating play/pause overlay trigger (Only when not dragging layers or crop) */}
+          {!isFreeCropActive && !isDraggingLayer && !isResizingLayerCorner && (
             <div
               onClick={() => {
-                if (videoRef.current) {
-                  if (isPlaying) {
-                    videoRef.current.pause();
-                  } else {
-                    videoRef.current.play().catch(console.error);
-                  }
+                if (singleVideoRef.current && !hasLayers) {
+                  if (isPlaying) singleVideoRef.current.pause();
+                  else singleVideoRef.current.play().catch(console.error);
                 }
                 onTogglePlay();
               }}
-              className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group ${
+              className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group pointer-events-auto ${
                 isPlaying ? 'opacity-0 hover:opacity-100 bg-black/20' : 'opacity-100 bg-black/30'
               }`}
+              style={{ zIndex: 5 }}
             >
               <div className="h-9 w-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-600/30 border border-white/10 transform group-hover:scale-110 transition">
                 {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
@@ -824,7 +1367,383 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {/* Right-Click Popup Context Menu for Aspect Ratio / Scale (Only rendered in Encode Mode) */}
+      {/* Floating Selected Layer Quick Controls Bar */}
+      {isEncodeMode && activeSelectedLayer && onUpdateClipTransform && (
+        <div className="absolute top-4 right-4 z-40 bg-slate-900/95 border border-violet-500/50 rounded-xl p-2 shadow-2xl backdrop-blur-xl flex items-center space-x-2 animate-in fade-in duration-150 text-xs text-slate-200">
+          <div className="flex items-center space-x-1.5 px-2 py-1 bg-violet-600/20 text-violet-300 rounded-lg border border-violet-500/30 font-medium">
+            <Layers className="w-3.5 h-3.5 text-violet-400" />
+            <span>Layer: {activeSelectedLayer.trackName}</span>
+          </div>
+
+          <div className="h-4 w-px bg-white/10" />
+
+          {/* Quick scale down */}
+          <button
+            onClick={() => {
+              const currentScale = activeSelectedLayer.transform.scale;
+              const nextScale = Math.max(0.1, Math.round((currentScale - 0.1) * 10) / 10);
+              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                ...activeSelectedLayer.transform,
+                scale: nextScale,
+              });
+            }}
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
+            title="Scale Down (-10%)"
+          >
+            <ZoomOut className="w-3.5 h-3.5" />
+          </button>
+
+          <span className="font-mono text-[11px] text-slate-300 w-10 text-center">
+            {Math.round(activeSelectedLayer.transform.scale * 100)}%
+          </span>
+
+          {/* Quick scale up */}
+          <button
+            onClick={() => {
+              const currentScale = activeSelectedLayer.transform.scale;
+              const nextScale = Math.min(3.0, Math.round((currentScale + 0.1) * 10) / 10);
+              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                ...activeSelectedLayer.transform,
+                scale: nextScale,
+              });
+            }}
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
+            title="Scale Up (+10%)"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+          </button>
+
+          <div className="h-4 w-px bg-white/10" />
+
+          {/* Quick Corner Snap Direct Buttons */}
+          <div className="flex items-center space-x-0.5 bg-slate-800/80 p-0.5 rounded-lg border border-white/5">
+            <button
+              onClick={() => handleAlignLayer('tl')}
+              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+              title="Align to Top-Left Corner (มุมซ้ายบน)"
+            >
+              <ArrowUpLeft className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => handleAlignLayer('tr')}
+              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+              title="Align to Top-Right Corner (มุมขวาบน)"
+            >
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => handleAlignLayer('center')}
+              className="p-1 rounded hover:bg-slate-700 text-violet-400 hover:text-violet-300 transition cursor-pointer"
+              title="Center Layer (ตรงกลาง)"
+            >
+              <Target className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => handleAlignLayer('bl')}
+              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+              title="Align to Bottom-Left Corner (มุมซ้ายล่าง)"
+            >
+              <ArrowDownLeft className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => handleAlignLayer('br')}
+              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+              title="Align to Bottom-Right Corner (มุมขวาล่าง)"
+            >
+              <ArrowDownRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Alignment & PiP Corner Menu Trigger */}
+          <div className="relative" ref={alignMenuRef}>
+            <button
+              onClick={() => setIsAlignMenuOpen((prev) => !prev)}
+              className={`p-1.5 rounded-lg transition cursor-pointer border flex items-center space-x-1 ${
+                isAlignMenuOpen
+                  ? 'bg-violet-600 text-white border-violet-400 shadow-md shadow-violet-600/30'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border-white/5'
+              }`}
+              title="Align & Corner Layouts (จัดตำแหน่งตามมุม)"
+            >
+              <LayoutGrid className="w-3.5 h-3.5 text-violet-400" />
+              <span className="text-[10px] font-medium hidden sm:inline">Align</span>
+              <ChevronDown className="w-3 h-3 text-slate-400" />
+            </button>
+
+            {/* Alignment Popover Menu */}
+            {isAlignMenuOpen && (
+              <div className="absolute right-0 top-full mt-2 w-64 bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl backdrop-blur-xl p-2.5 z-50 text-slate-200 animate-in fade-in zoom-in-95 duration-150">
+                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1 flex items-center justify-between">
+                  <span>Corner & Position (มุม & ตำแหน่ง)</span>
+                </div>
+
+                {/* 3x3 Position Grid */}
+                <div className="grid grid-cols-3 gap-1 bg-slate-950/80 p-1.5 rounded-lg border border-white/5 mb-2.5">
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('tl');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Top-Left (มุมซ้ายบน)"
+                  >
+                    <ArrowUpLeft className="w-3.5 h-3.5 mb-0.5" />
+                    <span>ซ้ายบน</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('tc');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Top-Center (กึ่งกลางบน)"
+                  >
+                    <ArrowUp className="w-3.5 h-3.5 mb-0.5" />
+                    <span>บน</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('tr');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Top-Right (มุมขวาบน)"
+                  >
+                    <ArrowUpRight className="w-3.5 h-3.5 mb-0.5" />
+                    <span>ขวาบน</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('lc');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Left-Center (กึ่งกลางซ้าย)"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5 mb-0.5" />
+                    <span>ซ้าย</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('center');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded bg-violet-600/20 text-violet-300 hover:bg-violet-600 hover:text-white transition text-[10px] border border-violet-500/30 font-medium"
+                    title="Center (ตรงกลาง 50%, 50%)"
+                  >
+                    <Target className="w-3.5 h-3.5 mb-0.5 text-violet-400" />
+                    <span>กึ่งกลาง</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('rc');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Right-Center (กึ่งกลางขวา)"
+                  >
+                    <ArrowRight className="w-3.5 h-3.5 mb-0.5" />
+                    <span>ขวา</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('bl');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Bottom-Left (มุมซ้ายล่าง)"
+                  >
+                    <ArrowDownLeft className="w-3.5 h-3.5 mb-0.5" />
+                    <span>ซ้ายล่าง</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('bc');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Bottom-Center (กึ่งกลางล่าง)"
+                  >
+                    <ArrowDown className="w-3.5 h-3.5 mb-0.5" />
+                    <span>ล่าง</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('br');
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex flex-col items-center justify-center p-1.5 rounded hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-transparent hover:border-violet-500/40"
+                    title="Bottom-Right (มุมขวาล่าง)"
+                  >
+                    <ArrowDownRight className="w-3.5 h-3.5 mb-0.5" />
+                    <span>ขวาล่าง</span>
+                  </button>
+                </div>
+
+                {/* PiP Corner Quick Presets (Scale 35% at 4 corners) */}
+                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1">
+                  Picture-in-Picture (PiP 35% ชิดมุม)
+                </div>
+                <div className="grid grid-cols-2 gap-1 mb-2">
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('tl', 0.35);
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
+                  >
+                    <ArrowUpLeft className="w-3 h-3 text-cyan-400" />
+                    <span>PiP มุมบนซ้าย</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('tr', 0.35);
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
+                  >
+                    <ArrowUpRight className="w-3 h-3 text-cyan-400" />
+                    <span>PiP มุมบนขวา</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('bl', 0.35);
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
+                  >
+                    <ArrowDownLeft className="w-3 h-3 text-cyan-400" />
+                    <span>PiP มุมล่างซ้าย</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAlignLayer('br', 0.35);
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-white text-slate-300 text-[10px] border border-white/5"
+                  >
+                    <ArrowDownRight className="w-3 h-3 text-cyan-400" />
+                    <span>PiP มุมขวาล่าง</span>
+                  </button>
+                </div>
+
+                {/* Split Screen & Fit Presets */}
+                <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-1">
+                  Layout & Fit (แบ่งจอ & เต็มกรอบ)
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  <button
+                    onClick={() => {
+                      if (onUpdateClipTransform) {
+                        onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                          ...activeSelectedLayer.transform,
+                          x: 25,
+                          y: 50,
+                          scale: 0.5,
+                          rotation: 0,
+                        });
+                      }
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex items-center justify-center py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-[10px] border border-white/5"
+                  >
+                    <span>ครึ่งซ้าย</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      if (onUpdateClipTransform) {
+                        onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                          ...activeSelectedLayer.transform,
+                          x: 75,
+                          y: 50,
+                          scale: 0.5,
+                          rotation: 0,
+                        });
+                      }
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex items-center justify-center py-1 rounded bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-[10px] border border-white/5"
+                  >
+                    <span>ครึ่งขวา</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      if (onUpdateClipTransform) {
+                        onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                          ...activeSelectedLayer.transform,
+                          x: 50,
+                          y: 50,
+                          scale: 1.0,
+                          rotation: 0,
+                        });
+                      }
+                      setIsAlignMenuOpen(false);
+                    }}
+                    className="flex items-center justify-center py-1 rounded bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600 hover:text-white text-[10px] border border-emerald-500/30 font-medium"
+                  >
+                    <span>เต็มกรอบ 100%</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Full Fit / Reset */}
+          <button
+            onClick={() => {
+              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                ...activeSelectedLayer.transform,
+                x: 50,
+                y: 50,
+                scale: 1.0,
+                rotation: 0,
+              });
+            }}
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5 flex items-center space-x-1"
+            title="Reset to 100% Fit"
+          >
+            <Maximize2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[10px]">Fit</span>
+          </button>
+
+          {/* Rotate 90 deg */}
+          <button
+            onClick={() => {
+              const currentRot = activeSelectedLayer.transform.rotation || 0;
+              const nextRot = (currentRot + 90) % 360;
+              onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                ...activeSelectedLayer.transform,
+                rotation: nextRot,
+              });
+            }}
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
+            title="Rotate 90°"
+          >
+            <RotateCw className="w-3.5 h-3.5 text-cyan-400" />
+          </button>
+
+          {/* Close / Deselect */}
+          <button
+            onClick={() => setSelectedClipId(null)}
+            className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+            title="Deselect"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Right-Click Popup Context Menu for Aspect Ratio (Encode Mode) */}
       {isEncodeMode && contextMenu && (
         <div
           ref={menuRef}
@@ -835,7 +1754,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Aspect Ratio Options List */}
           <div className="flex flex-col gap-0.5 max-h-[300px] overflow-y-auto">
             {ASPECT_OPTIONS.map((option) => {
               const isOriginal = option.id === 'original';
@@ -890,4 +1808,3 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     </div>
   );
 };
-
