@@ -2059,9 +2059,11 @@ export async function processWebCodecsConcatStream(
 
       const videoPromise = (async () => {
         if (vTracks.length > 0) {
+          let segmentElapsedVideoTime = 0;
+          let lastSourceVideoTime = -1;
           const vSink = new VideoSampleSink(vTracks[0]);
           for await (const sample of vSink.samples()) {
-            const origDuration = sample.duration;
+            const origDuration = sample.duration || (1 / (settings.fps || 30));
 
             if (sourceStart > 0 && sample.timestamp < sourceStart) {
               sample.close();
@@ -2071,6 +2073,15 @@ export async function processWebCodecsConcatStream(
               sample.close();
               break;
             }
+
+            if (lastSourceVideoTime !== -1) {
+              let delta = sample.timestamp - lastSourceVideoTime;
+              if (delta < 0 || delta > 1.0) {
+                 delta = origDuration;
+              }
+              segmentElapsedVideoTime += delta;
+            }
+            lastSourceVideoTime = sample.timestamp;
 
             let pSample = sample;
 
@@ -2201,13 +2212,13 @@ export async function processWebCodecsConcatStream(
                 pSample = scaledSample;
             }
 
-            let outTime = (pSample.timestamp - sourceStart) + currentVideoTime;
-            if (outTime <= lastWrittenVideoTime) outTime = lastWrittenVideoTime + 0.0001; // ensure strictly increasing
+            let outTime = currentVideoTime + segmentElapsedVideoTime;
+            if (outTime <= lastWrittenVideoTime) outTime = lastWrittenVideoTime + 0.001;
             lastWrittenVideoTime = outTime;
             
             pSample.setTimestamp(outTime);
             await vSource.add(pSample);
-            maxVidDur = Math.max(maxVidDur, (outTime + origDuration) - currentVideoTime);
+            maxVidDur = Math.max(maxVidDur, segmentElapsedVideoTime + origDuration);
             if (pSample !== sample) pSample.close();
             sample.close();
           }
@@ -2216,9 +2227,11 @@ export async function processWebCodecsConcatStream(
 
       const audioPromise = (async () => {
         if (aTracks.length > 0 && !settings.muteAudio) {
+          let segmentElapsedAudioTime = 0;
+          let lastSourceAudioTime = -1;
           const aSink = new AudioSampleSink(aTracks[0]);
           for await (const sample of aSink.samples()) {
-            const origDuration = sample.duration;
+            const origDuration = sample.duration || 0.02;
 
             if (sourceStart > 0 && sample.timestamp < sourceStart) {
               sample.close();
@@ -2229,15 +2242,23 @@ export async function processWebCodecsConcatStream(
               break;
             }
 
-            const sampleTime = sample.timestamp - sourceStart;
-            let outTime = sampleTime + currentAudioTime;
-            if (outTime <= lastWrittenAudioTime) outTime = lastWrittenAudioTime + (sample.duration || 0.02);
+            if (lastSourceAudioTime !== -1) {
+              let delta = sample.timestamp - lastSourceAudioTime;
+              if (delta < 0 || delta > 1.0) {
+                 delta = origDuration;
+              }
+              segmentElapsedAudioTime += delta;
+            }
+            lastSourceAudioTime = sample.timestamp;
+
+            let outTime = currentAudioTime + segmentElapsedAudioTime;
+            if (outTime <= lastWrittenAudioTime) outTime = lastWrittenAudioTime + origDuration;
             lastWrittenAudioTime = outTime;
             
             const adaptedSample = adaptAudioSample(sample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
             adaptedSample.setTimestamp(outTime);
             await aSource.add(adaptedSample);
-            maxAudDur = Math.max(maxAudDur, (outTime + origDuration) - currentAudioTime);
+            maxAudDur = Math.max(maxAudDur, segmentElapsedAudioTime + origDuration);
             if (adaptedSample !== sample) adaptedSample.close();
             sample.close();
           }
