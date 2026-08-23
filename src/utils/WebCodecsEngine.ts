@@ -193,15 +193,11 @@ function drawLayerToCanvas(
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
   
-  let filterStr = '';
-  if (settings) {
-    filterStr = buildCanvasFilterString(settings) || '';
-  }
   if (t.blur && t.blur > 0) {
-    filterStr = `${filterStr} blur(${t.blur}px)`.trim();
-  }
-  if (filterStr) {
-    ctx.filter = filterStr;
+    const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
+    // Scale blur relative to a standard 640px preview width so it encodes visually similar to preview
+    const scaledBlur = Math.max(1, Math.round(t.blur * (canvasWidth / 640)));
+    ctx.filter = `${currentFilter} blur(${scaledBlur}px)`.trim();
   }
 
   ctx.translate(posX, posY);
@@ -1972,7 +1968,8 @@ export async function processWebCodecsConcatStream(
             ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
             if (t.blur && t.blur > 0) {
               const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
-              ctx.filter = `${currentFilter} blur(${t.blur}px)`.trim();
+              const scaledBlur = Math.max(1, Math.round(t.blur * (canvasWidth / 640)));
+              ctx.filter = `${currentFilter} blur(${scaledBlur}px)`.trim();
             }
             ctx.translate(posX, posY);
             if (rotationDeg !== 0) {
@@ -2158,7 +2155,8 @@ export async function processWebCodecsConcatStream(
                 ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
                 if (t.blur && t.blur > 0) {
                   const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
-                  ctx.filter = `${currentFilter} blur(${t.blur}px)`.trim();
+                  const scaledBlur = Math.max(1, Math.round(t.blur * (w / 640)));
+                  ctx.filter = `${currentFilter} blur(${scaledBlur}px)`.trim();
                 }
                 ctx.translate(posX, posY);
                 if (rotationDeg !== 0) {
