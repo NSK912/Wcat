@@ -1186,7 +1186,7 @@ export async function processWebCodecsMultiTrackTimeline(
   });
 
   const exportStart = settings.startTime > 0 ? settings.startTime : 0;
-  const exportEnd = settings.endTime > 0 && settings.endTime < maxTimelineEnd ? settings.endTime : maxTimelineEnd;
+  const exportEnd = maxTimelineEnd > 0 ? maxTimelineEnd : (settings.endTime > exportStart ? settings.endTime : exportStart + 10);
   const exportDuration = Math.max(0.1, exportEnd - exportStart);
 
   onProgress({
