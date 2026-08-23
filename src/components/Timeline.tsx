@@ -332,16 +332,9 @@ export const Timeline: React.FC<TimelineProps> = ({
           ...t,
           clips: t.clips.map((c) => {
             if (c.file && getFileKey(c.file) === key) {
-              const currentSpan = c.endTime - c.startTime;
-              const isUntrimmed =
-                !c.isTrimmed ||
-                currentSpan <= 15 ||
-                currentSpan === c.fileDuration ||
-                c.endTime === 10 ||
-                c.endTime === 15 ||
-                !c.fileDuration;
-              const newEnd = isUntrimmed ? c.startTime + fileDur : c.endTime;
-              const newSourceEnd = isUntrimmed ? fileDur : (c.sourceEndTime || fileDur);
+              const needsInit = !c.isTrimmed && (c.endTime <= c.startTime || !c.fileDuration || c.sourceEndTime === 0);
+              const newEnd = needsInit ? c.startTime + fileDur : c.endTime;
+              const newSourceEnd = needsInit ? fileDur : (c.sourceEndTime || fileDur);
               if (c.fileDuration !== fileDur || c.endTime !== newEnd || c.sourceEndTime !== newSourceEnd) {
                 changed = true;
                 return {
@@ -1453,6 +1446,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       endTime: pos,
       sourceStartTime: targetClip.sourceStartTime || 0,
       sourceEndTime: splitSourcePos,
+      isTrimmed: true,
     };
 
     const clipB: TimelineClip = {
@@ -1463,6 +1457,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       sourceStartTime: splitSourcePos,
       sourceEndTime:
         targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
+      isTrimmed: true,
     };
 
     setTracks((prev) =>
