@@ -996,6 +996,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               setSelectedClipId(null);
             }
           }}
+          id="canvas-container"
           className="relative bg-black rounded-xl overflow-hidden shadow-2xl border border-slate-800 flex items-center justify-center transition-all duration-300 select-none"
           style={getAspectStyle()}
         >
