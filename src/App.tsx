@@ -858,7 +858,12 @@ export default function App() {
         setProcessingMessage(`Streaming & merging ${allVisibleClips.length || selectedFiles.length} clips...`);
         addLog(`Initiating multi-clip concatenation (${allVisibleClips.length || selectedFiles.length} clips):`);
         if (allVisibleClips.length > 0) {
-          allVisibleClips.forEach((c, idx) => addLog(`  [${idx + 1}] ${c.name || c.file?.name} (${c.mediaType || 'clip'}, start: ${(c.startTime || 0).toFixed(2)}s, dur: ${(c.duration || 0).toFixed(2)}s)`));
+          allVisibleClips.forEach((c, idx) => {
+            const clipDur = (c.endTime !== undefined && c.startTime !== undefined && c.endTime > c.startTime)
+              ? c.endTime - c.startTime
+              : c.duration || c.fileDuration || 0;
+            addLog(`  [${idx + 1}] ${c.name || c.file?.name} (${c.mediaType || 'clip'}, start: ${(c.startTime || 0).toFixed(2)}s, dur: ${clipDur.toFixed(2)}s)`);
+          });
         } else {
           selectedFiles.forEach((f, idx) => addLog(`  [${idx + 1}] ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`));
         }
