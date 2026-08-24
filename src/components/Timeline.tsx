@@ -1024,11 +1024,15 @@ export const Timeline: React.FC<TimelineProps> = ({
       const percent = Math.max(0, Math.min(1, clickX / (rect.width || 1)));
       let targetTime = percent * computedTimelineDuration;
 
-      if (snapEnabled) {
+      // Only snap if snap is enabled AND there are at least 2 tracks with clips
+      const activeTracksWithClips = tracks.filter((t) => t.clips && t.clips.length > 0);
+      const totalClipsCount = tracks.reduce((acc, t) => acc + (t.clips ? t.clips.length : 0), 0);
+      const shouldSnap = snapEnabled && activeTracksWithClips.length >= 2 && totalClipsCount >= 2;
+
+      if (shouldSnap) {
         const snapThresholdPx = 10;
         const snapThresholdTime = (snapThresholdPx / (rect.width || 500)) * computedTimelineDuration;
-        const snapPoints: number[] = [0];
-        if (computedTimelineDuration > 0) snapPoints.push(computedTimelineDuration);
+        const snapPoints: number[] = [];
         tracks.forEach((t) => {
           t.clips.forEach((c) => {
             snapPoints.push(c.startTime);
@@ -1118,6 +1122,11 @@ export const Timeline: React.FC<TimelineProps> = ({
       let newEnd = startEndTime;
       let activeSnapPoint: number | null = null;
 
+      // Only snap if snap is enabled AND there are at least 2 tracks with clips
+      const activeTracksWithClips = tracks.filter((t) => t.clips && t.clips.length > 0);
+      const totalClips = tracks.reduce((acc, t) => acc + (t.clips ? t.clips.length : 0), 0);
+      const shouldSnap = snapEnabled && activeTracksWithClips.length >= 2 && totalClips >= 2;
+
       if (type === 'middle') {
         const span = startEndTime - startStartTime;
         let rawStart = startStartTime + deltaTime;
@@ -1128,10 +1137,9 @@ export const Timeline: React.FC<TimelineProps> = ({
           rawEnd = span;
         }
 
-        if (snapEnabled) {
-          // Candidate snap points across timeline, other clips, and playhead
-          const snapPoints: number[] = [0];
-          if (computedTimelineDuration > 0) snapPoints.push(computedTimelineDuration);
+        if (shouldSnap) {
+          // Candidate snap points only across other clips
+          const snapPoints: number[] = [];
           if (currentTime >= 0) snapPoints.push(currentTime);
 
           tracks.forEach((t) => {
@@ -1218,8 +1226,8 @@ export const Timeline: React.FC<TimelineProps> = ({
         let rawStart = startStartTime + deltaTime;
         rawStart = Math.max(0, Math.min(rawStart, startEndTime - minSpan));
 
-        if (snapEnabled) {
-          const snapPoints: number[] = [0];
+        if (shouldSnap) {
+          const snapPoints: number[] = [];
           if (currentTime >= 0) snapPoints.push(currentTime);
           tracks.forEach((t) => {
             t.clips.forEach((c) => {
@@ -1259,9 +1267,8 @@ export const Timeline: React.FC<TimelineProps> = ({
         let rawEnd = startEndTime + deltaTime;
         rawEnd = Math.max(startStartTime + minSpan, rawEnd);
 
-        if (snapEnabled) {
+        if (shouldSnap) {
           const snapPoints: number[] = [];
-          if (computedTimelineDuration > 0) snapPoints.push(computedTimelineDuration);
           if (currentTime >= 0) snapPoints.push(currentTime);
           tracks.forEach((t) => {
             t.clips.forEach((c) => {
