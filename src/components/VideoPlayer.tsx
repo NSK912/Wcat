@@ -193,7 +193,8 @@ const LayerVideoElement: React.FC<{
   isMaster?: boolean;
   onTimeUpdate?: (time: number) => void;
   onDurationLoaded?: (dur: number) => void;
-}> = ({ layer, currentTime, isPlaying, playbackRate, filterStyle, isMaster, onTimeUpdate, onDurationLoaded }) => {
+  onAspectLoaded?: (aspect: number) => void;
+}> = ({ layer, currentTime, isPlaying, playbackRate, filterStyle, isMaster, onTimeUpdate, onDurationLoaded, onAspectLoaded }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -252,6 +253,9 @@ const LayerVideoElement: React.FC<{
         if (isMaster && onDurationLoaded && v.duration > 0) {
           onDurationLoaded(v.duration);
         }
+        if (v.videoWidth && v.videoHeight && onAspectLoaded) {
+          onAspectLoaded(v.videoWidth / v.videoHeight);
+        }
       }}
     />
   );
@@ -286,6 +290,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const menuRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [nativeAspect, setNativeAspect] = useState<number>(16 / 9);
 
   // Selected layer for direct manipulation (drag & transform)
   const [localSelectedClipId, setLocalSelectedClipId] = useState<string | null>(null);
@@ -321,12 +326,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return existing;
   }, []);
 
-  const effectiveAspect = isEncodeMode
-    ? (!settings.cropAspect || settings.cropAspect === 'original' ? '16:9' : settings.cropAspect)
-    : 'original';
+  const effectiveAspect = settings.cropAspect || 'original';
 
   const isFreeCropActive = Boolean(isEncodeMode && effectiveAspect === 'free');
-  const isScalingActive = Boolean(isEncodeMode && effectiveAspect !== 'original');
+  const isScalingActive = Boolean(isEncodeMode && effectiveAspect !== 'original' && effectiveAspect !== 'free');
   const currentCropRect = settings.freeCropRect || { x: 0, y: 0, width: 1, height: 1 };
 
   // Dragging state for free crop
@@ -421,29 +424,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return transforms.join(' ');
   };
 
-  // Aspect ratio class container (Only active when Encode Mode is enabled and not in free mode)
+  // Aspect ratio class container
   const getAspectStyle = (): React.CSSProperties => {
-    if (!isEncodeMode || effectiveAspect === 'free' || effectiveAspect === 'original') {
-      return { maxHeight: '480px', width: 'auto', maxWidth: '100%' };
-    }
+    let ratioNum = nativeAspect || 16 / 9;
 
-    let ratioNum = 16 / 9;
-    let maxW = 854;
-    let maxH = 480;
-
-    switch (effectiveAspect) {
-      case '16:9': ratioNum = 16 / 9; maxW = 854; maxH = 480; break;
-      case '4:3': ratioNum = 4 / 3; maxW = 640; maxH = 480; break;
-      case '1:1': ratioNum = 1 / 1; maxW = 480; maxH = 480; break;
-      case '4:5': ratioNum = 4 / 5; maxW = 384; maxH = 480; break;
-      case '9:16': ratioNum = 9 / 16; maxW = 270; maxH = 480; break;
-      case '21:9': ratioNum = 21 / 9; maxW = 1120; maxH = 480; break;
+    if (effectiveAspect !== 'original' && effectiveAspect !== 'free') {
+      switch (effectiveAspect) {
+        case '16:9': ratioNum = 16 / 9; break;
+        case '4:3': ratioNum = 4 / 3; break;
+        case '1:1': ratioNum = 1 / 1; break;
+        case '4:5': ratioNum = 4 / 5; break;
+        case '9:16': ratioNum = 9 / 16; break;
+        case '21:9': ratioNum = 21 / 9; break;
+      }
     }
 
     return {
       aspectRatio: `${ratioNum}`,
-      width: `min(calc(100cqw - 48px), calc((100cqh - 48px) * ${ratioNum}), ${maxW}px)`,
-      maxHeight: `${maxH}px`,
+      width: `min(100cqw, calc(100cqh * ${ratioNum}))`,
+      height: `min(100cqh, calc(100cqw / ${ratioNum}))`,
+      maxWidth: '100%',
+      maxHeight: '100%',
     };
   };
 
@@ -913,7 +914,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   return (
     <div
       ref={containerRef}
-      className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-6 overflow-hidden select-none"
+      className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-2 sm:p-3 overflow-hidden select-none"
       style={{ containerType: 'size' }}
       onClick={(e) => {
         // Deselect layer when clicking outside preview box
@@ -1046,6 +1047,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                           filter: [getCssFilter(), layer.transform.blur ? `blur(${layer.transform.blur}px)` : ''].filter(Boolean).join(' ') || undefined,
                           opacity: layer.transform.opacity ?? 1,
                         }}
+                        onLoad={(e) => {
+                          const img = e.currentTarget;
+                          if (idx === 0 && img.naturalWidth && img.naturalHeight) {
+                            setNativeAspect(img.naturalWidth / img.naturalHeight);
+                          }
+                        }}
                       />
                     ) : (
                       <LayerVideoElement
@@ -1057,6 +1064,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         isMaster={idx === 0}
                         onTimeUpdate={onTimeUpdate}
                         onDurationLoaded={onDurationLoaded}
+                        onAspectLoaded={(asp) => {
+                          if (idx === 0 && asp > 0) {
+                            setNativeAspect(asp);
+                          }
+                        }}
                       />
                     )}
 
@@ -1151,11 +1163,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     className={`transition-all duration-200 ${
                       isScalingActive && !isFreeCropActive
                         ? 'w-full h-full object-cover'
-                        : 'max-h-full max-w-full object-contain'
+                        : 'w-full h-full object-contain'
                     }`}
                     style={{
                       filter: getCssFilter(),
                       transform: getGlobalTransform(),
+                    }}
+                    onLoad={(e) => {
+                      const img = e.currentTarget;
+                      if (img.naturalWidth && img.naturalHeight) {
+                        setNativeAspect(img.naturalWidth / img.naturalHeight);
+                      }
                     }}
                   />
                 ) : (
@@ -1165,7 +1183,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     className={`transition-all duration-200 ${
                       isScalingActive && !isFreeCropActive
                         ? 'w-full h-full object-cover'
-                        : 'max-h-full max-w-full object-contain'
+                        : 'w-full h-full object-contain'
                     }`}
                     style={{
                       filter: getCssFilter(),
@@ -1183,6 +1201,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       const dur = video.duration;
                       if (!isNaN(dur) && dur > 0) {
                         onDurationLoaded(dur);
+                      }
+                      if (video.videoWidth && video.videoHeight) {
+                        setNativeAspect(video.videoWidth / video.videoHeight);
                       }
                       const initialLocal = Math.max(0, (sourceStartTime || 0) + (currentTime - mediaOffset));
                       if (initialLocal > 0) {

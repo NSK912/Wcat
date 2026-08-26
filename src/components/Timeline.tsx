@@ -33,6 +33,8 @@ import {
   ArrowDown,
   MoveVertical,
   Magnet,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import { formatTime } from '../utils/sampleVideos';
 import { Input, BlobSource, ALL_FORMATS } from 'mediabunny';
@@ -297,6 +299,78 @@ export const Timeline: React.FC<TimelineProps> = ({
       document.body.style.cursor = '';
     };
   }, [isResizingHeight]);
+
+  // Undo & Redo History System
+  const pastRef = useRef<TimelineTrackData[][]>([]);
+  const futureRef = useRef<TimelineTrackData[][]>([]);
+  const [canUndo, setCanUndo] = useState<boolean>(false);
+  const [canRedo, setCanRedo] = useState<boolean>(false);
+  const dragStartTracksRef = useRef<TimelineTrackData[] | null>(null);
+
+  const cloneTracks = useCallback((data: TimelineTrackData[]): TimelineTrackData[] => {
+    return data.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => ({
+        ...c,
+        transform: c.transform ? { ...c.transform } : undefined,
+      })),
+    }));
+  }, []);
+
+  const commitToHistory = useCallback((snapshotToSave?: TimelineTrackData[]) => {
+    const current = snapshotToSave || tracks;
+    pastRef.current.push(cloneTracks(current));
+    if (pastRef.current.length > 50) {
+      pastRef.current.shift();
+    }
+    futureRef.current = [];
+    setCanUndo(true);
+    setCanRedo(false);
+  }, [tracks, cloneTracks]);
+
+  const handleUndo = useCallback(() => {
+    if (pastRef.current.length === 0) return;
+    const previous = pastRef.current.pop()!;
+    futureRef.current.push(cloneTracks(tracks));
+    setCanUndo(pastRef.current.length > 0);
+    setCanRedo(true);
+    setTracks(previous);
+  }, [tracks, setTracks, cloneTracks]);
+
+  const handleRedo = useCallback(() => {
+    if (futureRef.current.length === 0) return;
+    const next = futureRef.current.pop()!;
+    pastRef.current.push(cloneTracks(tracks));
+    setCanUndo(true);
+    setCanRedo(futureRef.current.length > 0);
+    setTracks(next);
+  }, [tracks, setTracks, cloneTracks]);
+
+  // Global Keyboard Shortcuts (Ctrl+Z / Cmd+Z, Ctrl+Y / Cmd+Shift+Z)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (e.key === 'z' || e.key === 'Z') {
+          e.preventDefault();
+          if (e.shiftKey) {
+            handleRedo();
+          } else {
+            handleUndo();
+          }
+        } else if (e.key === 'y' || e.key === 'Y') {
+          e.preventDefault();
+          handleRedo();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
 
   // Independent Thumbnail Cache per File/Media
   const [fileThumbnails, setFileThumbnails] = useState<Record<string, string[]>>({});
@@ -602,6 +676,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Add a new universal track with zero restrictions
   const handleAddTrack = () => {
+    commitToHistory();
     const newIdx = tracks.length + 1;
     const colorOrder: TrackColor[] = ['emerald', 'amber', 'rose', 'cyan', 'fuchsia', 'indigo', 'violet'];
     const assignedColor = colorOrder[(newIdx - 1) % colorOrder.length];
@@ -624,6 +699,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const handleDuplicateTrack = (trackId: string) => {
     const src = tracks.find((t) => t.id === trackId);
     if (!src) return;
+    commitToHistory();
     const newTrack: TimelineTrackData = {
       ...src,
       id: `track-${Date.now()}`,
@@ -640,6 +716,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   // Delete a track
   const handleDeleteTrack = (trackId: string) => {
     if (tracks.length <= 1) return; // Always keep at least 1 track
+    commitToHistory();
     setTracks((prev) => prev.filter((t) => t.id !== trackId));
     if (activeTrackId === trackId) {
       const remaining = tracks.filter((t) => t.id !== trackId);
@@ -649,6 +726,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Cycle / switch media type icon on track freely
   const cycleMediaType = (trackId: string) => {
+    commitToHistory();
     const types: MediaType[] = ['any', 'video', 'audio', 'image', 'text'];
     setTracks((prev) =>
       prev.map((t) => {
@@ -664,6 +742,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Change track color
   const cycleTrackColor = (trackId: string) => {
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => {
         if (t.id === trackId) {
@@ -697,6 +776,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       extractThumbnailsForFile(file);
     }
 
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => {
         if (t.id === targetUploadTrackId) {
@@ -744,6 +824,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   const handleSaveRename = (trackId: string) => {
     if (editingName.trim()) {
+      commitToHistory();
       setTracks((prev) =>
         prev.map((t) => (t.id === trackId ? { ...t, name: editingName.trim() } : t))
       );
@@ -753,18 +834,21 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Track toggles
   const toggleTrackMute = (trackId: string) => {
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => (t.id === trackId ? { ...t, muted: !t.muted } : t))
     );
   };
 
   const toggleTrackLock = (trackId: string) => {
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => (t.id === trackId ? { ...t, locked: !t.locked } : t))
     );
   };
 
   const toggleTrackHidden = (trackId: string) => {
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => (t.id === trackId ? { ...t, hidden: !t.hidden } : t))
     );
@@ -813,6 +897,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Auto-Sequence all clips (Option: Sequence all clips into Track 1 in order)
   const handleAutoSequence = () => {
+    commitToHistory();
     let currentOffset = 0;
     setTracks((prev) => {
       // Gather all clips across all tracks
@@ -842,6 +927,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Align all tracks' first clip to start at 00:00.0 without changing internal spacing
   const handleAlignToStart = () => {
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => {
         if (t.clips.length === 0) return t;
@@ -861,7 +947,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   // Move a specific clip from one track to another track (keeps both clips on the target track!)
   const handleMoveClipToTrack = (sourceTrackId: string, clipId: string, targetTrackId: string) => {
     if (sourceTrackId === targetTrackId) return;
-
+    commitToHistory();
     setTracks((prev) => {
       const srcTrack = prev.find((t) => t.id === sourceTrackId);
       const destTrack = prev.find((t) => t.id === targetTrackId);
@@ -891,7 +977,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     if (!srcTrack) return;
     const movingClip = srcTrack.clips.find((c) => c.id === clipId);
     if (!movingClip) return;
-
+    commitToHistory();
     const newIdx = tracks.length + 1;
     const colorOrder: TrackColor[] = ['emerald', 'amber', 'rose', 'cyan', 'fuchsia', 'indigo', 'violet'];
     const assignedColor = colorOrder[(newIdx - 1) % colorOrder.length];
@@ -926,6 +1012,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Duplicate a specific clip in the same track
   const handleDuplicateClip = (trackId: string, clipId: string) => {
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => {
         if (t.id === trackId) {
@@ -948,6 +1035,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Delete a specific clip from a track
   const handleDeleteClip = (trackId: string, clipId: string) => {
+    commitToHistory();
     setTracks((prev) =>
       prev.map((t) => (t.id === trackId ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t))
     );
@@ -1096,6 +1184,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     setActiveTrackId(trackId);
     setActiveClipId(clipId);
     dragHoveredTrackIdRef.current = trackId;
+    dragStartTracksRef.current = cloneTracks(tracks);
     lastNewStartRef.current = currentClip.startTime;
     lastNewEndRef.current = currentClip.endTime;
 
@@ -1356,6 +1445,11 @@ export const Timeline: React.FC<TimelineProps> = ({
       const finalStart = lastNewStartRef.current;
       const finalEnd = lastNewEndRef.current;
 
+      const hasChanged = finalStart !== startStartTime || finalEnd !== startEndTime || finalTargetId !== trackId;
+      if (hasChanged && dragStartTracksRef.current) {
+        commitToHistory(dragStartTracksRef.current);
+      }
+
       let finalSourceStart = startSourceStartTime;
       let finalSourceEnd = startSourceEndTime;
       if (type === 'left') {
@@ -1443,6 +1537,8 @@ export const Timeline: React.FC<TimelineProps> = ({
     const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id));
     if (!parentTrack) return;
 
+    commitToHistory();
+
     const offset = pos - targetClip.startTime;
     const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
 
@@ -1492,6 +1588,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
     const targetClip = activeTrack.clips.find((c) => c.id === activeClipId) || activeTrack.clips[0];
     if (targetClip && currentTime < targetClip.endTime) {
+      commitToHistory();
       setTracks((prev) =>
         prev.map((t) =>
           t.id === activeTrack.id
@@ -1513,6 +1610,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
     const targetClip = activeTrack.clips.find((c) => c.id === activeClipId) || activeTrack.clips[0];
     if (targetClip && currentTime > targetClip.startTime) {
+      commitToHistory();
       setTracks((prev) =>
         prev.map((t) =>
           t.id === activeTrack.id
@@ -1546,6 +1644,12 @@ export const Timeline: React.FC<TimelineProps> = ({
   const displayedTracks = isEncodeMode 
     ? tracks 
     : (tracks.filter((t) => t.id === activeTrackId).length ? tracks.filter((t) => t.id === activeTrackId) : tracks.slice(0, 1));
+
+  const effectiveTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+  const effectiveTrackIdx = displayedTracks.findIndex((t) => t.id === effectiveTrack?.id);
+  const effectiveClip =
+    (activeClipId ? effectiveTrack?.clips?.find((c) => c.id === activeClipId) : null) ||
+    effectiveTrack?.clips?.[0];
 
   const getMediaIcon = (type: MediaType) => {
     switch (type) {
@@ -1630,9 +1734,31 @@ export const Timeline: React.FC<TimelineProps> = ({
             </span>
           </div>
 
-          {/* Timeline Editing Split Button */}
+          {/* Timeline Editing Split Button & Track/Clip Quick Tools */}
           {isEncodeMode && (
-          <div className="flex items-center space-x-1 pl-2 border-l border-white/10 shrink-0">
+          <div className="flex items-center space-x-1.5 pl-2 border-l border-white/10 shrink-0">
+            {/* Undo & Redo Buttons (To the left of Split button) */}
+            <div className="flex items-center space-x-1">
+              <button
+                onClick={handleUndo}
+                disabled={!canUndo}
+                className="h-8 w-8 bg-slate-800/90 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800/90 text-slate-200 hover:text-white rounded-lg border border-white/10 flex items-center justify-center transition cursor-pointer disabled:cursor-not-allowed shadow-sm"
+                title="Undo (Ctrl+Z / ⌘Z)"
+                aria-label="Undo"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={handleRedo}
+                disabled={!canRedo}
+                className="h-8 w-8 bg-slate-800/90 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800/90 text-slate-200 hover:text-white rounded-lg border border-white/10 flex items-center justify-center transition cursor-pointer disabled:cursor-not-allowed shadow-sm"
+                title="Redo (Ctrl+Y / ⌘⇧Z)"
+                aria-label="Redo"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
             <button
               onClick={handleSplitAtPlayhead}
               className="h-8 px-2.5 bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-white/10 text-xs font-medium flex items-center space-x-1.5 transition cursor-pointer shadow-sm"
@@ -1641,6 +1767,43 @@ export const Timeline: React.FC<TimelineProps> = ({
               <Scissors className="w-3.5 h-3.5 text-indigo-400" />
               <span className="hidden sm:inline">Split</span>
             </button>
+
+            {/* Track & Clip Quick Action Tools (Moved to the right of Split button) */}
+            {effectiveTrack && effectiveClip && (
+              <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-2 shadow-sm relative shrink-0">
+                {/* Track Name Badge */}
+                <span className="text-xs font-medium text-slate-200 select-none hidden sm:inline-flex items-center">
+                  {effectiveTrack.name}
+                </span>
+
+                {/* Vertical Divider */}
+                <div className="w-px h-3.5 bg-white/15 mx-0.5 hidden sm:block" />
+
+                {/* Duplicate Clip */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDuplicateClip(effectiveTrack.id, effectiveClip.id);
+                  }}
+                  className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 rounded transition cursor-pointer"
+                  title="Duplicate Clip in this Track"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
+
+                {/* Delete Clip */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteClip(effectiveTrack.id, effectiveClip.id);
+                  }}
+                  className="h-6 w-6 flex items-center justify-center text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 rounded transition cursor-pointer"
+                  title="Delete Clip"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
           </div>
           )}
 
@@ -1716,22 +1879,22 @@ export const Timeline: React.FC<TimelineProps> = ({
         <div className="flex items-center space-x-1.5 shrink-0">
           {/* Zoom Controls (ONLY in Encode Mode) */}
           {isEncodeMode && (
-            <div className="h-8 flex items-center space-x-0.5 bg-slate-900/80 border border-white/10 rounded-lg px-1 shrink-0">
+            <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-1.5 shrink-0 shadow-sm">
               <button
                 onClick={() => setZoomLevel((z) => Math.max(1, z - 0.5))}
                 disabled={zoomLevel <= 1}
-                className="h-6 w-6 flex items-center justify-center text-slate-400 hover:text-white disabled:opacity-30 rounded transition cursor-pointer"
+                className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
                 title="Zoom Out"
               >
                 <ZoomOut className="w-3.5 h-3.5" />
               </button>
-              <span className="text-[10px] font-mono text-indigo-300 px-1 font-bold">
+              <span className="text-xs font-medium text-slate-200 px-1 select-none flex items-center">
                 {zoomLevel.toFixed(1)}x
               </span>
               <button
                 onClick={() => setZoomLevel((z) => Math.min(3, z + 0.5))}
                 disabled={zoomLevel >= 3}
-                className="h-6 w-6 flex items-center justify-center text-slate-400 hover:text-white disabled:opacity-30 rounded transition cursor-pointer"
+                className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
                 title="Zoom In"
               >
                 <ZoomIn className="w-3.5 h-3.5" />
@@ -1780,7 +1943,7 @@ export const Timeline: React.FC<TimelineProps> = ({
             }`}
             title={isEncodeMode ? 'Encode & Export with WebCodecs API' : 'Export Video'}
           >
-            {isEncodeMode ? <Sparkles className="w-3 h-3 text-amber-300" /> : <Download className="w-3.5 h-3.5" />}
+            {isEncodeMode ? <Download className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
             <span>{isEncodeMode ? 'Encode' : 'Export'}</span>
           </button>
         </div>
@@ -1870,6 +2033,9 @@ export const Timeline: React.FC<TimelineProps> = ({
                 onClick={() => {
                   setActiveTrackId(track.id);
                   const firstClip = track.clips?.[0];
+                  if (firstClip) {
+                    setActiveClipId(firstClip.id);
+                  }
                   if (firstClip?.file && onSelectFile && !isEncodeMode) {
                     onSelectFile(firstClip.file, firstClip.startTime, firstClip.fileDuration);
                   }
@@ -2119,7 +2285,14 @@ export const Timeline: React.FC<TimelineProps> = ({
                 return (
                   <div
                     key={track.id}
-                    className={`relative h-14 transition ${
+                    onClick={() => {
+                      setActiveTrackId(track.id);
+                      const firstClip = track.clips?.[0];
+                      if (firstClip) {
+                        setActiveClipId(firstClip.id);
+                      }
+                    }}
+                    className={`relative h-14 transition cursor-pointer ${
                       track.hidden ? 'opacity-25' : 'opacity-100'
                     } ${
                       isDropTarget
@@ -2143,6 +2316,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                         const clipEndPct =
                           computedTimelineDuration > 0 ? (clip.endTime / computedTimelineDuration) * 100 : 100;
                         const clipDuration = Math.max(0, clip.endTime - clip.startTime);
+                        const clipSpan = Math.max(0.001, clipDuration);
                         const isClipActive = activeClipId === clip.id || (isActive && clipIdx === 0 && !activeClipId);
                         const clipColorConfig = COLOR_CLASSES[clip.color || track.color] || colorConfig;
 
@@ -2154,6 +2328,18 @@ export const Timeline: React.FC<TimelineProps> = ({
 
                         const clipImageSrc = (clipFileKey && fileThumbnails[clipFileKey]?.[0]) || clip.previewUrl;
 
+                        // Filmstrip positioning relative to source media duration to prevent squishing when trimmed
+                        const rawFileDur = clip.fileDuration || (clipFileKey && fileDurations[clipFileKey]) || clipSpan;
+                        const fileDur = Math.max(clipSpan, rawFileDur);
+                        const srcStart = typeof clip.sourceStartTime === 'number' ? clip.sourceStartTime : 0;
+                        const srcEnd = typeof clip.sourceEndTime === 'number' && clip.sourceEndTime > srcStart
+                          ? clip.sourceEndTime
+                          : (srcStart + clipSpan);
+                        const srcSpan = Math.max(0.001, srcEnd - srcStart);
+
+                        const filmstripWidthPct = Math.max(100, (fileDur / srcSpan) * 100);
+                        const filmstripLeftPct = -((srcStart / srcSpan) * 100);
+
                         return (
                           <div
                             key={clip.id}
@@ -2164,7 +2350,11 @@ export const Timeline: React.FC<TimelineProps> = ({
                               left: `${clipStartPct}%`,
                               width: `${Math.max(0.8, clipEndPct - clipStartPct)}%`,
                             }}
-                            onMouseDown={(e) => startTrimDrag(e, 'middle', track.id, clip.id)}
+                            onMouseDown={(e) => {
+                              setActiveTrackId(track.id);
+                              setActiveClipId(clip.id);
+                              startTrimDrag(e, 'middle', track.id, clip.id);
+                            }}
                             onClick={(e) => {
                               e.stopPropagation();
                               setActiveTrackId(track.id);
@@ -2176,12 +2366,19 @@ export const Timeline: React.FC<TimelineProps> = ({
                           >
                             {/* Visualizer INSIDE Clip: Video Filmstrip, Audio Waveform, Image, or Pattern */}
                             {clip.mediaType === 'video' || (clipThumbs && clipThumbs.length > 0) || clip.file?.type.startsWith('video/') ? (
-                              <div className="absolute inset-0 flex items-stretch overflow-hidden pointer-events-none opacity-75">
+                              <div
+                                className="absolute top-0 bottom-0 flex items-stretch overflow-hidden pointer-events-none opacity-75"
+                                style={{
+                                  left: `${filmstripLeftPct}%`,
+                                  width: `${filmstripWidthPct}%`,
+                                }}
+                              >
                                 {clipThumbs && clipThumbs.length > 0 ? (
                                   clipThumbs.map((thumb, idx) => (
                                     <div
                                       key={idx}
-                                      className="relative h-full flex-1 min-w-[36px] overflow-hidden bg-slate-900 border-r border-white/10 last:border-r-0 shrink-0"
+                                      className="relative h-full overflow-hidden bg-slate-900 border-r border-white/10 last:border-r-0 shrink-0"
+                                      style={{ width: `${100 / clipThumbs.length}%` }}
                                     >
                                       <img
                                         src={thumb}
@@ -2194,7 +2391,8 @@ export const Timeline: React.FC<TimelineProps> = ({
                                   Array.from({ length: 8 }).map((_, idx) => (
                                     <div
                                       key={idx}
-                                      className="relative h-full flex-1 min-w-[40px] overflow-hidden bg-slate-900/90 border-r border-white/10 last:border-r-0 flex items-center justify-center shrink-0"
+                                      className="relative h-full overflow-hidden bg-slate-900/90 border-r border-white/10 last:border-r-0 flex items-center justify-center shrink-0"
+                                      style={{ width: `${100 / 8}%` }}
                                     >
                                       <span className="text-[8px] text-slate-400 font-mono">
                                         {clip.fileName ? clip.fileName.slice(0, 6) : `F${idx + 1}`}
@@ -2259,7 +2457,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                               </div>
                             )}
 
-                            {/* Clip Name & Time Badge + Quick Actions Bar */}
+                            {/* Clip Name & Time Badge */}
                             <div className="relative z-20 flex items-center justify-between px-2 w-full h-full pointer-events-none overflow-hidden">
                               <div className="flex items-center space-x-1 min-w-0 truncate">
                                 <span className="shrink-0 drop-shadow">{getMediaIcon(clip.mediaType)}</span>
@@ -2269,107 +2467,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                                   {clip.fileName ? clip.fileName : clip.name}: {formatTime(clip.startTime)} - {formatTime(clip.endTime)} ({formatTime(clipDuration)})
                                 </span>
                               </div>
-
-                              {/* Quick Move Inter-Track & Clip Action Buttons (Visible on hover) */}
-                              <div className="flex items-center space-x-0.5 pointer-events-auto opacity-0 group-hover:opacity-100 transition-opacity bg-slate-950/90 rounded px-1 py-0.5 border border-white/20 shadow-lg shrink-0">
-                                {isEncodeMode && trackIdx > 0 && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleMoveClipToTrack(track.id, clip.id, displayedTracks[trackIdx - 1].id);
-                                    }}
-                                    className="p-0.5 text-slate-300 hover:text-white hover:bg-white/20 rounded transition cursor-pointer"
-                                    title="Move Clip Up to Previous Track"
-                                  >
-                                    <ArrowUp className="w-2.5 h-2.5" />
-                                  </button>
-                                )}
-                                {isEncodeMode && trackIdx < displayedTracks.length - 1 && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleMoveClipToTrack(track.id, clip.id, displayedTracks[trackIdx + 1].id);
-                                    }}
-                                    className="p-0.5 text-slate-300 hover:text-white hover:bg-white/20 rounded transition cursor-pointer"
-                                    title="Move Clip Down to Next Track"
-                                  >
-                                    <ArrowDown className="w-2.5 h-2.5" />
-                                  </button>
-                                )}
-                                {isEncodeMode && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setActiveMoveMenuClipId(activeMoveMenuClipId === clip.id ? null : clip.id);
-                                  }}
-                                  className="p-0.5 text-indigo-300 hover:text-white hover:bg-indigo-600/50 rounded transition cursor-pointer flex items-center space-x-0.5 text-[8px] font-medium"
-                                  title="Move to any Track..."
-                                >
-                                  <MoveVertical className="w-2.5 h-2.5" />
-                                </button>
-                                )}
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleDuplicateClip(track.id, clip.id);
-                                  }}
-                                  className="p-0.5 text-slate-300 hover:text-indigo-300 hover:bg-white/20 rounded transition cursor-pointer"
-                                  title="Duplicate Clip in this Track"
-                                >
-                                  <Copy className="w-2.5 h-2.5" />
-                                </button>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleDeleteClip(track.id, clip.id);
-                                  }}
-                                  className="p-0.5 text-slate-400 hover:text-rose-400 hover:bg-white/20 rounded transition cursor-pointer"
-                                  title="Delete Clip"
-                                >
-                                  <Trash2 className="w-2.5 h-2.5" />
-                                </button>
-                              </div>
                             </div>
-
-                            {/* Move To Track Dropdown Popup for this Clip */}
-                            {activeMoveMenuClipId === clip.id && (
-                              <div
-                                onClick={(e) => e.stopPropagation()}
-                                className="absolute top-7 right-2 z-50 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl p-1.5 min-w-[140px] flex flex-col space-y-1 text-[10px]"
-                              >
-                                <span className="text-[9px] text-slate-400 font-semibold px-1.5 py-0.5 border-b border-white/10">
-                                  Move Clip To:
-                                </span>
-                                {tracks.map((targetT) => {
-                                  if (targetT.id === track.id) return null;
-                                  return (
-                                    <button
-                                      key={targetT.id}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleMoveClipToTrack(track.id, clip.id, targetT.id);
-                                      }}
-                                      className="w-full text-left px-2 py-1 rounded hover:bg-indigo-600 hover:text-white text-slate-200 transition cursor-pointer flex items-center justify-between"
-                                    >
-                                      <span>{targetT.name}</span>
-                                      <span className="text-[8px] text-slate-400 font-mono">
-                                        ({targetT.clips.length} clips)
-                                      </span>
-                                    </button>
-                                  );
-                                })}
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleMoveClipToNewTrack(track.id, clip.id);
-                                  }}
-                                  className="w-full text-left px-2 py-1 rounded hover:bg-emerald-600 hover:text-white text-emerald-300 transition cursor-pointer flex items-center space-x-1 border-t border-white/10 pt-1"
-                                >
-                                  <Plus className="w-2.5 h-2.5" />
-                                  <span>+ New Track</span>
-                                </button>
-                              </div>
-                            )}
                           </div>
                         );
                       })}
