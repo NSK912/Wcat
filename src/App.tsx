@@ -327,57 +327,97 @@ export default function App() {
   // Selected clip/layer in Encode Mode
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
-  // Active layers computed for layertool
-  const activeLayers = useMemo(() => {
+  // All sub-layers across all tracks for layertool sub-layer selector
+  const allSubLayers = useMemo(() => {
     if (!isEncodeMode || !tracks || tracks.length === 0) return [];
     const list: {
       trackId: string;
       trackName: string;
+      subLayerName: string;
       trackColor: string;
       trackIndex: number;
+      clipIndex: number;
       clip: TimelineClip;
+      isActive: boolean;
       transform: ClipTransform;
     }[] = [];
 
     tracks.forEach((track, trackIdx) => {
       if (track.hidden) return;
-      const match = track.clips.find(
-        (c) => c.startTime <= currentTime && currentTime <= c.endTime
-      );
-      if (!match) return;
-      const isVideo =
-        match.mediaType === 'video' ||
-        (match.file && (match.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(match.file.name)));
-      const isImage =
-        match.mediaType === 'image' ||
-        (match.file && (match.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(match.file.name)));
-      if (!isVideo && !isImage) return;
+      const clips = track.clips || [];
 
-      const defaultTransform: ClipTransform = {
-        x: 50,
-        y: 50,
-        scale: trackIdx === 0 ? 1.0 : 0.45,
-        rotation: 0,
-        opacity: 1,
-      };
+      // Sort visual clips chronologically by startTime
+      const visualClips = clips
+        .filter((c) => {
+          const isVid =
+            c.mediaType === 'video' ||
+            (c.file && (c.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(c.file.name)));
+          const isImg =
+            c.mediaType === 'image' ||
+            (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)));
+          return isVid || isImg;
+        })
+        .slice()
+        .sort((a, b) => a.startTime - b.startTime);
 
-      list.push({
-        trackId: track.id,
-        trackName: track.name,
-        trackColor: track.color,
-        trackIndex: trackIdx,
-        clip: match,
-        transform: match.transform ? { ...defaultTransform, ...match.transform } : defaultTransform,
+      visualClips.forEach((clip, seqIdx) => {
+        const rawClipIdx = clips.findIndex((c) => c.id === clip.id);
+        const isActive = currentTime >= clip.startTime && currentTime <= clip.endTime;
+        const defaultTransform: ClipTransform = {
+          x: 50,
+          y: 50,
+          scale: trackIdx === 0 ? 1.0 : 0.45,
+          rotation: 0,
+          opacity: 1,
+        };
+
+        list.push({
+          trackId: track.id,
+          trackName: track.name,
+          subLayerName: `Layer ${trackIdx + 1}-${seqIdx + 1}`,
+          trackColor: track.color,
+          trackIndex: trackIdx,
+          clipIndex: rawClipIdx,
+          clip,
+          isActive,
+          transform: clip.transform ? { ...defaultTransform, ...clip.transform } : defaultTransform,
+        });
       });
     });
 
-    return list;
+    // Sort by Track 1, 2, 3, 4 ascending (Track 1 top -> Track 2 -> Track 3 -> Track 4)
+    // For same track, sort chronologically by startTime
+    return list.sort((a, b) => {
+      if (a.trackIndex !== b.trackIndex) {
+        return a.trackIndex - b.trackIndex;
+      }
+      return a.clip.startTime - b.clip.startTime;
+    });
   }, [isEncodeMode, tracks, currentTime]);
 
+  // Active layers currently visible on preview screen
+  const activeLayers = useMemo(() => {
+    return allSubLayers.filter((l) => l.isActive);
+  }, [allSubLayers]);
+
+  // Auto-select top active layer on screen when currentTime moves or previous selection ends
+  useEffect(() => {
+    if (!isEncodeMode) return;
+    if (activeLayers.length === 0) return;
+    const isSelectedActive = activeLayers.some((l) => l.clip.id === selectedClipId);
+    if (!isSelectedActive) {
+      // Auto-select the top-most active layer on screen
+      setSelectedClipId(activeLayers[0].clip.id);
+    }
+  }, [isEncodeMode, activeLayers, selectedClipId]);
+
   const activeSelectedLayer = useMemo(() => {
-    if (activeLayers.length === 0) return null;
-    return activeLayers.find((l) => l.clip.id === selectedClipId) || activeLayers[0];
-  }, [activeLayers, selectedClipId]);
+    if (allSubLayers.length === 0) return null;
+    const found = allSubLayers.find((l) => l.clip.id === selectedClipId);
+    if (found) return found;
+    if (activeLayers.length > 0) return activeLayers[0];
+    return allSubLayers[0];
+  }, [allSubLayers, activeLayers, selectedClipId]);
 
   const handleAlignLayer = (
     position: 'tl' | 'tr' | 'bl' | 'br' | 'tc' | 'bc' | 'lc' | 'rc' | 'center',
@@ -1166,15 +1206,54 @@ export default function App() {
                   id="panel-encode"
                   className="w-72 h-full flex flex-col items-stretch p-3 rounded-xl border backdrop-blur-md shadow-xl transition-all duration-200 pointer-events-auto bg-slate-950/95 border-violet-500/50 shadow-violet-500/10 relative overflow-hidden"
                 >
-                  {/* Top / Main area: Codec, Resolution & Quality Controls inside Panel Encode */}
-                  <div className="flex-1 flex flex-col gap-2 text-xs animate-fadeIn min-w-0 pr-1 overflow-y-auto">
-                    <div className="flex items-center justify-between pb-1 border-b border-white/5">
-                      <span className="text-[10px] text-violet-300 font-bold uppercase tracking-wider">Encode Settings</span>
+                  {/* Header (Fixed at top, matching Layer Tool) */}
+                  <div className="flex items-center justify-between pb-2 mb-1.5 border-b border-white/10 shrink-0">
+                    <div className="flex items-center space-x-1.5 text-violet-300 font-bold text-xs">
+                      <Sliders className="w-4 h-4 text-violet-400" />
+                      <span className="tracking-wide uppercase">Encode Settings</span>
+                    </div>
+                    <div className="flex items-center space-x-1.5 relative">
+                      <button
+                        id="encode-mode-toggle-btn"
+                        onPointerDown={startHoldToClose}
+                        onPointerUp={() => cancelHoldToClose(true)}
+                        onPointerLeave={() => cancelHoldToClose(false)}
+                        onPointerCancel={() => cancelHoldToClose(false)}
+                        onContextMenu={(e) => e.preventDefault()}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold tracking-wide transition-all duration-200 border shadow-sm cursor-pointer select-none text-white relative overflow-hidden flex items-center justify-center ${
+                          holdProgress > 0
+                            ? 'bg-rose-950/90 border-rose-400/80 shadow-rose-500/30'
+                            : 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 border-violet-400/50 shadow-violet-500/25'
+                        }`}
+                        title="Hold to close and restore Copy Mode"
+                      >
+                        {/* Hold progress filling bar - zero latency sync with RAF */}
+                        {holdProgress > 0 && (
+                          <div
+                            className="absolute inset-0 bg-gradient-to-r from-rose-600 to-amber-500 opacity-80"
+                            style={{ width: `${holdProgress}%`, willChange: 'width' }}
+                          />
+                        )}
+                        <span className="relative z-10 flex items-center justify-center font-medium pointer-events-none uppercase">
+                          Close
+                        </span>
+                      </button>
+
+                      {/* Hint tooltip if tapped quickly */}
+                      {holdHint && (
+                        <div className="absolute right-0 top-7 z-50 bg-slate-900/95 border border-violet-400/80 text-violet-200 text-[10px] font-sans px-2.5 py-1 rounded-lg shadow-xl animate-fadeIn pointer-events-none w-48 text-center leading-tight whitespace-nowrap">
+                          Hold button to close
+                        </div>
+                      )}
+
                       <button onClick={() => setIsLeftPanelExpanded(false)} className="text-slate-400 hover:text-white transition-colors p-1 rounded-md hover:bg-white/10" title="Fold panel">
                         <ChevronLeft className="w-3 h-3" />
                       </button>
                     </div>
+                  </div>
 
+                  {/* Top / Main area: Codec, Resolution & Quality Controls inside Panel Encode */}
+                  <div className="flex-1 flex flex-col gap-2 text-xs animate-fadeIn min-w-0 pr-1 overflow-y-auto">
                     {/* VIDEO SECTION */}
                     <div className="flex flex-col gap-1">
                       <span className="text-[11px] text-slate-400 font-mono">Video Codec:</span>
@@ -1337,42 +1416,6 @@ export default function App() {
                       />
                     </div>
                   </div>
-
-                  {/* Bottom: Horizontal Panel Encode Toggle Button with Press & Hold to Close */}
-                  <div className="pt-2 mt-1 border-t border-white/10 shrink-0 relative">
-                    <button
-                      id="encode-mode-toggle-btn"
-                      onPointerDown={startHoldToClose}
-                      onPointerUp={() => cancelHoldToClose(true)}
-                      onPointerLeave={() => cancelHoldToClose(false)}
-                      onPointerCancel={() => cancelHoldToClose(false)}
-                      onContextMenu={(e) => e.preventDefault()}
-                      className={`w-full py-2 px-3 rounded-lg text-xs font-semibold tracking-wide transition-colors duration-200 border shadow-md cursor-pointer select-none text-white relative overflow-hidden flex items-center justify-center gap-1.5 ${
-                        holdProgress > 0
-                          ? 'bg-rose-950/90 border-rose-400/80 shadow-rose-500/30'
-                          : 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 border-violet-400/50 shadow-violet-500/25'
-                      }`}
-                      title="Hold to close and restore Copy Mode"
-                    >
-                      {/* Hold progress filling bar - zero latency sync with RAF */}
-                      {holdProgress > 0 && (
-                        <div
-                          className="absolute inset-0 bg-gradient-to-r from-rose-600 to-amber-500 opacity-80"
-                          style={{ width: `${holdProgress}%`, willChange: 'width' }}
-                        />
-                      )}
-                      <span className="relative z-10 flex items-center justify-center font-medium pointer-events-none">
-                        Close panel
-                      </span>
-                    </button>
-
-                    {/* Hint tooltip if tapped quickly */}
-                    {holdHint && (
-                      <div className="absolute left-1/2 -translate-x-1/2 -top-10 z-50 bg-slate-900/95 border border-violet-400/80 text-violet-200 text-[11px] font-sans px-3 py-1.5 rounded-lg shadow-xl animate-fadeIn pointer-events-none w-56 text-center leading-tight whitespace-nowrap">
-                        Hold to close Encode Mode (Restore Copy Mode)
-                      </div>
-                    )}
-                  </div>
                 </div>
                 {!isLeftPanelExpanded && (
                   <button
@@ -1423,8 +1466,8 @@ export default function App() {
                     </div>
                     <div className="flex items-center space-x-2">
                       {activeSelectedLayer && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-600/30 text-violet-300 border border-violet-500/40 font-mono">
-                          {activeSelectedLayer.trackName}
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-600/30 text-violet-300 border border-violet-500/40 font-mono font-bold">
+                          {activeSelectedLayer.subLayerName}
                         </span>
                       )}
                       <button onClick={() => setIsRightPanelExpanded(false)} className="text-slate-400 hover:text-white transition-colors p-1 rounded-md hover:bg-white/10" title="Fold panel">
@@ -1479,41 +1522,82 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* SECTION 2: Layer Controls */}
+                    {/* SECTION 2: Sub-Layers List */}
+                    <div className="flex flex-col gap-1.5 pt-2 border-t border-white/10">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                          Sub-Layers ({allSubLayers.length})
+                        </span>
+                      </div>
+
+                      {allSubLayers.length > 0 ? (
+                        <div className="flex flex-col gap-2.5 max-h-48 overflow-y-auto pr-0.5 custom-scrollbar">
+                          {Array.from(new Set<number>(allSubLayers.map((l) => l.trackIndex)))
+                            .sort((a: number, b: number) => a - b)
+                            .map((tIdx: number) => {
+                              const trackSubLayers = allSubLayers.filter((l) => l.trackIndex === tIdx);
+                              const tName = trackSubLayers[0]?.trackName || `Track ${tIdx + 1}`;
+                              return (
+                                <div key={tIdx} className="flex flex-col gap-1">
+                                  <div className="flex items-center justify-between px-0.5">
+                                    <span className="text-[9px] font-mono font-bold text-slate-400 uppercase tracking-wider">
+                                      {tName} ({trackSubLayers.length})
+                                    </span>
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-1.5">
+                                    {trackSubLayers.map((l) => {
+                                      const isSelected = activeSelectedLayer?.clip.id === l.clip.id;
+                                      return (
+                                        <button
+                                          key={l.clip.id}
+                                          type="button"
+                                          onClick={() => {
+                                            setSelectedClipId(l.clip.id);
+                                            if (!l.isActive) {
+                                              setCurrentTime(l.clip.startTime);
+                                            }
+                                          }}
+                                          className={`p-1.5 rounded-lg flex flex-col items-start text-left transition cursor-pointer border relative overflow-hidden ${
+                                            isSelected
+                                              ? 'bg-violet-600/35 border-violet-400 text-white shadow-sm shadow-violet-500/20'
+                                              : 'bg-slate-900/90 hover:bg-slate-800/90 text-slate-300 border-white/5'
+                                          }`}
+                                        >
+                                          <div className="flex items-center justify-between w-full gap-1">
+                                            <span className="font-mono font-bold text-[10px] text-violet-300 truncate">
+                                              {l.subLayerName}
+                                            </span>
+                                          </div>
+                                          <span className="text-[9px] text-slate-400 truncate w-full">
+                                            {l.clip.name || l.clip.file?.name || l.trackName}
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-slate-500 italic p-2 bg-slate-900/40 rounded-lg border border-white/5 text-center">
+                          No layers in timeline
+                        </div>
+                      )}
+                    </div>
+
+                    {/* SECTION 3: Layer Controls */}
                     <div className="flex flex-col gap-2 pt-2 border-t border-white/10">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">
                           Layer Controls
                         </span>
-                        {activeLayers.length > 0 && (
-                          <span className="text-[10px] text-slate-400">
-                            {activeLayers.length} {activeLayers.length > 1 ? 'layers' : 'layer'}
+                        {activeSelectedLayer && (
+                          <span className="text-[10px] text-violet-300 font-mono font-bold">
+                            {activeSelectedLayer.subLayerName}
                           </span>
                         )}
                       </div>
-
-                      {/* Active Layer Selector Tabs (if multiple tracks) */}
-                      {activeLayers.length > 1 && (
-                        <div className="flex items-center gap-1 p-1 bg-slate-900/90 rounded-lg border border-white/5 overflow-x-auto">
-                          {activeLayers.map((l) => {
-                            const isSelected = activeSelectedLayer?.clip.id === l.clip.id;
-                            return (
-                              <button
-                                key={l.clip.id}
-                                type="button"
-                                onClick={() => setSelectedClipId(l.clip.id)}
-                                className={`px-2 py-1 rounded text-[10px] font-medium transition cursor-pointer shrink-0 border ${
-                                  isSelected
-                                    ? 'bg-violet-600 text-white border-violet-400 shadow-sm'
-                                    : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 border-transparent'
-                                }`}
-                              >
-                                {l.trackName}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
 
                       {activeSelectedLayer ? (
                         <div className="flex flex-col gap-2.5 bg-slate-900/60 p-2.5 rounded-xl border border-white/5">
@@ -1776,6 +1860,8 @@ export default function App() {
               onSeek={(t) => setCurrentTime(t)}
               onUpdateSettings={updateSettings}
               isEncodeMode={isEncodeMode}
+              isLeftPanelExpanded={isLeftPanelExpanded}
+              isRightPanelExpanded={isRightPanelExpanded}
               onToggleEncodeMode={() => {
                 if (isEncodeMode) {
                   handleCloseEncodeMode();

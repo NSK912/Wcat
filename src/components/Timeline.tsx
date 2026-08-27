@@ -196,6 +196,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [activeTrackId, setActiveTrackId] = useState<string>('track-1');
   const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>('');
+  const [activeTransitionMenu, setActiveTransitionMenu] = useState<{ trackId: string, clipId: string } | null>(null);
 
   // Universal, Free-form Timeline Tracks (Each track holds MULTIPLE independent clips)
   const [internalTracks, setInternalTracks] = useState<TimelineTrackData[]>([
@@ -238,6 +239,19 @@ export const Timeline: React.FC<TimelineProps> = ({
   const dragHoveredTrackIdRef = useRef<string | null>(null);
   const lastNewStartRef = useRef<number>(0);
   const lastNewEndRef = useRef<number>(0);
+
+  // Auto-cleanup empty tracks (Keep index 0 / initial track, remove any empty track at index > 0)
+  const cleanupEmptyTracks = useCallback((tracksList: TimelineTrackData[]): TimelineTrackData[] => {
+    if (tracksList.length <= 1) return tracksList;
+    return tracksList.filter((t, idx) => idx === 0 || t.clips.length > 0);
+  }, []);
+
+  // Ensure activeTrackId remains valid when tracks are removed
+  useEffect(() => {
+    if (tracks.length > 0 && !tracks.some((t) => t.id === activeTrackId)) {
+      setActiveTrackId(tracks[0].id);
+    }
+  }, [tracks, activeTrackId]);
 
   // Adjustable timeline panel height with drag up/down
   const [timelineHeight, setTimelineHeight] = useState<number>(() => {
@@ -933,12 +947,13 @@ export const Timeline: React.FC<TimelineProps> = ({
       });
 
       // Put all sequenced clips together on Track 1 (or keep empty other tracks)
-      return prev.map((t, idx) => {
+      const updated = prev.map((t, idx) => {
         if (idx === 0) {
           return { ...t, clips: sequencedClips };
         }
         return { ...t, clips: [] };
       });
+      return cleanupEmptyTracks(updated);
     });
   };
 
@@ -976,11 +991,12 @@ export const Timeline: React.FC<TimelineProps> = ({
       const remainingSrcClips = srcTrack.clips.filter((c) => c.id !== clipId);
       const newDestClips = [...destTrack.clips, movingClip];
 
-      return prev.map((t) => {
+      const updated = prev.map((t) => {
         if (t.id === sourceTrackId) return { ...t, clips: remainingSrcClips };
         if (t.id === targetTrackId) return { ...t, clips: newDestClips };
         return t;
       });
+      return cleanupEmptyTracks(updated);
     });
 
     setActiveTrackId(targetTrackId);
@@ -1010,17 +1026,20 @@ export const Timeline: React.FC<TimelineProps> = ({
       hidden: false,
     };
 
-    setTracks((prev) => [
-      ...prev.map((t) =>
-        t.id === sourceTrackId
-          ? {
-              ...t,
-              clips: t.clips.filter((c) => c.id !== clipId),
-            }
-          : t
-      ),
-      newTrack,
-    ]);
+    setTracks((prev) => {
+      const updated = [
+        ...prev.map((t) =>
+          t.id === sourceTrackId
+            ? {
+                ...t,
+                clips: t.clips.filter((c) => c.id !== clipId),
+              }
+            : t
+        ),
+        newTrack,
+      ];
+      return cleanupEmptyTracks(updated);
+    });
 
     setActiveTrackId(newTrack.id);
     setActiveClipId(clipId);
@@ -1050,12 +1069,32 @@ export const Timeline: React.FC<TimelineProps> = ({
     );
   };
 
+  const handleApplyTransition = (trackId: string, clipId: string, transitionType: 'none' | 'fade' | 'crossfade' | 'dissolve' | 'wipe') => {
+    commitToHistory();
+    setTracks(prev => prev.map(t => {
+      if (t.id === trackId) {
+        return {
+          ...t,
+          clips: t.clips.map(c => {
+            if (c.id === clipId) {
+              return { ...c, transition: transitionType };
+            }
+            return c;
+          })
+        };
+      }
+      return t;
+    }));
+    setActiveTransitionMenu(null);
+  };
+
   // Delete a specific clip from a track
   const handleDeleteClip = (trackId: string, clipId: string) => {
     commitToHistory();
-    setTracks((prev) =>
-      prev.map((t) => (t.id === trackId ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t))
-    );
+    setTracks((prev) => {
+      const updated = prev.map((t) => (t.id === trackId ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t));
+      return cleanupEmptyTracks(updated);
+    });
   };
 
   // Dynamically sync preview video when playhead enters any clip's time range
@@ -1302,25 +1341,34 @@ export const Timeline: React.FC<TimelineProps> = ({
           const currentDisplayed = !isEncodeMode
             ? tracks.filter((t) => t.id === activeTrackId)
             : tracks;
-          const clampedIdx = Math.max(0, Math.min(currentDisplayed.length - 1, Math.floor(relY / rowH)));
-          const targetTrack = currentDisplayed[clampedIdx];
-          if (targetTrack) {
-            dragHoveredTrackIdRef.current = targetTrack.id;
-            setHoveredDropTrackId(targetTrack.id);
+          const totalRows = currentDisplayed.length;
 
+          if (isEncodeMode && relY >= totalRows * rowH - 12) {
+            dragHoveredTrackIdRef.current = 'CREATE_NEW_TRACK';
+            setHoveredDropTrackId('CREATE_NEW_TRACK');
             const snapPrefix = activeSnapPoint !== null ? `🧲 Snap (${formatTime(activeSnapPoint)}) ` : '';
-            if (targetTrack.id !== trackId) {
-              setDragTooltip(
-                `${snapPrefix}[Move to ${targetTrack.name}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
-                  newEnd - newStart
-                )})`
-              );
-            } else {
-              setDragTooltip(
-                `${snapPrefix}[${currentTrack.name}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
-                  newEnd - newStart
-                )})`
-              );
+            setDragTooltip(`${snapPrefix}[+ Create New Track] Move clip to new bottom track`);
+          } else {
+            const clampedIdx = Math.max(0, Math.min(currentDisplayed.length - 1, Math.floor(relY / rowH)));
+            const targetTrack = currentDisplayed[clampedIdx];
+            if (targetTrack) {
+              dragHoveredTrackIdRef.current = targetTrack.id;
+              setHoveredDropTrackId(targetTrack.id);
+
+              const snapPrefix = activeSnapPoint !== null ? `🧲 Snap (${formatTime(activeSnapPoint)}) ` : '';
+              if (targetTrack.id !== trackId) {
+                setDragTooltip(
+                  `${snapPrefix}[Move to ${targetTrack.name}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
+                    newEnd - newStart
+                  )})`
+                );
+              } else {
+                setDragTooltip(
+                  `${snapPrefix}[${currentTrack.name}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
+                    newEnd - newStart
+                  )})`
+                );
+              }
             }
           }
         }
@@ -1472,38 +1520,87 @@ export const Timeline: React.FC<TimelineProps> = ({
       }
 
       if (type === 'middle' && finalTargetId !== trackId) {
-        // Move clip from source track into destination track (keeping all existing clips in both tracks!)
-        setTracks((prev) => {
-          const src = prev.find((t) => t.id === trackId);
-          const dest = prev.find((t) => t.id === finalTargetId);
-          if (!src || !dest) return prev;
+        if (finalTargetId === 'CREATE_NEW_TRACK') {
+          const newTrackId = `track-${Date.now()}`;
+          setTracks((prev) => {
+            const src = prev.find((t) => t.id === trackId);
+            if (!src) return prev;
 
-          const clipToMove = src.clips.find((c) => c.id === clipId);
-          if (!clipToMove) return prev;
+            const clipToMove = src.clips.find((c) => c.id === clipId);
+            if (!clipToMove) return prev;
 
-          const updatedClip = {
-            ...clipToMove,
-            startTime: finalStart,
-            endTime: finalEnd,
-            sourceStartTime: finalSourceStart,
-            sourceEndTime: finalSourceEnd,
-          };
+            const updatedClip = {
+              ...clipToMove,
+              startTime: finalStart,
+              endTime: finalEnd,
+              sourceStartTime: finalSourceStart,
+              sourceEndTime: finalSourceEnd,
+            };
 
-          return prev.map((t) => {
-            if (t.id === trackId) {
-              return { ...t, clips: t.clips.filter((c) => c.id !== clipId) };
-            }
-            if (t.id === finalTargetId) {
-              return { ...t, clips: [...t.clips, updatedClip] };
-            }
-            return t;
+            const colors: (keyof typeof COLOR_CLASSES)[] = ['indigo', 'violet', 'emerald', 'cyan', 'amber', 'rose', 'fuchsia'];
+            const nextColor = colors[prev.length % colors.length];
+
+            const newTrack: TimelineTrackData = {
+              id: newTrackId,
+              name: `Track ${prev.length + 1}`,
+              clips: [updatedClip],
+              mediaType: clipToMove.mediaType || 'video',
+              color: nextColor,
+              muted: false,
+              locked: false,
+              hidden: false,
+            };
+
+            const updated = prev.map((t) => {
+              if (t.id === trackId) {
+                return { ...t, clips: t.clips.filter((c) => c.id !== clipId) };
+              }
+              return t;
+            });
+
+            return cleanupEmptyTracks([...updated, newTrack]);
           });
-        });
 
-        setActiveTrackId(finalTargetId);
-        setActiveClipId(clipId);
-        if (currentClip.file && onSelectFile && !isEncodeMode) {
-          onSelectFile(currentClip.file, finalStart, currentClip.fileDuration, finalSourceStart, finalEnd);
+          setActiveTrackId(newTrackId);
+          setActiveClipId(clipId);
+          if (currentClip.file && onSelectFile && !isEncodeMode) {
+            onSelectFile(currentClip.file, finalStart, currentClip.fileDuration, finalSourceStart, finalEnd);
+          }
+        } else {
+          // Move clip from source track into destination track
+          setTracks((prev) => {
+            const src = prev.find((t) => t.id === trackId);
+            const dest = prev.find((t) => t.id === finalTargetId);
+            if (!src || !dest) return prev;
+
+            const clipToMove = src.clips.find((c) => c.id === clipId);
+            if (!clipToMove) return prev;
+
+            const updatedClip = {
+              ...clipToMove,
+              startTime: finalStart,
+              endTime: finalEnd,
+              sourceStartTime: finalSourceStart,
+              sourceEndTime: finalSourceEnd,
+            };
+
+            const updated = prev.map((t) => {
+              if (t.id === trackId) {
+                return { ...t, clips: t.clips.filter((c) => c.id !== clipId) };
+              }
+              if (t.id === finalTargetId) {
+                return { ...t, clips: [...t.clips, updatedClip] };
+              }
+              return t;
+            });
+            return cleanupEmptyTracks(updated);
+          });
+
+          setActiveTrackId(finalTargetId);
+          setActiveClipId(clipId);
+          if (currentClip.file && onSelectFile && !isEncodeMode) {
+            onSelectFile(currentClip.file, finalStart, currentClip.fileDuration, finalSourceStart, finalEnd);
+          }
         }
       } else {
         setTracks((prev) =>
@@ -2001,27 +2098,13 @@ export const Timeline: React.FC<TimelineProps> = ({
               timelineScrollRef.current.scrollTop = e.currentTarget.scrollTop;
             }
           }}
-          className="w-44 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0"
+          className="w-32 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0"
         >
           {/* Top Header Label */}
-          <div className="h-4 bg-black/80 px-2 flex items-center justify-between border-b border-white/10 shrink-0 sticky top-0 z-30">
-            <span className="text-[8px] font-mono text-slate-400 uppercase tracking-wider">
-              {isEncodeMode ? "Universal Tracks" : "Track"}
+          <div className="h-4 bg-black/80 px-2 flex items-center justify-center border-b border-white/10 shrink-0 sticky top-0 z-30">
+            <span className="text-[9px] font-mono text-indigo-400 font-bold">
+              {isEncodeMode ? `${displayedTracks.length} Tracks` : "Ready"}
             </span>
-            <div className="flex items-center space-x-2">
-              <span className="text-[8px] font-mono text-indigo-400 font-bold">
-                {isEncodeMode ? `${displayedTracks.length} Tracks` : "Ready"}
-              </span>
-              {isEncodeMode && (
-                <button
-                  onClick={handleAddTrack}
-                  className="p-0.5 text-slate-400 hover:text-white hover:bg-white/10 rounded cursor-pointer transition-colors"
-                  title="Add New Track"
-                >
-                  <Plus className="w-3 h-3" />
-                </button>
-              )}
-            </div>
           </div>
 
           {/* Track Headers List */}
@@ -2177,20 +2260,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                     </button>
                   </div>
 
-                  {/* Direct Add File / Media to Track */}
                   <div className="flex items-center space-x-0.5">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleTrackFileSelect(track.id);
-                      }}
-                      className="p-1 rounded text-slate-400 hover:text-indigo-300 hover:bg-white/10 transition cursor-pointer flex items-center space-x-0.5 text-[9px]"
-                      title="Attach media file (image/audio/video) directly to this track"
-                    >
-                      <FilePlus className="w-2.5 h-2.5" />
-                      <span className="hidden sm:inline">Media</span>
-                    </button>
-
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -2206,6 +2276,12 @@ export const Timeline: React.FC<TimelineProps> = ({
               </div>
             );
           })}
+          {isEncodeMode && hoveredDropTrackId === 'CREATE_NEW_TRACK' && (
+            <div className="h-14 px-2 py-1 flex items-center space-x-1.5 bg-indigo-950/90 border-l-2 border-indigo-400 text-indigo-200 text-xs font-medium animate-pulse shrink-0">
+              <Plus className="w-3.5 h-3.5 text-indigo-400" />
+              <span>+ New Track</span>
+            </div>
+          )}
           </div>
         </div>
 
@@ -2320,12 +2396,15 @@ export const Timeline: React.FC<TimelineProps> = ({
                         const filmstripWidthPct = Math.max(100, (fileDur / srcSpan) * 100);
                         const filmstripLeftPct = -((srcStart / srcSpan) * 100);
 
+                        const nextClip = track.clips[clipIdx + 1];
+                        const isSnappedToNext = nextClip && Math.abs(clip.endTime - nextClip.startTime) < 0.05;
+
                         return (
-                          <div
-                            key={clip.id}
-                            className={`absolute top-1 bottom-1 rounded-md shadow-xl z-20 overflow-hidden cursor-grab active:cursor-grabbing select-none border-2 transition group ${
-                              clipColorConfig.clipBorder
-                            } ${clipColorConfig.clipBg} ${isClipActive ? 'ring-2 ring-white/60 shadow-indigo-500/20' : ''}`}
+                          <React.Fragment key={clip.id}>
+                            <div
+                              className={`absolute top-1 bottom-1 rounded-md shadow-xl z-20 overflow-hidden cursor-grab active:cursor-grabbing select-none border-2 transition group ${
+                                clipColorConfig.clipBorder
+                              } ${clipColorConfig.clipBg} ${isClipActive ? 'ring-2 ring-white/60 shadow-indigo-500/20' : ''}`}
                             style={{
                               left: `${clipStartPct}%`,
                               width: `${Math.max(0.8, clipEndPct - clipStartPct)}%`,
@@ -2458,11 +2537,55 @@ export const Timeline: React.FC<TimelineProps> = ({
                               </div>
                             </div>
                           </div>
+
+                          {/* Inter-clip Add Button if snapped */}
+                          {isSnappedToNext && (
+                            <div 
+                              className="absolute z-40 pointer-events-auto flex items-center justify-center -translate-x-1/2 -translate-y-1/2"
+                              style={{ left: `${clipEndPct}%`, top: '50%' }}
+                            >
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveTransitionMenu({ trackId: track.id, clipId: clip.id });
+                                }}
+                                className={`w-5 h-5 bg-slate-900 rounded-md border border-white/20 shadow-lg flex items-center justify-center text-white hover:scale-110 hover:bg-indigo-600 transition-all cursor-pointer active:scale-95 ${clipColorConfig.clipBorder} ${activeTransitionMenu?.trackId === track.id && activeTransitionMenu?.clipId === clip.id ? 'bg-indigo-600' : ''}`}
+                                title="Add Media / Transition"
+                              >
+                                {clip.transition && clip.transition !== 'none' ? (
+                                  <div className="w-2.5 h-2.5 bg-white rounded-sm opacity-80" style={{ clipPath: 'polygon(0 0, 100% 50%, 0 100%)' }} />
+                                ) : (
+                                  <Plus className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                              
+                              {activeTransitionMenu?.trackId === track.id && activeTransitionMenu?.clipId === clip.id && (
+                                <>
+                                  <div className="fixed inset-0 z-40 cursor-default" onClick={(e) => { e.stopPropagation(); setActiveTransitionMenu(null); }} />
+                                  <div className="absolute top-6 left-1/2 -translate-x-1/2 bg-slate-800 border border-slate-700 rounded-lg shadow-2xl p-1 z-50 flex flex-col min-w-[120px] text-xs font-medium overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                                    <div className="px-2 py-1.5 text-slate-400 text-[10px] uppercase tracking-wider mb-1 border-b border-slate-700/50">Transition</div>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'none'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'none' || !clip.transition ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>None</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'fade'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'fade' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Fade</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'crossfade'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'crossfade' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Crossfade</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'dissolve'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'dissolve' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Dissolve</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'wipe'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'wipe' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Wipe</button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </React.Fragment>
                         );
                       })}
                   </div>
                 );
               })}
+              {isEncodeMode && hoveredDropTrackId === 'CREATE_NEW_TRACK' && (
+                <div className="h-14 bg-indigo-950/60 ring-2 ring-indigo-400 ring-inset border-2 border-dashed border-indigo-400/80 flex items-center justify-center text-xs font-semibold text-indigo-300 transition-all animate-pulse z-20">
+                  <Plus className="w-4 h-4 mr-1.5" />
+                  <span>Release to create new track</span>
+                </div>
+              )}
             </div>
 
             {/* 3. Magnetic Snap Vertical Guideline & Indicator */}

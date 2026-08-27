@@ -30,6 +30,7 @@ export interface TimelineClip {
   color?: TrackColor;
   transform?: ClipTransform;
   isTrimmed?: boolean;
+  transition?: 'none' | 'fade' | 'crossfade' | 'dissolve' | 'wipe';
 }
 
 export interface TimelineTrackData {

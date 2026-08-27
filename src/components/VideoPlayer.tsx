@@ -56,6 +56,8 @@ interface VideoPlayerProps {
   onUpdateSettings?: (settings: Partial<EditSettings>) => void;
   onToggleEncodeMode?: () => void;
   isEncodeMode?: boolean;
+  isLeftPanelExpanded?: boolean;
+  isRightPanelExpanded?: boolean;
   videoName?: string;
   selectedFile?: File;
   tracks?: TimelineTrackData[];
@@ -113,6 +115,7 @@ type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
 interface ActiveLayerItem {
   trackId: string;
   trackName: string;
+  subLayerName?: string;
   trackColor: TrackColor;
   trackIndex: number;
   clip: TimelineClip;
@@ -122,6 +125,8 @@ interface ActiveLayerItem {
   muted: boolean;
   locked: boolean;
   volume: number;
+  transitionOpacity?: number;
+  transitionClipPath?: string;
 }
 
 const AudioTrack: React.FC<{
@@ -200,10 +205,10 @@ const LayerVideoElement: React.FC<{
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.playbackRate = playbackRate;
-      videoRef.current.volume = layer.muted ? 0 : layer.volume;
+      videoRef.current.volume = layer.muted ? 0 : layer.volume * (layer.transitionOpacity ?? 1);
       videoRef.current.muted = layer.muted;
     }
-  }, [playbackRate, layer.muted, layer.volume]);
+  }, [playbackRate, layer.muted, layer.volume, layer.transitionOpacity]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -240,7 +245,8 @@ const LayerVideoElement: React.FC<{
       className="w-full h-auto max-w-none block pointer-events-none select-none rounded shadow-md object-cover"
       style={{
         filter: [filterStyle, layer.transform.blur ? `blur(${layer.transform.blur}px)` : ''].filter(Boolean).join(' ') || undefined,
-        opacity: layer.transform.opacity ?? 1,
+        opacity: (layer.transform.opacity ?? 1) * (layer.transitionOpacity ?? 1),
+        clipPath: layer.transitionClipPath,
       }}
       onTimeUpdate={() => {
         if (isMaster && videoRef.current && isPlaying && onTimeUpdate) {
@@ -278,6 +284,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onUpdateSettings,
   onToggleEncodeMode,
   isEncodeMode = false,
+  isLeftPanelExpanded = true,
+  isRightPanelExpanded = true,
   videoName,
   tracks = [],
   onUpdateClipTransform,
@@ -286,6 +294,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoWrapperRef = useRef<HTMLDivElement>(null);
+
+  const leftPadding = useMemo(() => {
+    if (!isEncodeMode) return 40;
+    return isLeftPanelExpanded ? 304 : 28;
+  }, [isEncodeMode, isLeftPanelExpanded]);
+
+  const rightPadding = useMemo(() => {
+    if (!isEncodeMode) return 12;
+    return isRightPanelExpanded ? 304 : 28;
+  }, [isEncodeMode, isRightPanelExpanded]);
   const singleVideoRef = useRef<HTMLVideoElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -468,66 +486,180 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // 🎛️ ACTIVE VISUAL LAYERS RESOLUTION (ENCODE MODE)
   // =========================================================================
   const activeLayers: ActiveLayerItem[] = useMemo(() => {
-    if (!isEncodeMode || !tracks || tracks.length === 0) return [];
+    if (!tracks || tracks.length === 0) return [];
 
     const list: ActiveLayerItem[] = [];
+    const TRANSITION_HALF = 0.5; // 0.5s transition window (1s total)
 
     tracks.forEach((track, trackIdx) => {
       if (track.hidden) return;
 
-      // Find clip on this track at current time
-      const match = track.clips.find(
-        (c) => c.startTime <= currentTime && currentTime <= c.endTime
-      );
+      const clips = track.clips || [];
 
-      if (!match) return;
+      // Pre-calculate visual clip sequence numbers (sorted by startTime)
+      const visualClips = clips
+        .filter((c) => {
+          const isVid =
+            c.mediaType === 'video' ||
+            (c.file && (c.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(c.file.name)));
+          const isImg =
+            c.mediaType === 'image' ||
+            (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)));
+          return isVid || isImg;
+        })
+        .slice()
+        .sort((a, b) => a.startTime - b.startTime);
 
-      const isVideo =
-        match.mediaType === 'video' ||
-        (match.file && (match.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(match.file.name)));
+      const clipSeqMap = new Map<string, number>();
+      visualClips.forEach((c, index) => {
+        clipSeqMap.set(c.id, index + 1);
+      });
 
-      const isImage =
-        match.mediaType === 'image' ||
-        (match.file && (match.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(match.file.name)));
+      clips.forEach((clip, i) => {
+        const nextClip = i < clips.length - 1 ? clips[i + 1] : null;
+        const prevClip = i > 0 ? clips[i - 1] : null;
 
-      if (!isVideo && !isImage) return;
+        // Check boundary adjacency
+        const hasOutgoing = clip.transition && clip.transition !== 'none' && nextClip && Math.abs(clip.endTime - nextClip.startTime) < 0.15;
+        const hasIncoming = prevClip && prevClip.transition && prevClip.transition !== 'none' && Math.abs(prevClip.endTime - clip.startTime) < 0.15;
 
-      const url = match.previewUrl || (match.file ? getFileUrl(match.file) : '');
-      if (!url) return;
+        // Check active condition
+        const isNormallyActive = currentTime >= clip.startTime && currentTime <= clip.endTime;
+        const isInOutgoing = hasOutgoing && currentTime >= (clip.endTime - TRANSITION_HALF) && currentTime <= (clip.endTime + TRANSITION_HALF);
+        const isInIncoming = hasIncoming && currentTime >= (prevClip!.endTime - TRANSITION_HALF) && currentTime <= (prevClip!.endTime + TRANSITION_HALF);
+        const isSoloFadeEnd = clip.transition === 'fade' && !nextClip && currentTime >= (clip.endTime - TRANSITION_HALF) && currentTime <= clip.endTime;
 
-      // Default transform if none set:
-      // Track 1 (base layer): center full frame 1.0
-      // Track 2+ (overlay layers): default nice overlay scale (e.g. 0.4) centered
-      const defaultTransform: ClipTransform = {
-        x: 50,
-        y: 50,
-        scale: trackIdx === 0 ? 1.0 : 0.45,
-        rotation: 0,
-        opacity: 1,
-      };
+        if (!isNormallyActive && !isInOutgoing && !isInIncoming && !isSoloFadeEnd) {
+          return;
+        }
 
-      list.push({
-        trackId: track.id,
-        trackName: track.name,
-        trackColor: track.color,
-        trackIndex: trackIdx,
-        clip: match,
-        mediaType: isVideo ? 'video' : 'image',
-        url,
-        transform: match.transform ? { ...defaultTransform, ...match.transform } : defaultTransform,
-        muted: track.muted || settings.muteAudio,
-        locked: !!track.locked,
-        volume: track.volume ?? 1,
+        const isVideo =
+          clip.mediaType === 'video' ||
+          (clip.file && (clip.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(clip.file.name)));
+
+        const isImage =
+          clip.mediaType === 'image' ||
+          (clip.file && (clip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name)));
+
+        if (!isVideo && !isImage) return;
+
+        const url = clip.previewUrl || (clip.file ? getFileUrl(clip.file) : '');
+        if (!url) return;
+
+        // Calculate transition opacity and clipPath
+        let transitionOpacity = 1.0;
+        let transitionClipPath: string | undefined = undefined;
+
+        if (isInOutgoing) {
+          const transType = clip.transition;
+          const p = Math.max(0, Math.min(1, (currentTime - (clip.endTime - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
+          if (transType === 'fade') {
+            transitionOpacity = p <= 0.5 ? (1.0 - p * 2) : 0.0;
+          } else if (transType === 'crossfade' || transType === 'dissolve') {
+            transitionOpacity = 1.0 - p;
+          } else if (transType === 'wipe') {
+            transitionOpacity = 1.0;
+          }
+        } else if (isInIncoming) {
+          const transType = prevClip!.transition;
+          const p = Math.max(0, Math.min(1, (currentTime - (prevClip!.endTime - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
+          if (transType === 'fade') {
+            transitionOpacity = p > 0.5 ? ((p - 0.5) * 2) : 0.0;
+          } else if (transType === 'crossfade' || transType === 'dissolve') {
+            transitionOpacity = p;
+          } else if (transType === 'wipe') {
+            transitionOpacity = 1.0;
+            const pct = Math.round(p * 100);
+            transitionClipPath = `polygon(0 0, ${pct}% 0, ${pct}% 100%, 0 100%)`;
+          }
+        } else if (isSoloFadeEnd) {
+          const p = Math.max(0, Math.min(1, (currentTime - (clip.endTime - TRANSITION_HALF)) / TRANSITION_HALF));
+          transitionOpacity = 1.0 - p;
+        }
+
+        const defaultTransform: ClipTransform = {
+          x: 50,
+          y: 50,
+          scale: trackIdx === 0 ? 1.0 : 0.45,
+          rotation: 0,
+          opacity: 1,
+        };
+
+        list.push({
+          trackId: track.id,
+          trackName: track.name,
+          subLayerName: `Layer ${trackIdx + 1}-${clipSeqMap.get(clip.id) || (i + 1)}`,
+          trackColor: track.color,
+          trackIndex: trackIdx,
+          clip,
+          mediaType: isVideo ? 'video' : 'image',
+          url,
+          transform: clip.transform ? { ...defaultTransform, ...clip.transform } : defaultTransform,
+          muted: track.muted || settings.muteAudio,
+          locked: !!track.locked,
+          volume: track.volume ?? 1,
+          transitionOpacity,
+          transitionClipPath,
+        });
       });
     });
 
     return list;
-  }, [isEncodeMode, tracks, currentTime, settings.muteAudio, getFileUrl]);
+  }, [tracks, currentTime, settings.muteAudio, getFileUrl]);
+
+  // Dynamically resolve master timekeeper clip ID to prevent freezes at clip boundaries during transitions
+  const masterLayerId = useMemo(() => {
+    const videoLayers = activeLayers.filter((l) => l.mediaType === 'video');
+    if (videoLayers.length === 0) return null;
+
+    // 1. Primary choice: active video layer on lowest trackIndex where currentTime is within clip bounds
+    const activeCurrent = videoLayers
+      .slice()
+      .sort((a, b) => a.trackIndex - b.trackIndex)
+      .find((l) => currentTime >= l.clip.startTime && currentTime < l.clip.endTime);
+    if (activeCurrent) {
+      return activeCurrent.clip.id;
+    }
+
+    // 2. Transition choice: incoming video layer after outgoing clip ended (currentTime >= clip.endTime)
+    const activeIncoming = videoLayers
+      .slice()
+      .sort((a, b) => a.trackIndex - b.trackIndex)
+      .find((l) => currentTime >= l.clip.startTime - 0.5 && currentTime <= l.clip.endTime);
+    if (activeIncoming) {
+      return activeIncoming.clip.id;
+    }
+
+    // 3. Fallback: first video layer
+    return videoLayers[0].clip.id;
+  }, [activeLayers, currentTime]);
 
   // Selected layer item reference
   const activeSelectedLayer = useMemo(() => {
     return activeLayers.find((l) => l.clip.id === selectedClipId) || null;
   }, [activeLayers, selectedClipId]);
+
+  // Fallback timer when playing image clips or when no video element is master
+  useEffect(() => {
+    if (!isPlaying) return;
+    const hasVideoMaster = activeLayers.some((l) => l.mediaType === 'video' && l.clip.id === masterLayerId);
+    if (hasVideoMaster) return; // Active video element drives time updates
+
+    let lastTime = performance.now();
+    let animId: number;
+
+    const tick = (now: number) => {
+      const delta = (now - lastTime) / 1000;
+      lastTime = now;
+
+      const speed = settings.speed || 1;
+      onTimeUpdate?.(currentTime + delta * speed);
+      animId = requestAnimationFrame(tick);
+    };
+
+    animId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animId);
+  }, [isPlaying, masterLayerId, activeLayers, currentTime, settings.speed, onTimeUpdate]);
 
   // =========================================================================
   // 🖐️ DIRECT DRAG & DROP FOR PREVIEW LAYERS (drag and drop supported)
@@ -909,13 +1041,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [isDraggingCrop, onUpdateSettings]);
 
-  const hasLayers = isEncodeMode && activeLayers.length > 0;
+  const hasTimelineTracks = useMemo(() => {
+    return !!(tracks && tracks.some((t) => !t.hidden && t.clips && t.clips.length > 0));
+  }, [tracks]);
+
+  const hasLayers = hasTimelineTracks || activeLayers.length > 0;
 
   return (
     <div
       ref={containerRef}
-      className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-2 sm:p-3 overflow-hidden select-none"
-      style={{ containerType: 'size' }}
+      className="flex-1 bg-slate-950 flex flex-col items-center justify-center relative p-2 sm:p-3 overflow-hidden select-none transition-all duration-300 ease-in-out"
+      style={{
+        containerType: 'size',
+        paddingLeft: `${leftPadding}px`,
+        paddingRight: `${rightPadding}px`,
+      }}
       onClick={(e) => {
         // Deselect layer when clicking outside preview box
         if (e.target === containerRef.current) {
@@ -1025,7 +1165,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       layer.locked ? 'cursor-default' : 'cursor-move'
                     } ${
                       isSelected
-                        ? 'ring-2 ring-violet-400 ring-offset-2 ring-offset-black shadow-2xl'
+                        ? 'shadow-2xl'
                         : 'hover:ring-1 hover:ring-white/40'
                     }`}
                     style={{
@@ -1045,7 +1185,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         className="w-full h-auto max-w-none block pointer-events-none select-none rounded shadow-md object-contain"
                         style={{
                           filter: [getCssFilter(), layer.transform.blur ? `blur(${layer.transform.blur}px)` : ''].filter(Boolean).join(' ') || undefined,
-                          opacity: layer.transform.opacity ?? 1,
+                          opacity: (layer.transform.opacity ?? 1) * (layer.transitionOpacity ?? 1),
+                          clipPath: layer.transitionClipPath,
                         }}
                         onLoad={(e) => {
                           const img = e.currentTarget;
@@ -1061,7 +1202,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                         isPlaying={isPlaying}
                         playbackRate={settings.speed}
                         filterStyle={getCssFilter()}
-                        isMaster={idx === 0}
+                        isMaster={layer.clip.id === masterLayerId}
                         onTimeUpdate={onTimeUpdate}
                         onDurationLoaded={onDurationLoaded}
                         onAspectLoaded={(asp) => {
@@ -1072,66 +1213,100 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       />
                     )}
 
-                    {/* Active Layer Bounding Frame & Corner Drag Handles */}
-                    {isSelected && (
-                      <div className="absolute inset-0 pointer-events-none border-2 border-violet-400 rounded">
-                        {/* Top Badge showing Track Name and Clip Name */}
-                        <div
-                          className="absolute -top-7 left-0 flex items-center space-x-1.5 bg-slate-900/95 border border-violet-400/80 text-violet-200 text-[10px] font-medium px-2 py-0.5 rounded shadow-lg backdrop-blur-md pointer-events-auto whitespace-nowrap"
-                          onPointerDown={(e) => e.stopPropagation()}
-                        >
-                          {layer.locked ? (
-                            <Lock className="w-3 h-3 text-amber-400" />
-                          ) : layer.mediaType === 'video' ? (
-                            <VideoIcon className="w-3 h-3 text-violet-400" />
-                          ) : (
-                            <ImageIcon className="w-3 h-3 text-emerald-400" />
-                          )}
-                          <span className="font-semibold text-white">{layer.trackName}:</span>
-                          <span className="max-w-[120px] truncate">{layer.clip.name}</span>
-                          <span className="text-slate-400 text-[9px]">({Math.round(layer.transform.scale * 100)}%)</span>
-                          {layer.locked && (
-                            <span className="text-amber-400 text-[9px] font-semibold">(Locked)</span>
-                          )}
-                          <button
-                            onClick={() => setSelectedClipId(null)}
-                            className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
-                            title="Deselect"
-                          >
-                            <X className="w-2.5 h-2.5" />
-                          </button>
-                        </div>
+                    {/* Active Layer Bounding Frame & Corner Drag Handles (Constant Screen Size) */}
+                    {isSelected && (() => {
+                      const s = Math.max(0.001, layer.transform.scale || 1);
+                      const invScale = 1 / s;
+                      const borderPx = 1.5 * invScale;
 
-                        {/* Top-Left Corner Handle (Resize/Scale) - Only when unlocked */}
-                        {!layer.locked && (
-                          <>
-                            <div
-                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'nw')}
-                              className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition pointer-events-auto touch-none"
-                              title="Drag to resize / scale layer (Top-Left)"
-                            />
-                            {/* Top-Right Corner Handle */}
-                            <div
-                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'ne')}
-                              className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition pointer-events-auto touch-none"
-                              title="Drag to resize / scale layer (Top-Right)"
-                            />
-                            {/* Bottom-Left Corner Handle */}
-                            <div
-                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'sw')}
-                              className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition pointer-events-auto touch-none"
-                              title="Drag to resize / scale layer (Bottom-Left)"
-                            />
-                            {/* Bottom-Right Corner Handle */}
-                            <div
-                              onPointerDown={(e) => handlePointerDownLayer(e, layer, 'se')}
-                              className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition pointer-events-auto touch-none"
-                              title="Drag to resize / scale layer (Bottom-Right)"
-                            />
-                          </>
-                        )}
-                      </div>
-                    )}
+                      return (
+                        <div className="absolute inset-0 pointer-events-none">
+                          {/* Constant 1.5px border on screen */}
+                          <div
+                            className="absolute inset-0 pointer-events-none rounded-[1px]"
+                            style={{
+                              border: `${borderPx}px solid #a78bfa`,
+                            }}
+                          />
+
+                          {/* Top Badge showing Track Name and Clip Name - Constant Screen Size */}
+                          <div
+                            className="absolute top-0 left-0 flex items-center space-x-1.5 bg-slate-900/95 border border-violet-400/80 text-violet-200 text-[10px] font-medium px-2 py-0.5 rounded shadow-lg backdrop-blur-md pointer-events-auto whitespace-nowrap"
+                            style={{
+                              transform: `translate(0, -100%) translateY(-6px) scale(${invScale})`,
+                              transformOrigin: 'bottom left',
+                            }}
+                            onPointerDown={(e) => e.stopPropagation()}
+                          >
+                            {layer.locked ? (
+                              <Lock className="w-3 h-3 text-amber-400" />
+                            ) : layer.mediaType === 'video' ? (
+                              <VideoIcon className="w-3 h-3 text-violet-400" />
+                            ) : (
+                              <ImageIcon className="w-3 h-3 text-emerald-400" />
+                            )}
+                            <span className="font-mono font-bold text-violet-300">{layer.subLayerName || layer.trackName}:</span>
+                            <span className="max-w-[120px] truncate">{layer.clip.name}</span>
+                            <span className="text-slate-400 text-[9px]">({Math.round(layer.transform.scale * 100)}%)</span>
+                            {layer.locked && (
+                              <span className="text-amber-400 text-[9px] font-semibold">(Locked)</span>
+                            )}
+                            <button
+                              onClick={() => setSelectedClipId(null)}
+                              className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
+                              title="Deselect"
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
+
+                          {/* Top-Left Corner Handle (Resize/Scale) - Only when unlocked */}
+                          {!layer.locked && (
+                            <>
+                              <div
+                                onPointerDown={(e) => handlePointerDownLayer(e, layer, 'nw')}
+                                className="absolute top-0 left-0 w-3.5 h-3.5 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:bg-violet-100 transition-colors pointer-events-auto touch-none"
+                                style={{
+                                  transform: `translate(-50%, -50%) scale(${invScale})`,
+                                  transformOrigin: 'center center',
+                                }}
+                                title="Drag to resize / scale layer (Top-Left)"
+                              />
+                              {/* Top-Right Corner Handle */}
+                              <div
+                                onPointerDown={(e) => handlePointerDownLayer(e, layer, 'ne')}
+                                className="absolute top-0 right-0 w-3.5 h-3.5 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:bg-violet-100 transition-colors pointer-events-auto touch-none"
+                                style={{
+                                  transform: `translate(50%, -50%) scale(${invScale})`,
+                                  transformOrigin: 'center center',
+                                }}
+                                title="Drag to resize / scale layer (Top-Right)"
+                              />
+                              {/* Bottom-Left Corner Handle */}
+                              <div
+                                onPointerDown={(e) => handlePointerDownLayer(e, layer, 'sw')}
+                                className="absolute bottom-0 left-0 w-3.5 h-3.5 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:bg-violet-100 transition-colors pointer-events-auto touch-none"
+                                style={{
+                                  transform: `translate(-50%, 50%) scale(${invScale})`,
+                                  transformOrigin: 'center center',
+                                }}
+                                title="Drag to resize / scale layer (Bottom-Left)"
+                              />
+                              {/* Bottom-Right Corner Handle */}
+                              <div
+                                onPointerDown={(e) => handlePointerDownLayer(e, layer, 'se')}
+                                className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:bg-violet-100 transition-colors pointer-events-auto touch-none"
+                                style={{
+                                  transform: `translate(50%, 50%) scale(${invScale})`,
+                                  transformOrigin: 'center center',
+                                }}
+                                title="Drag to resize / scale layer (Bottom-Right)"
+                              />
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })}

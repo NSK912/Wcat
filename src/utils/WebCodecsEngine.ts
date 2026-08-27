@@ -182,17 +182,29 @@ function drawLayerToCanvas(
   transform: ClipTransform | undefined,
   canvasWidth: number,
   canvasHeight: number,
-  settings?: EditSettings
+  settings?: EditSettings,
+  transitionOpacity: number = 1.0,
+  transitionClipPath?: string
 ) {
   const t = transform || { x: 50, y: 50, scale: 1, rotation: 0, opacity: 1 };
   const posX = (t.x / 100) * canvasWidth;
   const posY = (t.y / 100) * canvasHeight;
   const scale = t.scale ?? 1;
   const rotationDeg = t.rotation ?? 0;
-  const opacity = t.opacity ?? 1;
+  const opacity = (t.opacity ?? 1) * transitionOpacity;
 
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
+
+  if (transitionClipPath && transitionClipPath.startsWith('polygon(')) {
+    const match = transitionClipPath.match(/(\d+)%/);
+    if (match) {
+      const pct = parseInt(match[1], 10) / 100;
+      ctx.beginPath();
+      ctx.rect(0, 0, canvasWidth * pct, canvasHeight);
+      ctx.clip();
+    }
+  }
   
   let sourceToDraw = img;
   if (t.blur && t.blur > 0) {
