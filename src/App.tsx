@@ -23,6 +23,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Layers,
+  Box,
   Monitor,
   Smartphone,
   Square,
@@ -286,6 +287,7 @@ export default function App() {
   // Modals
   const [isSampleModalOpen, setIsSampleModalOpen] = useState<boolean>(false);
   const [isProcessingModalOpen, setIsProcessingModalOpen] = useState<boolean>(false);
+  const [useIframeSaveMode, setUseIframeSaveMode] = useState<boolean>(false);
   const [processingProgress, setProcessingProgress] = useState<number>(0);
   const [isProcessingComplete, setIsProcessingComplete] = useState<boolean>(false);
   const [processingMessage, setProcessingMessage] = useState<string>('');
@@ -803,11 +805,10 @@ export default function App() {
     }
   };
 
-  // Run FFmpeg Export Process
-  const handleExport = async (tracks?: any[]) => {
+  // Run FFmpeg / WebCodecs Export Process
+  const executeExportProcess = async (tracks?: any[], forceIframeMode: boolean = false) => {
     if (!videoUrl) return;
 
-    // 1. Prompt user to choose destination folder & file name before starting export/remux
     let fileHandle: any = null;
     const detectedExt = (videoName ? videoName.split('.').pop()?.toLowerCase() : 'mp4') || 'mp4';
     const sourceExt = ['mp4', 'mkv', 'webm', 'ts', 'mov', 'm4v'].includes(detectedExt) ? detectedExt : 'mp4';
@@ -821,46 +822,51 @@ export default function App() {
       defaultOutputName = selectedFiles.length > 1 ? `merged_output.${sourceExt}` : `trimmed_${baseName}.${sourceExt}`;
     }
 
-    if ('showSaveFilePicker' in window) {
-      try {
-        fileHandle = await (window as any).showSaveFilePicker({
-          suggestedName: defaultOutputName,
-          types: [
-            {
-              description: 'MP4 Video (.mp4)',
-              accept: { 'video/mp4': ['.mp4'] },
-            },
-            {
-              description: 'Matroska Video (.mkv)',
-              accept: { 'video/x-matroska': ['.mkv'] },
-            },
-            {
-              description: 'WebM Video (.webm)',
-              accept: { 'video/webm': ['.webm'] },
-            },
-            {
-              description: 'MPEG-TS Video (.ts)',
-              accept: { 'video/mp2t': ['.ts'] },
-            },
-          ],
-        });
-      } catch (err: any) {
-        if (err.name === 'AbortError') {
-          console.log('Export cancelled by user (Save picker closed)');
-          return; // Abort export cleanly if user cancels folder/file picker
+    const isIframeDirect = forceIframeMode || useIframeSaveMode;
+
+    if (!isIframeDirect) {
+      if ('showSaveFilePicker' in window) {
+        try {
+          fileHandle = await (window as any).showSaveFilePicker({
+            suggestedName: defaultOutputName,
+            types: [
+              {
+                description: 'MP4 Video (.mp4)',
+                accept: { 'video/mp4': ['.mp4'] },
+              },
+              {
+                description: 'Matroska Video (.mkv)',
+                accept: { 'video/x-matroska': ['.mkv'] },
+              },
+              {
+                description: 'WebM Video (.webm)',
+                accept: { 'video/webm': ['.webm'] },
+              },
+              {
+                description: 'MPEG-TS Video (.ts)',
+                accept: { 'video/mp2t': ['.ts'] },
+              },
+            ],
+          });
+        } catch (err: any) {
+          if (err.name === 'AbortError') {
+            console.log('Export cancelled by user (Save picker closed)');
+            return;
+          }
+          console.warn('showSaveFilePicker error:', err);
+          alert(
+            '⚠️ ไม่สามารถเปิด System Save File Picker ได้เนื่องจากข้อจำกัดความปลอดภัยของ iFrame\n\n' +
+            'กรุณาเปิดสวิตช์ "Iframe Save Mode" ใน Panel Encode (ตั้งค่า) หรือเปิดเว็บในแท็บใหม่เพื่อเลือกโฟลเดอร์เซฟไฟล์'
+          );
+          return;
         }
-        console.warn('showSaveFilePicker error/fallback:', err);
-        
-        (window as any).alert('⚠️ Unable to open "Save File Picker".\n\nReason: You are using the app inside an iframe/preview window with restricted file access permissions, or your browser does not support the File System Access API.\n\n💡 Solution: Click "Open in New Tab" in the top right corner to run the app directly and enable direct-to-disk streaming.');
-        
-        const proceed = (window as any).confirm('Do you want to continue using fallback memory storage mode?\n(This will process in a temporary memory buffer or virtual storage)');
-        if (!proceed) {
-           return;
-        }
+      } else {
+        alert(
+          '⚠️ เบราว์เซอร์นี้ไม่รองรับ System Save File Picker\n\n' +
+          'กรุณาเปิดสวิตช์ "Iframe Save Mode" ใน Panel Encode (ตั้งค่า)'
+        );
+        return;
       }
-    } else {
-       const proceed = (window as any).confirm('⚠️ Your browser does not support the Save File Picker.\n\nDo you want to continue with fallback storage mode?');
-       if (!proceed) return;
     }
 
     const targetFilename = fileHandle ? fileHandle.name : defaultOutputName;
@@ -871,7 +877,6 @@ export default function App() {
     setIsProcessingComplete(false);
     setProcessingLogs([]);
     
-    // Revoke previous blob url if exists to free memory/cache
     if (outputUrl) {
       URL.revokeObjectURL(outputUrl);
     }
@@ -888,8 +893,12 @@ export default function App() {
       ]);
     };
 
-    addLog(`Engine: Wcat Zero-RAM Hybrid Stream Engine`);
-    addLog(`Target: ${targetFilename}`);
+    if (isIframeDirect || !fileHandle) {
+      addLog(`[Iframe Save Mode] Direct browser download pipeline initialized`);
+    } else {
+      addLog(`Engine: Wcat Zero-RAM Hybrid Stream Engine`);
+      addLog(`Target: ${targetFilename}`);
+    }
 
     try {
       const createPipelineStream = async (handle: FileSystemFileHandle | null, outName: string) => {
@@ -1143,6 +1152,10 @@ export default function App() {
       setProcessingMessage(`Error: ${err.message || 'Processing failed'}`);
       setIsProcessingComplete(true);
     }
+  };
+
+  const handleExport = async (tracks?: any[]) => {
+    await executeExportProcess(tracks, useIframeSaveMode);
   };
 
   const handleDownloadOutput = () => {
@@ -1414,6 +1427,29 @@ export default function App() {
                           { value: '64', label: '64 kbps (Low)' },
                         ]}
                       />
+                    </div>
+
+                    {/* IFRAME DIRECT SAVE MODE TOGGLE */}
+                    <div className="flex flex-col gap-1 p-2 rounded-lg bg-slate-900/80 border border-violet-500/30 mt-1">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center space-x-1.5 text-violet-300 font-mono text-[11px] font-bold">
+                          <Box className="w-3.5 h-3.5 text-violet-400" />
+                          <span>Iframe Save Mode:</span>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            id="toggle-iframe-save-mode"
+                            checked={useIframeSaveMode}
+                            onChange={(e) => setUseIframeSaveMode(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-8 h-4 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
+                        </label>
+                      </div>
+                      <span className="text-[10px] text-slate-400 leading-tight">
+                        {useIframeSaveMode ? 'เปิดใช้งาน: บันทึกไฟล์ผ่านเบราว์เซอร์สำหรับ iFrame' : 'ปิดใช้งาน: เรียกใช้ System Save File Picker'}
+                      </span>
                     </div>
                   </div>
                 </div>

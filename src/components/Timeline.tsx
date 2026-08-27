@@ -2055,7 +2055,7 @@ export const Timeline: React.FC<TimelineProps> = ({
         /* Empty / Idle State Timeline with clean ruler and empty track placeholder */
         <div className="flex border border-white/15 rounded-xl overflow-hidden bg-black/60 shadow-inner select-none opacity-60 flex-1 min-h-0">
           {/* Left Track Header */}
-          <div className="w-24 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col divide-y divide-white/10 z-20">
+          <div className="w-44 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col divide-y divide-white/10 z-20">
             <div className="h-4 bg-black/80 px-2 flex items-center justify-between border-b border-white/10 shrink-0">
               <span className="text-[8px] font-mono text-slate-500 uppercase tracking-wider">Track</span>
               <span className="text-[8px] font-mono text-slate-500">Ready</span>
@@ -2098,7 +2098,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               timelineScrollRef.current.scrollTop = e.currentTarget.scrollTop;
             }
           }}
-          className="w-24 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0"
+          className="w-32 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0"
         >
           {/* Top Header Label */}
           <div className="h-4 bg-black/80 px-2 flex items-center justify-center border-b border-white/10 shrink-0 sticky top-0 z-30">

@@ -151,11 +151,12 @@ const AudioTrack: React.FC<{
     if (audioRef.current) {
       const localTarget = Math.max(0, clip.sourceStartTime + (currentTime - clip.startTime));
       if (!isPlaying) {
-        if (Math.abs(audioRef.current.currentTime - localTarget) > 0.05) {
+        if (Math.abs(audioRef.current.currentTime - localTarget) > 0.01) {
           audioRef.current.currentTime = localTarget;
         }
       } else {
-        if (Math.abs(audioRef.current.currentTime - localTarget) > 0.25) {
+        // While playing, ONLY seek if drift is large (> 1.5s) to avoid seek-storms
+        if (Math.abs(audioRef.current.currentTime - localTarget) > 1.5) {
           audioRef.current.currentTime = localTarget;
         }
       }
@@ -165,6 +166,11 @@ const AudioTrack: React.FC<{
   useEffect(() => {
     if (audioRef.current) {
       if (isPlaying) {
+        // Sync position ONCE right before calling play()
+        const localTarget = Math.max(0, clip.sourceStartTime + (currentTime - clip.startTime));
+        if (Math.abs(audioRef.current.currentTime - localTarget) > 0.05) {
+          audioRef.current.currentTime = localTarget;
+        }
         audioRef.current.play().catch((err) => console.warn('Audio play failed:', err));
       } else {
         audioRef.current.pause();
@@ -218,7 +224,7 @@ const LayerVideoElement: React.FC<{
           videoRef.current.currentTime = targetTime;
         }
       } else {
-        if (Math.abs(videoRef.current.currentTime - targetTime) > 0.25) {
+        if (Math.abs(videoRef.current.currentTime - targetTime) > 1.5) {
           videoRef.current.currentTime = targetTime;
         }
       }
@@ -228,6 +234,10 @@ const LayerVideoElement: React.FC<{
   useEffect(() => {
     if (videoRef.current) {
       if (isPlaying) {
+        const targetTime = Math.max(0, (layer.clip.sourceStartTime || 0) + (currentTime - layer.clip.startTime));
+        if (Math.abs(videoRef.current.currentTime - targetTime) > 0.05) {
+          videoRef.current.currentTime = targetTime;
+        }
         videoRef.current.play().catch((err) => console.warn('Layer video playback paused:', err));
       } else {
         videoRef.current.pause();
@@ -639,11 +649,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return activeLayers.find((l) => l.clip.id === selectedClipId) || null;
   }, [activeLayers, selectedClipId]);
 
-  // Fallback timer when playing image clips or when no video element is master
+  // Fallback timer when playing image clips or when no video/audio element is master
   useEffect(() => {
     if (!isPlaying) return;
     const hasVideoMaster = activeLayers.some((l) => l.mediaType === 'video' && l.clip.id === masterLayerId);
-    if (hasVideoMaster) return; // Active video element drives time updates
+    const hasAudioMaster = !hasVideoMaster && activeAudioClips && activeAudioClips.length > 0;
+    if (hasVideoMaster || hasAudioMaster) return; // Active video or audio element drives time updates
 
     let lastTime = performance.now();
     let animId: number;
@@ -905,7 +916,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             singleVideoRef.current.currentTime = localTarget;
           }
         } else {
-          if (Math.abs(singleVideoRef.current.currentTime - localTarget) > 0.25) {
+          if (Math.abs(singleVideoRef.current.currentTime - localTarget) > 1.5) {
             singleVideoRef.current.currentTime = localTarget;
           }
         }
@@ -1320,7 +1331,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                   isPlaying={isPlaying}
                   playbackRate={settings.speed}
                   volume={settings.muteAudio ? 0 : settings.volume}
-                  isMasterTimekeeper={false}
+                  isMasterTimekeeper={!masterLayerId && idx === 0}
                   onTimeUpdate={onTimeUpdate}
                 />
               ))}

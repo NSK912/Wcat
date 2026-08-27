@@ -29,9 +29,14 @@ import { HardwareBlurEngine } from './HardwareBlur';
 
 const MASTER_AUDIO_SAMPLE_RATE = 48000;
 const MASTER_AUDIO_CHANNELS = 2;
+const AUDIO_FRAME_SIZE = 1024; // Standard AAC & Opus frame size (1024 samples at 48000Hz = ~21.33ms per frame)
+const AUDIO_FRAME_DURATION = AUDIO_FRAME_SIZE / MASTER_AUDIO_SAMPLE_RATE;
 
 const decodedAudioBufferCache = new Map<string, AudioBuffer>();
 
+/**
+ * Decodes audio file directly using browser's native WebAudio engine (fail-safe for MP3, WAV, AAC, M4A, OGG, FLAC)
+ */
 async function getAudioBufferForFile(file: File): Promise<AudioBuffer | null> {
   const cacheKey = `${file.name}_${file.size}_${file.lastModified}`;
   if (decodedAudioBufferCache.has(cacheKey)) {
@@ -39,7 +44,7 @@ async function getAudioBufferForFile(file: File): Promise<AudioBuffer | null> {
   }
   try {
     const arrayBuffer = await file.arrayBuffer();
-    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const AudioCtx = typeof window !== 'undefined' ? (window.AudioContext || (window as any).webkitAudioContext) : null;
     if (!AudioCtx) return null;
     const ctx = new AudioCtx();
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
@@ -52,15 +57,17 @@ async function getAudioBufferForFile(file: File): Promise<AudioBuffer | null> {
   }
 }
 
-function createAudioSampleFromBuffer(
+/**
+ * Extracts Float32 interleaved PCM samples in a uniform 1024-frame AudioSample block to prevent AAC/Opus frame jitter and audio stuttering
+ */
+function createAudioSampleBlock(
   audioBuffer: AudioBuffer,
   sourceStartSec: number,
-  durationSec: number,
   outputTimestamp: number
 ): AudioSample {
   const targetSampleRate = MASTER_AUDIO_SAMPLE_RATE;
   const targetChannels = MASTER_AUDIO_CHANNELS;
-  const numFrames = Math.max(1, Math.round(durationSec * targetSampleRate));
+  const numFrames = AUDIO_FRAME_SIZE;
   const pcmData = new Float32Array(numFrames * targetChannels);
 
   const srcRate = audioBuffer.sampleRate;
@@ -68,25 +75,34 @@ function createAudioSampleFromBuffer(
   const totalSrcFrames = audioBuffer.length;
   const srcStartFrame = Math.round(sourceStartSec * srcRate);
 
-  for (let ch = 0; ch < targetChannels; ch++) {
-    const srcChIndex = Math.min(ch, srcChannels - 1);
-    const srcData = audioBuffer.getChannelData(srcChIndex);
-    const channelOffset = ch * numFrames;
+  const leftChannel = audioBuffer.getChannelData(0);
+  const rightChannel = srcChannels > 1 ? audioBuffer.getChannelData(1) : leftChannel;
 
-    for (let i = 0; i < numFrames; i++) {
-      const srcFrameExact = srcStartFrame + (i / targetSampleRate) * srcRate;
-      const f0 = Math.floor(srcFrameExact);
-      const f1 = Math.min(f0 + 1, totalSrcFrames - 1);
-      const frac = srcFrameExact - f0;
+  for (let i = 0; i < numFrames; i++) {
+    const srcFrameExact = srcStartFrame + (i / targetSampleRate) * srcRate;
+    const f0 = Math.floor(srcFrameExact);
+    const f1 = Math.min(f0 + 1, totalSrcFrames - 1);
+    const frac = srcFrameExact - f0;
 
-      const v0 = f0 >= 0 && f0 < totalSrcFrames ? srcData[f0] : 0;
-      const v1 = f1 >= 0 && f1 < totalSrcFrames ? srcData[f1] : 0;
-      pcmData[channelOffset + i] = v0 + (v1 - v0) * frac;
+    let lVal = 0;
+    let rVal = 0;
+
+    if (f0 >= 0 && f0 < totalSrcFrames) {
+      const l0 = leftChannel[f0];
+      const l1 = f1 < totalSrcFrames ? leftChannel[f1] : l0;
+      lVal = l0 + (l1 - l0) * frac;
+
+      const r0 = rightChannel[f0];
+      const r1 = f1 < totalSrcFrames ? rightChannel[f1] : r0;
+      rVal = r0 + (r1 - r0) * frac;
     }
+
+    pcmData[i * 2] = lVal;
+    pcmData[i * 2 + 1] = rVal;
   }
 
   return new AudioSample({
-    format: 'f32-planar',
+    format: 'f32',
     sampleRate: targetSampleRate,
     numberOfChannels: targetChannels,
     timestamp: outputTimestamp,
@@ -95,13 +111,24 @@ function createAudioSampleFromBuffer(
 }
 
 /**
- * Creates a silent AudioSample of zero PCM values to maintain container track audio/video synchronization
+ * Creates a uniform 1024-frame silent AudioSample block of zero PCM values
  */
+function createSilentAudioBlock(timestamp: number): AudioSample {
+  const pcmData = new Float32Array(AUDIO_FRAME_SIZE * MASTER_AUDIO_CHANNELS);
+  return new AudioSample({
+    format: 'f32',
+    sampleRate: MASTER_AUDIO_SAMPLE_RATE,
+    numberOfChannels: MASTER_AUDIO_CHANNELS,
+    timestamp,
+    data: pcmData,
+  });
+}
+
 function createSilentAudioSample(timestamp: number, duration: number, sampleRate = MASTER_AUDIO_SAMPLE_RATE, channels = MASTER_AUDIO_CHANNELS): AudioSample {
   const numberOfFrames = Math.max(1, Math.round(duration * sampleRate));
   const pcmData = new Float32Array(numberOfFrames * channels);
   return new AudioSample({
-    format: 'f32-planar',
+    format: 'f32',
     sampleRate,
     numberOfChannels: channels,
     timestamp,
@@ -1405,22 +1432,31 @@ export async function processWebCodecsMultiTrackTimeline(
         if (!isImg) {
           let realDur = clip.fileDuration;
           if (!realDur || clip.endTime === undefined || clip.endTime <= clip.startTime) {
-            try {
-              const probeInput = new Input({ source: new BlobSource(clip.file), formats: ALL_FORMATS });
-              const vTracks = await probeInput.getVideoTracks();
-              if (vTracks.length > 0) {
-                const d = await vTracks[0].computeDuration();
-                if (d && Number.isFinite(d) && d > 0) realDur = d;
+            const isAud = clip.mediaType === 'audio' || clip.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus)$/i.test(clip.file.name);
+            if (isAud) {
+              const audioBuf = await getAudioBufferForFile(clip.file);
+              if (audioBuf) {
+                realDur = audioBuf.duration;
               }
-              if (!realDur) {
-                const aTracks = await probeInput.getAudioTracks();
-                if (aTracks.length > 0) {
-                  const d = await aTracks[0].computeDuration();
+            }
+            if (!realDur) {
+              try {
+                const probeInput = new Input({ source: new BlobSource(clip.file), formats: ALL_FORMATS });
+                const vTracks = await probeInput.getVideoTracks();
+                if (vTracks.length > 0) {
+                  const d = await vTracks[0].computeDuration();
                   if (d && Number.isFinite(d) && d > 0) realDur = d;
                 }
+                if (!realDur) {
+                  const aTracks = await probeInput.getAudioTracks();
+                  if (aTracks.length > 0) {
+                    const d = await aTracks[0].computeDuration();
+                    if (d && Number.isFinite(d) && d > 0) realDur = d;
+                  }
+                }
+              } catch (e) {
+                console.warn('Demuxer probe warning in MultiTrackTimeline:', e);
               }
-            } catch (e) {
-              console.warn('Demuxer probe warning in MultiTrackTimeline:', e);
             }
           }
 
@@ -1487,12 +1523,13 @@ export async function processWebCodecsMultiTrackTimeline(
     for (const clip of track.clips) {
       if (!clip.file) continue;
       const isImg = clip.mediaType === 'image' || clip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name);
+      const isAudio = clip.mediaType === 'audio' || clip.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus|wma)$/i.test(clip.file.name);
       if (isImg) {
         const bmp = bitmapMap.get(clip.id);
         if (bmp && bmp.width > 0 && bmp.height > 0) {
           if (!hasValidDims) { sourceWidth = bmp.width; sourceHeight = bmp.height; hasValidDims = true; }
         }
-      } else {
+      } else if (!isAudio) {
         try {
           const probeInput = new Input({ source: new BlobSource(clip.file), formats: ALL_FORMATS });
           const probeVTracks = await probeInput.getVideoTracks();
@@ -1602,6 +1639,8 @@ export async function processWebCodecsMultiTrackTimeline(
     lastDrawnSample: VideoSample | null;
   }>();
 
+  const failedVideoDecoderClips = new Set<string>();
+
   const audioClipDecoders = new Map<string, {
     aSink: AudioSampleSink;
     iterator: AsyncIterator<AudioSample>;
@@ -1636,13 +1675,14 @@ export async function processWebCodecsMultiTrackTimeline(
 
         if (activeClip && activeClip.file) {
           const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
+          const isAudio = activeClip.mediaType === 'audio' || activeClip.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus|wma)$/i.test(activeClip.file.name);
           if (isImg) {
             const bmp = bitmapMap.get(activeClip.id);
             if (bmp) {
               const transform = activeClip.transform || { x: 50, y: 50, scale: i === 0 ? 1.0 : 0.45, rotation: 0, opacity: 1 };
               drawLayerToCanvas(canvasCtx, bmp, bmp.width, bmp.height, transform, canvasWidth, canvasHeight, settings);
             }
-          } else {
+          } else if (!isAudio && !failedVideoDecoderClips.has(activeClip.id)) {
             let decoder = clipDecoders.get(activeClip.id);
             if (!decoder) {
               try {
@@ -1662,9 +1702,12 @@ export async function processWebCodecsMultiTrackTimeline(
                     lastDrawnSample: null,
                   };
                   clipDecoders.set(activeClip.id, decoder);
+                } else {
+                  failedVideoDecoderClips.add(activeClip.id);
                 }
               } catch (e) {
                 console.warn('Failed on-demand decoder creation for clip', activeClip.id, e);
+                failedVideoDecoderClips.add(activeClip.id);
               }
             }
 
@@ -1744,77 +1787,77 @@ export async function processWebCodecsMultiTrackTimeline(
           }
         }
 
+        let sampleAdded = false;
         if (activeAudioClip && activeAudioClip.file) {
-          const audioBuf = await getAudioBufferForFile(activeAudioClip.file);
-          if (audioBuf) {
-            const stepDur = Math.min(0.04, targetAudioEnd - currentAudioTime);
-            if (stepDur > 0.0001) {
-              const sourceOffset = (currentTimelinePos - (activeAudioClip.startTime || 0)) + (activeAudioClip.sourceStartTime || 0);
-              const sample = createAudioSampleFromBuffer(audioBuf, sourceOffset, stepDur, currentAudioTime);
-              await aSource.add(sample);
-              currentAudioTime += stepDur;
-              sample.close();
-              continue;
-            }
-          } else {
-            let audioDecoder = audioClipDecoders.get(activeAudioClip.id);
-            if (!audioDecoder) {
-              try {
-                const input = new Input({ source: new BlobSource(activeAudioClip.file), formats: ALL_FORMATS });
-                const aTracks = await input.getAudioTracks();
-                if (aTracks.length > 0) {
-                  const aSink = new AudioSampleSink(aTracks[0]);
-                  const sourceStart = activeAudioClip.sourceStartTime || 0;
-                  const dur = activeAudioClip.endTime !== undefined && activeAudioClip.endTime > (activeAudioClip.startTime || 0)
-                    ? activeAudioClip.endTime - (activeAudioClip.startTime || 0)
-                    : activeAudioClip.duration || activeAudioClip.fileDuration || 10;
-                  const sourceEnd = (activeAudioClip.sourceEndTime !== undefined ? activeAudioClip.sourceEndTime : sourceStart + dur) + 5;
-                  audioDecoder = {
-                    aSink,
-                    iterator: aSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
-                  };
-                  audioClipDecoders.set(activeAudioClip.id, audioDecoder);
-                }
-              } catch (e) {
-                console.warn('Failed on-demand audio decoder creation', activeAudioClip.id, e);
-              }
-            }
+          try {
+            const audioBuf = await getAudioBufferForFile(activeAudioClip.file);
+            if (audioBuf) {
+              const sourceStart = activeAudioClip.sourceStartTime || 0;
+              const clipStart = activeAudioClip.startTime || 0;
+              const sourceOffset = sourceStart + (currentTimelinePos - clipStart);
 
-            if (audioDecoder) {
-              let aSample = null;
-              let done = true;
-              try {
-                const res = await audioDecoder.iterator.next();
-                aSample = res.value;
-                done = res.done;
-              } catch (err) {
-                console.warn('Audio decoder iterator error:', err);
-                audioClipDecoders.delete(activeAudioClip.id);
-              }
-              if (!done && aSample) {
-                const adaptedSample = adaptAudioSample(aSample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
-                const stepDur = adaptedSample.duration > 0 ? adaptedSample.duration : 0.02;
-                adaptedSample.setTimestamp(currentAudioTime);
-                await aSource.add(adaptedSample);
-                currentAudioTime += stepDur;
-                if (adaptedSample !== aSample) adaptedSample.close();
-                try { aSample.close(); } catch {}
-                continue;
+              if (sourceOffset >= 0 && sourceOffset < audioBuf.duration) {
+                const aSample = createAudioSampleBlock(audioBuf, sourceOffset, currentAudioTime);
+                await aSource.add(aSample);
+                currentAudioTime += AUDIO_FRAME_DURATION;
+                aSample.close();
+                sampleAdded = true;
               }
             }
+          } catch (err) {
+            console.warn('Audio sampling error for clip:', activeAudioClip.id, err);
           }
         }
 
-        // No audio clip active at currentTimelinePos -> fill silence buffer to keep audio track synchronized
-        const gapDur = Math.min(0.04, targetAudioEnd - currentAudioTime);
-        if (gapDur > 0.0001) {
-          const silentSample = createSilentAudioSample(currentAudioTime, gapDur, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
+        if (!sampleAdded) {
+          const silentSample = createSilentAudioBlock(currentAudioTime);
           await aSource.add(silentSample);
-          currentAudioTime += silentSample.duration;
+          currentAudioTime += AUDIO_FRAME_DURATION;
           silentSample.close();
-        } else {
-          break;
         }
+      }
+    }
+
+    // Ensure audio track covers the full export duration up to exportDuration
+    while (currentAudioTime < exportDuration - 0.0005) {
+      const currentTimelinePos = exportStart + currentAudioTime;
+      let activeAudioClip: TimelineClip | null = null;
+      for (const track of visibleTracks) {
+        if (track.muted) continue;
+        const clip = track.clips.find((c) => {
+          if (!c.file) return false;
+          const isImg = c.mediaType === 'image' || c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name);
+          if (isImg) return false;
+          const start = c.startTime || 0;
+          const dur = c.endTime !== undefined && c.endTime > start ? c.endTime - start : c.duration || c.fileDuration || 10;
+          return currentTimelinePos >= start && currentTimelinePos < start + dur;
+        });
+        if (clip) { activeAudioClip = clip; break; }
+      }
+
+      let sampleAdded = false;
+      if (activeAudioClip && activeAudioClip.file) {
+        try {
+          const audioBuf = await getAudioBufferForFile(activeAudioClip.file);
+          if (audioBuf) {
+            const sourceStart = activeAudioClip.sourceStartTime || 0;
+            const clipStart = activeAudioClip.startTime || 0;
+            const sourceOffset = sourceStart + (currentTimelinePos - clipStart);
+            if (sourceOffset >= 0 && sourceOffset < audioBuf.duration) {
+              const aSample = createAudioSampleBlock(audioBuf, sourceOffset, currentAudioTime);
+              await aSource.add(aSample);
+              currentAudioTime += AUDIO_FRAME_DURATION;
+              aSample.close();
+              sampleAdded = true;
+            }
+          }
+        } catch {}
+      }
+      if (!sampleAdded) {
+        const silentSample = createSilentAudioBlock(currentAudioTime);
+        await aSource.add(silentSample);
+        currentAudioTime += AUDIO_FRAME_DURATION;
+        silentSample.close();
       }
     }
 
@@ -1838,6 +1881,8 @@ export async function processWebCodecsMultiTrackTimeline(
     if (decoder.currentSample) { decoder.currentSample.close(); decoder.currentSample = null; }
     if (decoder.lastDrawnSample) { decoder.lastDrawnSample.close(); decoder.lastDrawnSample = null; }
   }
+  clipDecoders.clear();
+  failedVideoDecoderClips.clear();
 
   // Finalize multiplexer output to ensure container headers (moov/cues) are written
   await output.finalize();
@@ -2201,18 +2246,7 @@ export async function processWebCodecsConcatStream(
 
       bmp.close();
       currentVideoTime += segDuration;
-      if (aSource && !settings.muteAudio) {
-        const audioEnd = currentVideoTime;
-        while (currentAudioTime < audioEnd - 0.0005) {
-          const stepDur = Math.min(0.04, audioEnd - currentAudioTime);
-          const silentSample = createSilentAudioSample(currentAudioTime, stepDur, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
-          await aSource.add(silentSample);
-          currentAudioTime += stepDur;
-          silentSample.close();
-        }
-      } else {
-        currentAudioTime += segDuration;
-      }
+      currentAudioTime += segDuration;
 
     } else {
       // =========================================================================
