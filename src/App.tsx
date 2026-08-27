@@ -1430,26 +1430,21 @@ export default function App() {
                     </div>
 
                     {/* IFRAME DIRECT SAVE MODE TOGGLE */}
-                    <div className="flex flex-col gap-1 p-2 rounded-lg bg-slate-900/80 border border-violet-500/30 mt-1">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-1.5 text-violet-300 font-mono text-[11px] font-bold">
-                          <Box className="w-3.5 h-3.5 text-violet-400" />
-                          <span>Iframe Save Mode:</span>
-                        </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            id="toggle-iframe-save-mode"
-                            checked={useIframeSaveMode}
-                            onChange={(e) => setUseIframeSaveMode(e.target.checked)}
-                            className="sr-only peer"
-                          />
-                          <div className="w-8 h-4 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
-                        </label>
+                    <div className="flex items-center justify-between p-2 rounded-lg bg-slate-900/80 border border-violet-500/30 mt-1">
+                      <div className="flex items-center space-x-1.5 text-violet-300 font-mono text-[11px] font-bold">
+                        <Box className="w-3.5 h-3.5 text-violet-400" />
+                        <span>Iframe Save Mode:</span>
                       </div>
-                      <span className="text-[10px] text-slate-400 leading-tight">
-                        {useIframeSaveMode ? 'เปิดใช้งาน: บันทึกไฟล์ผ่านเบราว์เซอร์สำหรับ iFrame' : 'ปิดใช้งาน: เรียกใช้ System Save File Picker'}
-                      </span>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          id="toggle-iframe-save-mode"
+                          checked={useIframeSaveMode}
+                          onChange={(e) => setUseIframeSaveMode(e.target.checked)}
+                          className="sr-only peer"
+                        />
+                        <div className="w-8 h-4 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
+                      </label>
                     </div>
                   </div>
                 </div>

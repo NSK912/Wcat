@@ -1665,22 +1665,82 @@ export async function processWebCodecsMultiTrackTimeline(
       canvasCtx.fillStyle = '#000000';
       canvasCtx.fillRect(0, 0, canvasWidth, canvasHeight);
 
+      const TRANSITION_HALF = 0.5;
+
       for (let i = 0; i < visibleTracks.length; i++) {
         const track = visibleTracks[i];
-        const activeClip = track.clips.find((c) => {
-          const start = c.startTime || 0;
-          const dur = c.endTime !== undefined && c.endTime > start ? c.endTime - start : c.duration || c.fileDuration || (c.mediaType === 'image' ? 5 : 10);
-          return t >= start && t < start + dur;
-        });
+        const clips = track.clips || [];
 
-        if (activeClip && activeClip.file) {
+        for (let cIdx = 0; cIdx < clips.length; cIdx++) {
+          const activeClip = clips[cIdx];
+          if (!activeClip || !activeClip.file) continue;
+
+          const nextClip = cIdx < clips.length - 1 ? clips[cIdx + 1] : null;
+          const prevClip = cIdx > 0 ? clips[cIdx - 1] : null;
+
+          const clipStart = activeClip.startTime || 0;
+          const clipDur = activeClip.endTime !== undefined && activeClip.endTime > clipStart
+            ? activeClip.endTime - clipStart
+            : activeClip.duration || activeClip.fileDuration || (activeClip.mediaType === 'image' ? 5 : 10);
+          const clipEnd = clipStart + clipDur;
+
+          const prevClipEnd = prevClip
+            ? (prevClip.endTime !== undefined && prevClip.endTime > (prevClip.startTime || 0)
+                ? prevClip.endTime
+                : (prevClip.startTime || 0) + (prevClip.duration || prevClip.fileDuration || 10))
+            : 0;
+
+          const hasOutgoing = activeClip.transition && activeClip.transition !== 'none' && nextClip && Math.abs(clipEnd - (nextClip.startTime || 0)) < 0.15;
+          const hasIncoming = prevClip && prevClip.transition && prevClip.transition !== 'none' && Math.abs(prevClipEnd - clipStart) < 0.15;
+
+          const isNormallyActive = t >= clipStart && t <= clipEnd;
+          const isInOutgoing = hasOutgoing && t >= (clipEnd - TRANSITION_HALF) && t <= (clipEnd + TRANSITION_HALF);
+          const isInIncoming = hasIncoming && t >= (prevClipEnd - TRANSITION_HALF) && t <= (prevClipEnd + TRANSITION_HALF);
+          const isSoloFadeEnd = activeClip.transition === 'fade' && !nextClip && t >= (clipEnd - TRANSITION_HALF) && t <= clipEnd;
+
+          if (!isNormallyActive && !isInOutgoing && !isInIncoming && !isSoloFadeEnd) {
+            continue;
+          }
+
+          let transitionOpacity = 1.0;
+          let transitionClipPath: string | undefined = undefined;
+
+          if (isInOutgoing) {
+            const transType = activeClip.transition;
+            const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
+            if (transType === 'fade') {
+              transitionOpacity = p <= 0.5 ? (1.0 - p * 2) : 0.0;
+            } else if (transType === 'crossfade' || transType === 'dissolve') {
+              transitionOpacity = 1.0 - p;
+            } else if (transType === 'wipe') {
+              transitionOpacity = 1.0;
+            }
+          } else if (isInIncoming) {
+            const transType = prevClip!.transition;
+            const p = Math.max(0, Math.min(1, (t - (prevClipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
+            if (transType === 'fade') {
+              transitionOpacity = p > 0.5 ? ((p - 0.5) * 2) : 0.0;
+            } else if (transType === 'crossfade' || transType === 'dissolve') {
+              transitionOpacity = p;
+            } else if (transType === 'wipe') {
+              transitionOpacity = 1.0;
+              const pct = Math.round(p * 100);
+              transitionClipPath = `polygon(0 0, ${pct}% 0, ${pct}% 100%, 0 100%)`;
+            }
+          } else if (isSoloFadeEnd) {
+            const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / TRANSITION_HALF));
+            transitionOpacity = 1.0 - p;
+          }
+
+          if (transitionOpacity <= 0) continue;
+
           const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
           const isAudio = activeClip.mediaType === 'audio' || activeClip.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus|wma)$/i.test(activeClip.file.name);
           if (isImg) {
             const bmp = bitmapMap.get(activeClip.id);
             if (bmp) {
               const transform = activeClip.transform || { x: 50, y: 50, scale: i === 0 ? 1.0 : 0.45, rotation: 0, opacity: 1 };
-              drawLayerToCanvas(canvasCtx, bmp, bmp.width, bmp.height, transform, canvasWidth, canvasHeight, settings);
+              drawLayerToCanvas(canvasCtx, bmp, bmp.width, bmp.height, transform, canvasWidth, canvasHeight, settings, transitionOpacity, transitionClipPath);
             }
           } else if (!isAudio && !failedVideoDecoderClips.has(activeClip.id)) {
             let decoder = clipDecoders.get(activeClip.id);
@@ -1748,7 +1808,7 @@ export async function processWebCodecsMultiTrackTimeline(
                 const sqW = sampleToRender.squarePixelWidth || canvasWidth;
                 const sqH = sampleToRender.squarePixelHeight || canvasHeight;
                 const transform = activeClip.transform || { x: 50, y: 50, scale: i === 0 ? 1.0 : 0.45, rotation: 0, opacity: 1 };
-                drawLayerToCanvas(canvasCtx, img, sqW, sqH, transform, canvasWidth, canvasHeight, settings);
+                drawLayerToCanvas(canvasCtx, img, sqW, sqH, transform, canvasWidth, canvasHeight, settings, transitionOpacity, transitionClipPath);
               }
             }
           }
