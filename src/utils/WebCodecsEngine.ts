@@ -30,6 +30,70 @@ import { HardwareBlurEngine } from './HardwareBlur';
 const MASTER_AUDIO_SAMPLE_RATE = 48000;
 const MASTER_AUDIO_CHANNELS = 2;
 
+const decodedAudioBufferCache = new Map<string, AudioBuffer>();
+
+async function getAudioBufferForFile(file: File): Promise<AudioBuffer | null> {
+  const cacheKey = `${file.name}_${file.size}_${file.lastModified}`;
+  if (decodedAudioBufferCache.has(cacheKey)) {
+    return decodedAudioBufferCache.get(cacheKey)!;
+  }
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return null;
+    const ctx = new AudioCtx();
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    decodedAudioBufferCache.set(cacheKey, audioBuffer);
+    ctx.close().catch(() => {});
+    return audioBuffer;
+  } catch (err) {
+    console.warn('WebAudio decodeAudioData failed for file:', file.name, err);
+    return null;
+  }
+}
+
+function createAudioSampleFromBuffer(
+  audioBuffer: AudioBuffer,
+  sourceStartSec: number,
+  durationSec: number,
+  outputTimestamp: number
+): AudioSample {
+  const targetSampleRate = MASTER_AUDIO_SAMPLE_RATE;
+  const targetChannels = MASTER_AUDIO_CHANNELS;
+  const numFrames = Math.max(1, Math.round(durationSec * targetSampleRate));
+  const pcmData = new Float32Array(numFrames * targetChannels);
+
+  const srcRate = audioBuffer.sampleRate;
+  const srcChannels = audioBuffer.numberOfChannels;
+  const totalSrcFrames = audioBuffer.length;
+  const srcStartFrame = Math.round(sourceStartSec * srcRate);
+
+  for (let ch = 0; ch < targetChannels; ch++) {
+    const srcChIndex = Math.min(ch, srcChannels - 1);
+    const srcData = audioBuffer.getChannelData(srcChIndex);
+    const channelOffset = ch * numFrames;
+
+    for (let i = 0; i < numFrames; i++) {
+      const srcFrameExact = srcStartFrame + (i / targetSampleRate) * srcRate;
+      const f0 = Math.floor(srcFrameExact);
+      const f1 = Math.min(f0 + 1, totalSrcFrames - 1);
+      const frac = srcFrameExact - f0;
+
+      const v0 = f0 >= 0 && f0 < totalSrcFrames ? srcData[f0] : 0;
+      const v1 = f1 >= 0 && f1 < totalSrcFrames ? srcData[f1] : 0;
+      pcmData[channelOffset + i] = v0 + (v1 - v0) * frac;
+    }
+  }
+
+  return new AudioSample({
+    format: 'f32-planar',
+    sampleRate: targetSampleRate,
+    numberOfChannels: targetChannels,
+    timestamp: outputTimestamp,
+    data: pcmData,
+  });
+}
+
 /**
  * Creates a silent AudioSample of zero PCM values to maintain container track audio/video synchronization
  */
@@ -1681,49 +1745,62 @@ export async function processWebCodecsMultiTrackTimeline(
         }
 
         if (activeAudioClip && activeAudioClip.file) {
-          let audioDecoder = audioClipDecoders.get(activeAudioClip.id);
-          if (!audioDecoder) {
-            try {
-              const input = new Input({ source: new BlobSource(activeAudioClip.file), formats: ALL_FORMATS });
-              const aTracks = await input.getAudioTracks();
-              if (aTracks.length > 0) {
-                const aSink = new AudioSampleSink(aTracks[0]);
-                const sourceStart = activeAudioClip.sourceStartTime || 0;
-                const dur = activeAudioClip.endTime !== undefined && activeAudioClip.endTime > (activeAudioClip.startTime || 0)
-                  ? activeAudioClip.endTime - (activeAudioClip.startTime || 0)
-                  : activeAudioClip.duration || activeAudioClip.fileDuration || 10;
-                const sourceEnd = (activeAudioClip.sourceEndTime !== undefined ? activeAudioClip.sourceEndTime : sourceStart + dur) + 5;
-                audioDecoder = {
-                  aSink,
-                  iterator: aSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
-                };
-                audioClipDecoders.set(activeAudioClip.id, audioDecoder);
-              }
-            } catch (e) {
-              console.warn('Failed on-demand audio decoder creation', activeAudioClip.id, e);
-            }
-          }
-
-          if (audioDecoder) {
-            let aSample = null;
-            let done = true;
-            try {
-              const res = await audioDecoder.iterator.next();
-              aSample = res.value;
-              done = res.done;
-            } catch (err) {
-              console.warn('Audio decoder iterator error:', err);
-              audioClipDecoders.delete(activeAudioClip.id);
-            }
-            if (!done && aSample) {
-              const adaptedSample = adaptAudioSample(aSample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
-              const stepDur = adaptedSample.duration > 0 ? adaptedSample.duration : 0.02;
-              adaptedSample.setTimestamp(currentAudioTime);
-              await aSource.add(adaptedSample);
+          const audioBuf = await getAudioBufferForFile(activeAudioClip.file);
+          if (audioBuf) {
+            const stepDur = Math.min(0.04, targetAudioEnd - currentAudioTime);
+            if (stepDur > 0.0001) {
+              const sourceOffset = (currentTimelinePos - (activeAudioClip.startTime || 0)) + (activeAudioClip.sourceStartTime || 0);
+              const sample = createAudioSampleFromBuffer(audioBuf, sourceOffset, stepDur, currentAudioTime);
+              await aSource.add(sample);
               currentAudioTime += stepDur;
-              if (adaptedSample !== aSample) adaptedSample.close();
-              try { aSample.close(); } catch {}
+              sample.close();
               continue;
+            }
+          } else {
+            let audioDecoder = audioClipDecoders.get(activeAudioClip.id);
+            if (!audioDecoder) {
+              try {
+                const input = new Input({ source: new BlobSource(activeAudioClip.file), formats: ALL_FORMATS });
+                const aTracks = await input.getAudioTracks();
+                if (aTracks.length > 0) {
+                  const aSink = new AudioSampleSink(aTracks[0]);
+                  const sourceStart = activeAudioClip.sourceStartTime || 0;
+                  const dur = activeAudioClip.endTime !== undefined && activeAudioClip.endTime > (activeAudioClip.startTime || 0)
+                    ? activeAudioClip.endTime - (activeAudioClip.startTime || 0)
+                    : activeAudioClip.duration || activeAudioClip.fileDuration || 10;
+                  const sourceEnd = (activeAudioClip.sourceEndTime !== undefined ? activeAudioClip.sourceEndTime : sourceStart + dur) + 5;
+                  audioDecoder = {
+                    aSink,
+                    iterator: aSink.samples(sourceStart, sourceEnd)[Symbol.asyncIterator](),
+                  };
+                  audioClipDecoders.set(activeAudioClip.id, audioDecoder);
+                }
+              } catch (e) {
+                console.warn('Failed on-demand audio decoder creation', activeAudioClip.id, e);
+              }
+            }
+
+            if (audioDecoder) {
+              let aSample = null;
+              let done = true;
+              try {
+                const res = await audioDecoder.iterator.next();
+                aSample = res.value;
+                done = res.done;
+              } catch (err) {
+                console.warn('Audio decoder iterator error:', err);
+                audioClipDecoders.delete(activeAudioClip.id);
+              }
+              if (!done && aSample) {
+                const adaptedSample = adaptAudioSample(aSample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
+                const stepDur = adaptedSample.duration > 0 ? adaptedSample.duration : 0.02;
+                adaptedSample.setTimestamp(currentAudioTime);
+                await aSource.add(adaptedSample);
+                currentAudioTime += stepDur;
+                if (adaptedSample !== aSample) adaptedSample.close();
+                try { aSample.close(); } catch {}
+                continue;
+              }
             }
           }
         }
@@ -2124,7 +2201,18 @@ export async function processWebCodecsConcatStream(
 
       bmp.close();
       currentVideoTime += segDuration;
-      currentAudioTime += segDuration;
+      if (aSource && !settings.muteAudio) {
+        const audioEnd = currentVideoTime;
+        while (currentAudioTime < audioEnd - 0.0005) {
+          const stepDur = Math.min(0.04, audioEnd - currentAudioTime);
+          const silentSample = createSilentAudioSample(currentAudioTime, stepDur, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
+          await aSource.add(silentSample);
+          currentAudioTime += stepDur;
+          silentSample.close();
+        }
+      } else {
+        currentAudioTime += segDuration;
+      }
 
     } else {
       // =========================================================================
