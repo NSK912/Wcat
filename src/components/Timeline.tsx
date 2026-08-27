@@ -391,8 +391,10 @@ export const Timeline: React.FC<TimelineProps> = ({
   // Helper to extract thumbnails and exact duration for a specific video file
   const extractThumbnailsForFile = async (file: File) => {
     const key = getFileKey(file);
+    const isAudio = detectMediaType(file) === 'audio';
     if (inFlightExtractionsRef.current.has(key)) return;
-    if (fileThumbnails[key] && fileThumbnails[key].length > 0 && fileDurations[key]) return;
+    if (isAudio && fileDurations[key]) return;
+    if (!isAudio && fileThumbnails[key] && fileThumbnails[key].length > 0 && fileDurations[key]) return;
 
     inFlightExtractionsRef.current.add(key);
 
@@ -448,6 +450,21 @@ export const Timeline: React.FC<TimelineProps> = ({
 
     if (probedDur > 0) {
       updateClipDurations(probedDur);
+      if (isAudio) return;
+    }
+
+    if (isAudio) {
+      const audio = document.createElement('audio');
+      const blobUrl = URL.createObjectURL(file);
+      audio.src = blobUrl;
+      audio.onloadedmetadata = () => {
+        if (audio.duration && Number.isFinite(audio.duration) && audio.duration > 0) {
+           updateClipDurations(audio.duration);
+        }
+        URL.revokeObjectURL(blobUrl);
+      };
+      audio.onerror = () => URL.revokeObjectURL(blobUrl);
+      return;
     }
 
     // 2. HTML5 <video> element thumbnail extraction & fallback duration check
@@ -528,8 +545,8 @@ export const Timeline: React.FC<TimelineProps> = ({
         return;
       }
 
-      // 2. Video File Thumbnails Extraction (Specific to this video file)
-      if (mediaType === 'video') {
+      // 2. Video/Audio File Metadata Extraction (Specific to this file)
+      if (mediaType === 'video' || mediaType === 'audio') {
         extractThumbnailsForFile(file);
       }
     });
@@ -772,7 +789,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     const key = getFileKey(file);
     if (detectedType === 'image') {
       setFileThumbnails((prev) => ({ ...prev, [key]: [url] }));
-    } else if (detectedType === 'video') {
+    } else if (detectedType === 'video' || detectedType === 'audio') {
       extractThumbnailsForFile(file);
     }
 
@@ -1112,10 +1129,8 @@ export const Timeline: React.FC<TimelineProps> = ({
       const percent = Math.max(0, Math.min(1, clickX / (rect.width || 1)));
       let targetTime = percent * computedTimelineDuration;
 
-      // Only snap if snap is enabled AND there are at least 2 tracks with clips
-      const activeTracksWithClips = tracks.filter((t) => t.clips && t.clips.length > 0);
-      const totalClipsCount = tracks.reduce((acc, t) => acc + (t.clips ? t.clips.length : 0), 0);
-      const shouldSnap = snapEnabled && activeTracksWithClips.length >= 2 && totalClipsCount >= 2;
+      // Snap if enabled and in encode mode (disabled in copy mode)
+      const shouldSnap = snapEnabled && isEncodeMode;
 
       if (shouldSnap) {
         const snapThresholdPx = 10;
@@ -1211,10 +1226,8 @@ export const Timeline: React.FC<TimelineProps> = ({
       let newEnd = startEndTime;
       let activeSnapPoint: number | null = null;
 
-      // Only snap if snap is enabled AND there are at least 2 tracks with clips
-      const activeTracksWithClips = tracks.filter((t) => t.clips && t.clips.length > 0);
-      const totalClips = tracks.reduce((acc, t) => acc + (t.clips ? t.clips.length : 0), 0);
-      const shouldSnap = snapEnabled && activeTracksWithClips.length >= 2 && totalClips >= 2;
+      // Snap if enabled and in encode mode (disabled in copy mode)
+      const shouldSnap = snapEnabled && isEncodeMode;
 
       if (type === 'middle') {
         const span = startEndTime - startStartTime;
@@ -1902,22 +1915,13 @@ export const Timeline: React.FC<TimelineProps> = ({
             </div>
           )}
 
-          {/* Single File Upload Button */}
+          {/* Add Media Button */}
           <button
-            onClick={onUploadClick}
-            title="Select File (Single)"
+            onClick={onMultiUploadClick || onUploadClick}
+            title="Add Media Files"
             className="h-8 w-8 flex items-center justify-center bg-white/5 hover:bg-white/10 text-slate-200 rounded-lg transition border border-white/10 backdrop-blur-sm group shrink-0 cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5 text-indigo-400 group-hover:scale-110 transition-transform" />
-          </button>
-
-          {/* Multiple Files Upload Button */}
-          <button
-            onClick={onMultiUploadClick}
-            title="Select Multiple Files"
-            className="h-8 w-8 flex items-center justify-center bg-indigo-950/60 hover:bg-indigo-900/80 text-indigo-200 rounded-lg transition border border-indigo-500/30 backdrop-blur-sm group shrink-0 cursor-pointer"
-          >
-            <LayoutGrid className="w-3.5 h-3.5 text-indigo-400 group-hover:scale-110 transition-transform" />
           </button>
 
           {/* Remux Button: ONLY shown when NOT in Encode Mode */}
@@ -2127,32 +2131,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                       }}
                       title="Change Track Color"
                     />
-
-                    {isEncodeMode && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDuplicateTrack(track.id);
-                        }}
-                        className="text-slate-500 hover:text-indigo-300 p-0.5 rounded cursor-pointer"
-                        title="Duplicate Track"
-                      >
-                        <Copy className="w-2.5 h-2.5" />
-                      </button>
-                    )}
-
-                    {isEncodeMode && tracks.length > 1 && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteTrack(track.id);
-                        }}
-                        className="text-slate-500 hover:text-rose-400 p-0.5 rounded cursor-pointer"
-                        title="Delete Track"
-                      >
-                        <Trash2 className="w-2.5 h-2.5" />
-                      </button>
-                    )}
                   </div>
                 </div>
 
@@ -2322,9 +2300,11 @@ export const Timeline: React.FC<TimelineProps> = ({
 
                         // Thumbnails for this clip's file
                         const clipFileKey = clip.file ? getFileKey(clip.file) : null;
-                        const clipThumbs = clipFileKey && fileThumbnails[clipFileKey] && fileThumbnails[clipFileKey].length > 0
-                          ? fileThumbnails[clipFileKey]
-                          : (thumbnails.length > 0 ? thumbnails : null);
+                        const hasThumbnails = clipFileKey && fileThumbnails[clipFileKey] && fileThumbnails[clipFileKey].length > 0;
+                        const isClipVideo = clip.mediaType === 'video' || clip.file?.type.startsWith('video/');
+                        const clipThumbs = hasThumbnails 
+                          ? fileThumbnails[clipFileKey] 
+                          : (isClipVideo && thumbnails.length > 0 ? thumbnails : null);
 
                         const clipImageSrc = (clipFileKey && fileThumbnails[clipFileKey]?.[0]) || clip.previewUrl;
 
@@ -2365,7 +2345,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                             }}
                           >
                             {/* Visualizer INSIDE Clip: Video Filmstrip, Audio Waveform, Image, or Pattern */}
-                            {clip.mediaType === 'video' || (clipThumbs && clipThumbs.length > 0) || clip.file?.type.startsWith('video/') ? (
+                            {clip.mediaType === 'video' || clip.file?.type.startsWith('video/') || (!clip.mediaType && clipThumbs && clipThumbs.length > 0) ? (
                               <div
                                 className="absolute top-0 bottom-0 flex items-stretch overflow-hidden pointer-events-none opacity-75"
                                 style={{
@@ -2403,18 +2383,27 @@ export const Timeline: React.FC<TimelineProps> = ({
                               </div>
                             ) : clip.mediaType === 'audio' || clip.file?.type.startsWith('audio/') ? (
                               /* Audio Waveform inside clip */
-                              <div className="absolute inset-0 flex items-center justify-around px-2 pointer-events-none opacity-70">
-                                {Array.from({ length: 36 }).map((_, i) => {
-                                  const seed = (trackIdx + clipIdx + 1) * 1.37;
-                                  const h = 20 + Math.sin((i + seed * 3) * 0.7) * 16 + Math.cos((i + seed) * 0.4) * 12;
-                                  return (
-                                    <div
-                                      key={i}
-                                      className="w-1 bg-emerald-400 rounded-full shrink-0"
-                                      style={{ height: `${Math.max(10, Math.min(95, h))}%` }}
-                                    />
-                                  );
-                                })}
+                              <div className={`absolute inset-0 pointer-events-none opacity-75 ${clipColorConfig.clipBorder.replace('border-', 'text-')}`}>
+                                <svg width="100%" height="100%" preserveAspectRatio="none" viewBox="0 0 1000 100">
+                                  {Array.from({ length: 250 }).map((_, i) => {
+                                    const x = i * 4;
+                                    const seed = (trackIdx + clipIdx + 1) * 1.37;
+                                    const h = 25 + Math.sin(i * 0.2 + seed) * 30 + Math.cos(i * 0.6 + seed * 2) * 25 + Math.sin(i * 1.3) * 15;
+                                    const height = Math.max(10, Math.min(95, h));
+                                    const y = 50 - height / 2;
+                                    return (
+                                      <rect
+                                        key={i}
+                                        x={x}
+                                        y={y}
+                                        width="2.5"
+                                        height={height}
+                                        rx="1.25"
+                                        fill="currentColor"
+                                      />
+                                    );
+                                  })}
+                                </svg>
                               </div>
                             ) : (clip.mediaType === 'image' || clip.file?.type.startsWith('image/')) && clipImageSrc ? (
                               /* Image Preview inside clip */

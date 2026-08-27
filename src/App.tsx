@@ -1128,7 +1128,7 @@ export default function App() {
         type="file"
         ref={singleFileInputRef}
         onChange={handleSingleFileUpload}
-        accept="video/*"
+        accept="video/*,audio/*,image/*"
         className="hidden"
       />
 
@@ -1137,7 +1137,7 @@ export default function App() {
         type="file"
         ref={multiFileInputRef}
         onChange={handleMultiFileUpload}
-        accept="video/*"
+        accept="video/*,audio/*,image/*"
         multiple
         className="hidden"
       />
