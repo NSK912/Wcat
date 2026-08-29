@@ -1255,6 +1255,8 @@ export const Timeline: React.FC<TimelineProps> = ({
     const totalDuration = computedTimelineDuration;
     const minSpan = Math.max(0.1, (20 / containerWidth) * totalDuration);
 
+    const clipMaxDuration = currentClip.fileDuration || (currentClip.file && fileDurations[getFileKey(currentClip.file)]) || duration || 0;
+
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaX = moveEvent.clientX - startX;
       const deltaTime = (deltaX / containerWidth) * totalDuration;
@@ -1374,7 +1376,10 @@ export const Timeline: React.FC<TimelineProps> = ({
         }
       } else if (type === 'left') {
         let rawStart = startStartTime + deltaTime;
-        rawStart = Math.max(0, Math.min(rawStart, startEndTime - minSpan));
+        // In Copy Mode / Single track, cannot expand left beyond 0 or past duration
+        // Also cannot expand left past the original source start if source is at 0
+        const minPossibleStart = !isEncodeMode ? 0 : Math.max(0, startStartTime - startSourceStartTime);
+        rawStart = Math.max(minPossibleStart, Math.min(rawStart, startEndTime - minSpan));
 
         if (shouldSnap) {
           const snapPoints: number[] = [];
@@ -1391,7 +1396,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           let bestDist = Infinity;
           let snappedVal: number | null = null;
           for (const pt of snapPoints) {
-            if (pt <= startEndTime - minSpan) {
+            if (pt >= minPossibleStart && pt <= startEndTime - minSpan) {
               const dist = Math.abs(rawStart - pt);
               if (dist <= snapThresholdTime && dist < bestDist) {
                 bestDist = dist;
@@ -1415,7 +1420,12 @@ export const Timeline: React.FC<TimelineProps> = ({
         setDragTooltip(`${snapPrefix}[${currentClip.name}] In: ${formatTime(newStart)}`);
       } else if (type === 'right') {
         let rawEnd = startEndTime + deltaTime;
-        rawEnd = Math.max(startStartTime + minSpan, rawEnd);
+        // Limit rawEnd to not exceed original video/media duration
+        const maxPossibleEnd = !isEncodeMode
+          ? (clipMaxDuration > 0 ? clipMaxDuration : totalDuration)
+          : (clipMaxDuration > 0 ? startStartTime + (clipMaxDuration - startSourceStartTime) : Infinity);
+
+        rawEnd = Math.max(startStartTime + minSpan, Math.min(rawEnd, maxPossibleEnd));
 
         if (shouldSnap) {
           const snapPoints: number[] = [];
@@ -1432,7 +1442,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           let bestDist = Infinity;
           let snappedVal: number | null = null;
           for (const pt of snapPoints) {
-            if (pt >= startStartTime + minSpan) {
+            if (pt >= startStartTime + minSpan && pt <= maxPossibleEnd) {
               const dist = Math.abs(rawEnd - pt);
               if (dist <= snapThresholdTime && dist < bestDist) {
                 bestDist = dist;

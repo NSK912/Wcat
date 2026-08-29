@@ -496,7 +496,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // 🎛️ ACTIVE VISUAL LAYERS RESOLUTION (ENCODE MODE)
   // =========================================================================
   const activeLayers: ActiveLayerItem[] = useMemo(() => {
-    if (!tracks || tracks.length === 0) return [];
+    if (!isEncodeMode || !tracks || tracks.length === 0) return [];
 
     const list: ActiveLayerItem[] = [];
     const TRANSITION_HALF = 0.5; // 0.5s transition window (1s total)
@@ -615,7 +615,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     });
 
     return list;
-  }, [tracks, currentTime, settings.muteAudio, getFileUrl]);
+  }, [isEncodeMode, tracks, currentTime, settings.muteAudio, getFileUrl]);
 
   // Dynamically resolve master timekeeper clip ID to prevent freezes at clip boundaries during transitions
   const masterLayerId = useMemo(() => {
@@ -1053,10 +1053,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }, [isDraggingCrop, onUpdateSettings]);
 
   const hasTimelineTracks = useMemo(() => {
-    return !!(tracks && tracks.some((t) => !t.hidden && t.clips && t.clips.length > 0));
-  }, [tracks]);
+    return !!(isEncodeMode && tracks && tracks.some((t) => !t.hidden && t.clips && t.clips.length > 0));
+  }, [isEncodeMode, tracks]);
 
-  const hasLayers = hasTimelineTracks || activeLayers.length > 0;
+  const hasLayers = isEncodeMode && (hasTimelineTracks || activeLayers.length > 0);
 
   return (
     <div
