@@ -1488,9 +1488,14 @@ export const Timeline: React.FC<TimelineProps> = ({
         )
       );
 
-      if (trackId === 'track-1') {
+      if (!isEncodeMode || trackId === 'track-1' || trackId === activeTrackId) {
         onStartTimeChange(newStart);
         onEndTimeChange(newEnd);
+      }
+
+      if (type === 'right') {
+        onSeek(newEnd);
+      } else {
         onSeek(newStart);
       }
     };
@@ -1505,6 +1510,17 @@ export const Timeline: React.FC<TimelineProps> = ({
       const finalTargetId = dragHoveredTrackIdRef.current || trackId;
       const finalStart = lastNewStartRef.current;
       const finalEnd = lastNewEndRef.current;
+
+      if (!isEncodeMode || trackId === 'track-1' || trackId === activeTrackId) {
+        onStartTimeChange(finalStart);
+        onEndTimeChange(finalEnd);
+      }
+
+      if (type === 'right') {
+        onSeek(finalEnd);
+      } else {
+        onSeek(finalStart);
+      }
 
       const hasChanged = finalStart !== startStartTime || finalEnd !== startEndTime || finalTargetId !== trackId;
       if (hasChanged && dragStartTracksRef.current) {
