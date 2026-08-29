@@ -300,7 +300,19 @@ export default function App() {
   const [clipEndTime, setClipEndTime] = useState<number>(0);
   const [hasActiveClip, setHasActiveClip] = useState<boolean>(false);
   const [activeAudioClips, setActiveAudioClips] = useState<{ id: string; url: string; startTime: number; sourceStartTime: number }[]>([]);
-  const [tracks, setTracks] = useState<TimelineTrackData[]>(INITIAL_TIMELINE_TRACKS);
+  const [rawTracks, setRawTracks] = useState<TimelineTrackData[]>(INITIAL_TIMELINE_TRACKS);
+
+  const setTracks = useCallback((action: React.SetStateAction<TimelineTrackData[]>) => {
+    setRawTracks((prev) => {
+      const next = typeof action === 'function' ? action(prev) : action;
+      return next.map(t => ({
+        ...t,
+        clips: [...t.clips].sort((a, b) => (a.startTime || 0) - (b.startTime || 0))
+      }));
+    });
+  }, []);
+
+  const tracks = rawTracks;
 
   const handleUpdateClipTransform = useCallback(
     (trackId: string, clipId: string, transform: ClipTransform) => {
@@ -403,15 +415,17 @@ export default function App() {
   }, [allSubLayers]);
 
   // Auto-select top active layer on screen when currentTime moves or previous selection ends
+  const activeClipIds = useMemo(() => activeLayers.map((l) => l.clip.id).join(','), [activeLayers]);
   useEffect(() => {
     if (!isEncodeMode) return;
     if (activeLayers.length === 0) return;
     const isSelectedActive = activeLayers.some((l) => l.clip.id === selectedClipId);
     if (!isSelectedActive) {
       // Auto-select the top-most active layer on screen
-      setSelectedClipId(activeLayers[0].clip.id);
+      const nextId = activeLayers[0].clip.id;
+      setSelectedClipId((prev) => (prev !== nextId ? nextId : prev));
     }
-  }, [isEncodeMode, activeLayers, selectedClipId]);
+  }, [isEncodeMode, activeClipIds, selectedClipId]);
 
   const activeSelectedLayer = useMemo(() => {
     if (allSubLayers.length === 0) return null;
@@ -1238,7 +1252,6 @@ export default function App() {
                             ? 'bg-rose-950/90 border-rose-400/80 shadow-rose-500/30'
                             : 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 border-violet-400/50 shadow-violet-500/25'
                         }`}
-                        title="Hold to close and restore Copy Mode"
                       >
                         {/* Hold progress filling bar - zero latency sync with RAF */}
                         {holdProgress > 0 && (
@@ -1259,7 +1272,7 @@ export default function App() {
                         </div>
                       )}
 
-                      <button onClick={() => setIsLeftPanelExpanded(false)} className="text-slate-400 hover:text-white transition-colors p-1 rounded-md hover:bg-white/10" title="Fold panel">
+                      <button onClick={() => setIsLeftPanelExpanded(false)} className="text-slate-400 hover:text-white transition-colors p-1 rounded-md hover:bg-white/10">
                         <ChevronLeft className="w-3 h-3" />
                       </button>
                     </div>
@@ -1377,7 +1390,6 @@ export default function App() {
                                   id="btn-fps-increment"
                                   onClick={() => updateSettings({ fps: Math.min(240, (settings.fps || 60) + 1) })}
                                   className="p-0.5 text-slate-400 hover:text-violet-300 hover:bg-violet-950/60 rounded transition cursor-pointer leading-none active:scale-90"
-                                  title="Increase FPS (+1)"
                                 >
                                   <ChevronUp className="w-3 h-3" />
                                 </button>
@@ -1386,7 +1398,6 @@ export default function App() {
                                   id="btn-fps-decrement"
                                   onClick={() => updateSettings({ fps: Math.max(1, (settings.fps || 60) - 1) })}
                                   className="p-0.5 text-slate-400 hover:text-violet-300 hover:bg-violet-950/60 rounded transition cursor-pointer leading-none active:scale-90"
-                                  title="Decrease FPS (-1)"
                                 >
                                   <ChevronDown className="w-3 h-3" />
                                 </button>
@@ -1463,7 +1474,6 @@ export default function App() {
                   id="encode-mode-toggle-btn"
                   onClick={handleOpenEncodeMode}
                   className="-rotate-90 whitespace-nowrap px-4 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 border shadow-md cursor-pointer select-none origin-center bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/70 backdrop-blur-md"
-                  title="Open Panel Encode"
                 >
                   <span>Panel Encode</span>
                 </button>
@@ -1501,7 +1511,7 @@ export default function App() {
                           {activeSelectedLayer.subLayerName}
                         </span>
                       )}
-                      <button onClick={() => setIsRightPanelExpanded(false)} className="text-slate-400 hover:text-white transition-colors p-1 rounded-md hover:bg-white/10" title="Fold panel">
+                      <button onClick={() => setIsRightPanelExpanded(false)} className="text-slate-400 hover:text-white transition-colors p-1 rounded-md hover:bg-white/10">
                         <ChevronRight className="w-3 h-3" />
                       </button>
                     </div>
@@ -1652,7 +1662,6 @@ export default function App() {
                                   });
                                 }}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
-                                title="Scale Down (-10%)"
                               >
                                 <ZoomOut className="w-3.5 h-3.5" />
                               </button>
@@ -1683,7 +1692,6 @@ export default function App() {
                                   });
                                 }}
                                 className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition cursor-pointer border border-white/5"
-                                title="Scale Up (+10%)"
                               >
                                 <ZoomIn className="w-3.5 h-3.5" />
                               </button>
@@ -1746,7 +1754,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('tl')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Top-Left"
                               >
                                 <ArrowUpLeft className="w-3.5 h-3.5 mr-0.5" />
                                 <span>TL</span>
@@ -1755,7 +1762,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('tc')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Top-Center"
                               >
                                 <ArrowUp className="w-3.5 h-3.5 mr-0.5" />
                                 <span>TC</span>
@@ -1764,7 +1770,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('tr')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Top-Right"
                               >
                                 <ArrowUpRight className="w-3.5 h-3.5 mr-0.5" />
                                 <span>TR</span>
@@ -1773,7 +1778,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('lc')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Left-Center"
                               >
                                 <ArrowLeft className="w-3.5 h-3.5 mr-0.5" />
                                 <span>LC</span>
@@ -1782,7 +1786,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('center')}
                                 className="flex items-center justify-center p-1.5 rounded bg-violet-600/30 hover:bg-violet-600 text-violet-200 hover:text-white transition text-[10px] border border-violet-500/40 font-medium cursor-pointer"
-                                title="Center"
                               >
                                 <Target className="w-3.5 h-3.5 mr-0.5 text-violet-400" />
                                 <span>Center</span>
@@ -1791,7 +1794,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('rc')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Right-Center"
                               >
                                 <ArrowRight className="w-3.5 h-3.5 mr-0.5" />
                                 <span>RC</span>
@@ -1800,7 +1802,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('bl')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Bottom-Left"
                               >
                                 <ArrowDownLeft className="w-3.5 h-3.5 mr-0.5" />
                                 <span>BL</span>
@@ -1809,7 +1810,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('bc')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Bottom-Center"
                               >
                                 <ArrowDown className="w-3.5 h-3.5 mr-0.5" />
                                 <span>BC</span>
@@ -1818,7 +1818,6 @@ export default function App() {
                                 type="button"
                                 onClick={() => handleAlignLayer('br')}
                                 className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                                title="Bottom-Right"
                               >
                                 <ArrowDownRight className="w-3.5 h-3.5 mr-0.5" />
                                 <span>BR</span>

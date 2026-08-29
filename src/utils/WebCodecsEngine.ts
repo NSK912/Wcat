@@ -63,7 +63,8 @@ async function getAudioBufferForFile(file: File): Promise<AudioBuffer | null> {
 function createAudioSampleBlock(
   audioBuffer: AudioBuffer,
   sourceStartSec: number,
-  outputTimestamp: number
+  outputTimestamp: number,
+  volumeMultiplier: number = 1.0
 ): AudioSample {
   const targetSampleRate = MASTER_AUDIO_SAMPLE_RATE;
   const targetChannels = MASTER_AUDIO_CHANNELS;
@@ -97,8 +98,8 @@ function createAudioSampleBlock(
       rVal = r0 + (r1 - r0) * frac;
     }
 
-    pcmData[i * 2] = lVal;
-    pcmData[i * 2 + 1] = rVal;
+    pcmData[i * 2] = lVal * volumeMultiplier;
+    pcmData[i * 2 + 1] = rVal * volumeMultiplier;
   }
 
   return new AudioSample({
@@ -113,6 +114,69 @@ function createAudioSampleBlock(
 /**
  * Creates a uniform 1024-frame silent AudioSample block of zero PCM values
  */
+interface AudioSourceInfo {
+  buffer: AudioBuffer;
+  sourceStartSec: number;
+  volumeMultiplier: number;
+}
+
+function createMixedAudioSampleBlock(
+  sources: AudioSourceInfo[],
+  outputTimestamp: number
+): AudioSample {
+  const targetSampleRate = MASTER_AUDIO_SAMPLE_RATE;
+  const targetChannels = MASTER_AUDIO_CHANNELS;
+  const numFrames = AUDIO_FRAME_SIZE;
+  const pcmData = new Float32Array(numFrames * targetChannels);
+
+  for (const src of sources) {
+    const srcRate = src.buffer.sampleRate;
+    const srcChannels = src.buffer.numberOfChannels;
+    const totalSrcFrames = src.buffer.length;
+    const srcStartFrame = Math.round(src.sourceStartSec * srcRate);
+
+    const leftChannel = src.buffer.getChannelData(0);
+    const rightChannel = srcChannels > 1 ? src.buffer.getChannelData(1) : leftChannel;
+
+    for (let i = 0; i < numFrames; i++) {
+      const srcFrameExact = srcStartFrame + (i / targetSampleRate) * srcRate;
+      const f0 = Math.floor(srcFrameExact);
+      const f1 = Math.min(f0 + 1, totalSrcFrames - 1);
+      const frac = srcFrameExact - f0;
+
+      let lVal = 0;
+      let rVal = 0;
+
+      if (f0 >= 0 && f0 < totalSrcFrames) {
+        const l0 = leftChannel[f0];
+        const l1 = f1 < totalSrcFrames ? leftChannel[f1] : l0;
+        lVal = l0 + (l1 - l0) * frac;
+
+        const r0 = rightChannel[f0];
+        const r1 = f1 < totalSrcFrames ? rightChannel[f1] : r0;
+        rVal = r0 + (r1 - r0) * frac;
+      }
+
+      pcmData[i * 2] += lVal * src.volumeMultiplier;
+      pcmData[i * 2 + 1] += rVal * src.volumeMultiplier;
+    }
+  }
+
+  // Clamp to prevent clipping
+  for (let i = 0; i < pcmData.length; i++) {
+    if (pcmData[i] > 1.0) pcmData[i] = 1.0;
+    else if (pcmData[i] < -1.0) pcmData[i] = -1.0;
+  }
+
+  return new AudioSample({
+    format: 'f32',
+    sampleRate: targetSampleRate,
+    numberOfChannels: targetChannels,
+    timestamp: outputTimestamp,
+    data: pcmData,
+  });
+}
+
 function createSilentAudioBlock(timestamp: number): AudioSample {
   const pcmData = new Float32Array(AUDIO_FRAME_SIZE * MASTER_AUDIO_CHANNELS);
   return new AudioSample({
@@ -1408,6 +1472,71 @@ export async function processWebCodecsEncodeStream(
  * Composites multiple timeline tracks (Base Track 0 + Overlays Track 1, 2, ... N-1)
  * concurrently across timeline time, respecting Z-index, transforms, and duration.
  */
+const TRANSITION_HALF = 0.5;
+
+function calculateTransitionState(
+  activeClip: TimelineClip,
+  prevClip: TimelineClip | null,
+  nextClip: TimelineClip | null,
+  t: number
+): { isActive: boolean; opacity: number; clipPath?: string } {
+  const clipStart = activeClip.startTime || 0;
+  const clipDur = activeClip.endTime !== undefined && activeClip.endTime > clipStart
+    ? activeClip.endTime - clipStart
+    : activeClip.duration || activeClip.fileDuration || (activeClip.mediaType === 'image' ? 5 : 10);
+  const clipEnd = clipStart + clipDur;
+
+  const prevClipEnd = prevClip
+    ? (prevClip.endTime !== undefined && prevClip.endTime > (prevClip.startTime || 0)
+        ? prevClip.endTime
+        : (prevClip.startTime || 0) + (prevClip.duration || prevClip.fileDuration || 10))
+    : 0;
+
+  const hasOutgoing = activeClip.transition && activeClip.transition !== 'none' && nextClip && Math.abs(clipEnd - (nextClip.startTime || 0)) < 0.15;
+  const hasIncoming = prevClip && prevClip.transition && prevClip.transition !== 'none' && Math.abs(prevClipEnd - clipStart) < 0.15;
+
+  const isNormallyActive = t >= clipStart && t <= clipEnd;
+  const isInOutgoing = hasOutgoing && t >= (clipEnd - TRANSITION_HALF) && t <= (clipEnd + TRANSITION_HALF);
+  const isInIncoming = hasIncoming && t >= (prevClipEnd - TRANSITION_HALF) && t <= (prevClipEnd + TRANSITION_HALF);
+  const isSoloFadeEnd = activeClip.transition === 'fade' && !hasOutgoing && t >= (clipEnd - TRANSITION_HALF) && t <= clipEnd;
+
+  if (!isNormallyActive && !isInOutgoing && !isInIncoming && !isSoloFadeEnd) {
+    return { isActive: false, opacity: 1.0 };
+  }
+
+  let transitionOpacity = 1.0;
+  let transitionClipPath: string | undefined = undefined;
+
+  if (isInOutgoing) {
+    const transType = activeClip.transition;
+    const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
+    if (transType === 'fade') {
+      transitionOpacity = p <= 0.5 ? (1.0 - p * 2) : 0.0;
+    } else if (transType === 'crossfade' || transType === 'dissolve') {
+      transitionOpacity = 1.0 - p;
+    } else if (transType === 'wipe') {
+      transitionOpacity = 1.0;
+    }
+  } else if (isInIncoming) {
+    const transType = prevClip!.transition;
+    const p = Math.max(0, Math.min(1, (t - (prevClipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
+    if (transType === 'fade') {
+      transitionOpacity = p > 0.5 ? ((p - 0.5) * 2) : 0.0;
+    } else if (transType === 'crossfade' || transType === 'dissolve') {
+      transitionOpacity = p;
+    } else if (transType === 'wipe') {
+      transitionOpacity = 1.0;
+      const pct = Math.round(p * 100);
+      transitionClipPath = `polygon(0 0, ${pct}% 0, ${pct}% 100%, 0 100%)`;
+    }
+  } else if (isSoloFadeEnd) {
+    const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / TRANSITION_HALF));
+    transitionOpacity = 1.0 - p;
+  }
+
+  return { isActive: true, opacity: transitionOpacity, clipPath: transitionClipPath };
+}
+
 export async function processWebCodecsMultiTrackTimeline(
   tracks: TimelineTrackData[],
   settings: EditSettings,
@@ -1678,61 +1807,9 @@ export async function processWebCodecsMultiTrackTimeline(
           const nextClip = cIdx < clips.length - 1 ? clips[cIdx + 1] : null;
           const prevClip = cIdx > 0 ? clips[cIdx - 1] : null;
 
-          const clipStart = activeClip.startTime || 0;
-          const clipDur = activeClip.endTime !== undefined && activeClip.endTime > clipStart
-            ? activeClip.endTime - clipStart
-            : activeClip.duration || activeClip.fileDuration || (activeClip.mediaType === 'image' ? 5 : 10);
-          const clipEnd = clipStart + clipDur;
-
-          const prevClipEnd = prevClip
-            ? (prevClip.endTime !== undefined && prevClip.endTime > (prevClip.startTime || 0)
-                ? prevClip.endTime
-                : (prevClip.startTime || 0) + (prevClip.duration || prevClip.fileDuration || 10))
-            : 0;
-
-          const hasOutgoing = activeClip.transition && activeClip.transition !== 'none' && nextClip && Math.abs(clipEnd - (nextClip.startTime || 0)) < 0.15;
-          const hasIncoming = prevClip && prevClip.transition && prevClip.transition !== 'none' && Math.abs(prevClipEnd - clipStart) < 0.15;
-
-          const isNormallyActive = t >= clipStart && t <= clipEnd;
-          const isInOutgoing = hasOutgoing && t >= (clipEnd - TRANSITION_HALF) && t <= (clipEnd + TRANSITION_HALF);
-          const isInIncoming = hasIncoming && t >= (prevClipEnd - TRANSITION_HALF) && t <= (prevClipEnd + TRANSITION_HALF);
-          const isSoloFadeEnd = activeClip.transition === 'fade' && !nextClip && t >= (clipEnd - TRANSITION_HALF) && t <= clipEnd;
-
-          if (!isNormallyActive && !isInOutgoing && !isInIncoming && !isSoloFadeEnd) {
-            continue;
-          }
-
-          let transitionOpacity = 1.0;
-          let transitionClipPath: string | undefined = undefined;
-
-          if (isInOutgoing) {
-            const transType = activeClip.transition;
-            const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
-            if (transType === 'fade') {
-              transitionOpacity = p <= 0.5 ? (1.0 - p * 2) : 0.0;
-            } else if (transType === 'crossfade' || transType === 'dissolve') {
-              transitionOpacity = 1.0 - p;
-            } else if (transType === 'wipe') {
-              transitionOpacity = 1.0;
-            }
-          } else if (isInIncoming) {
-            const transType = prevClip!.transition;
-            const p = Math.max(0, Math.min(1, (t - (prevClipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
-            if (transType === 'fade') {
-              transitionOpacity = p > 0.5 ? ((p - 0.5) * 2) : 0.0;
-            } else if (transType === 'crossfade' || transType === 'dissolve') {
-              transitionOpacity = p;
-            } else if (transType === 'wipe') {
-              transitionOpacity = 1.0;
-              const pct = Math.round(p * 100);
-              transitionClipPath = `polygon(0 0, ${pct}% 0, ${pct}% 100%, 0 100%)`;
-            }
-          } else if (isSoloFadeEnd) {
-            const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / TRANSITION_HALF));
-            transitionOpacity = 1.0 - p;
-          }
-
-          if (transitionOpacity <= 0) continue;
+          const { isActive, opacity: transitionOpacity, clipPath: transitionClipPath } = calculateTransitionState(activeClip, prevClip, nextClip, t);
+          
+          if (!isActive || transitionOpacity <= 0) continue;
 
           const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
           const isAudio = activeClip.mediaType === 'audio' || activeClip.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus|wma)$/i.test(activeClip.file.name);
@@ -1829,47 +1906,45 @@ export async function processWebCodecsMultiTrackTimeline(
       while (currentAudioTime < targetAudioEnd - 0.0005) {
         const currentTimelinePos = exportStart + currentAudioTime;
 
-        // Find active audio clip across non-muted tracks
-        let activeAudioClip: TimelineClip | null = null;
+        const audioSources: AudioSourceInfo[] = [];
+
         for (const track of visibleTracks) {
           if (track.muted) continue;
-          const clip = track.clips.find((c) => {
-            if (!c.file) return false;
-            const isImg = c.mediaType === 'image' || c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name);
-            if (isImg) return false;
-            const start = c.startTime || 0;
-            const dur = c.endTime !== undefined && c.endTime > start ? c.endTime - start : c.duration || c.fileDuration || 10;
-            return currentTimelinePos >= start && currentTimelinePos < start + dur;
-          });
-          if (clip) {
-            activeAudioClip = clip;
-            break;
-          }
-        }
+          for (let cIdx = 0; cIdx < track.clips.length; cIdx++) {
+            const activeClip = track.clips[cIdx];
+            if (!activeClip.file) continue;
+            const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
+            if (isImg) continue;
 
-        let sampleAdded = false;
-        if (activeAudioClip && activeAudioClip.file) {
-          try {
-            const audioBuf = await getAudioBufferForFile(activeAudioClip.file);
-            if (audioBuf) {
-              const sourceStart = activeAudioClip.sourceStartTime || 0;
-              const clipStart = activeAudioClip.startTime || 0;
-              const sourceOffset = sourceStart + (currentTimelinePos - clipStart);
+            const nextClip = cIdx < track.clips.length - 1 ? track.clips[cIdx + 1] : null;
+            const prevClip = cIdx > 0 ? track.clips[cIdx - 1] : null;
 
-              if (sourceOffset >= 0 && sourceOffset < audioBuf.duration) {
-                const aSample = createAudioSampleBlock(audioBuf, sourceOffset, currentAudioTime);
-                await aSource.add(aSample);
-                currentAudioTime += AUDIO_FRAME_DURATION;
-                aSample.close();
-                sampleAdded = true;
+            const { isActive, opacity } = calculateTransitionState(activeClip, prevClip, nextClip, currentTimelinePos);
+            
+            if (isActive && opacity > 0) {
+              const audioBuf = await getAudioBufferForFile(activeClip.file).catch(() => null);
+              if (audioBuf) {
+                const sourceStart = activeClip.sourceStartTime || 0;
+                const clipStart = activeClip.startTime || 0;
+                const sourceOffset = sourceStart + (currentTimelinePos - clipStart);
+                if (sourceOffset >= 0 && sourceOffset < audioBuf.duration) {
+                  audioSources.push({
+                    buffer: audioBuf,
+                    sourceStartSec: sourceOffset,
+                    volumeMultiplier: opacity * (track.volume ?? 1)
+                  });
+                }
               }
             }
-          } catch (err) {
-            console.warn('Audio sampling error for clip:', activeAudioClip.id, err);
           }
         }
 
-        if (!sampleAdded) {
+        if (audioSources.length > 0) {
+          const aSample = createMixedAudioSampleBlock(audioSources, currentAudioTime);
+          await aSource.add(aSample);
+          currentAudioTime += AUDIO_FRAME_DURATION;
+          aSample.close();
+        } else {
           const silentSample = createSilentAudioBlock(currentAudioTime);
           await aSource.add(silentSample);
           currentAudioTime += AUDIO_FRAME_DURATION;
@@ -1881,44 +1956,50 @@ export async function processWebCodecsMultiTrackTimeline(
     // Ensure audio track covers the full export duration up to exportDuration
     while (currentAudioTime < exportDuration - 0.0005) {
       const currentTimelinePos = exportStart + currentAudioTime;
-      let activeAudioClip: TimelineClip | null = null;
-      for (const track of visibleTracks) {
-        if (track.muted) continue;
-        const clip = track.clips.find((c) => {
-          if (!c.file) return false;
-          const isImg = c.mediaType === 'image' || c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name);
-          if (isImg) return false;
-          const start = c.startTime || 0;
-          const dur = c.endTime !== undefined && c.endTime > start ? c.endTime - start : c.duration || c.fileDuration || 10;
-          return currentTimelinePos >= start && currentTimelinePos < start + dur;
-        });
-        if (clip) { activeAudioClip = clip; break; }
-      }
+        const audioSources: AudioSourceInfo[] = [];
 
-      let sampleAdded = false;
-      if (activeAudioClip && activeAudioClip.file) {
-        try {
-          const audioBuf = await getAudioBufferForFile(activeAudioClip.file);
-          if (audioBuf) {
-            const sourceStart = activeAudioClip.sourceStartTime || 0;
-            const clipStart = activeAudioClip.startTime || 0;
-            const sourceOffset = sourceStart + (currentTimelinePos - clipStart);
-            if (sourceOffset >= 0 && sourceOffset < audioBuf.duration) {
-              const aSample = createAudioSampleBlock(audioBuf, sourceOffset, currentAudioTime);
-              await aSource.add(aSample);
-              currentAudioTime += AUDIO_FRAME_DURATION;
-              aSample.close();
-              sampleAdded = true;
+        for (const track of visibleTracks) {
+          if (track.muted) continue;
+          for (let cIdx = 0; cIdx < track.clips.length; cIdx++) {
+            const activeClip = track.clips[cIdx];
+            if (!activeClip.file) continue;
+            const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
+            if (isImg) continue;
+
+            const nextClip = cIdx < track.clips.length - 1 ? track.clips[cIdx + 1] : null;
+            const prevClip = cIdx > 0 ? track.clips[cIdx - 1] : null;
+
+            const { isActive, opacity } = calculateTransitionState(activeClip, prevClip, nextClip, currentTimelinePos);
+            
+            if (isActive && opacity > 0) {
+              const audioBuf = await getAudioBufferForFile(activeClip.file).catch(() => null);
+              if (audioBuf) {
+                const sourceStart = activeClip.sourceStartTime || 0;
+                const clipStart = activeClip.startTime || 0;
+                const sourceOffset = sourceStart + (currentTimelinePos - clipStart);
+                if (sourceOffset >= 0 && sourceOffset < audioBuf.duration) {
+                  audioSources.push({
+                    buffer: audioBuf,
+                    sourceStartSec: sourceOffset,
+                    volumeMultiplier: opacity * (track.volume ?? 1)
+                  });
+                }
+              }
             }
           }
-        } catch {}
-      }
-      if (!sampleAdded) {
-        const silentSample = createSilentAudioBlock(currentAudioTime);
-        await aSource.add(silentSample);
-        currentAudioTime += AUDIO_FRAME_DURATION;
-        silentSample.close();
-      }
+        }
+
+        if (audioSources.length > 0) {
+          const aSample = createMixedAudioSampleBlock(audioSources, currentAudioTime);
+          await aSource.add(aSample);
+          currentAudioTime += AUDIO_FRAME_DURATION;
+          aSample.close();
+        } else {
+          const silentSample = createSilentAudioBlock(currentAudioTime);
+          await aSource.add(silentSample);
+          currentAudioTime += AUDIO_FRAME_DURATION;
+          silentSample.close();
+        }
     }
 
     const now = performance.now();

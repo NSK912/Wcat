@@ -325,10 +325,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const selectedClipId = propSelectedClipId !== undefined ? propSelectedClipId : localSelectedClipId;
   const setSelectedClipId = useCallback(
     (id: string | null) => {
-      setLocalSelectedClipId(id);
+      if (propSelectedClipId === undefined) {
+        setLocalSelectedClipId(id);
+      }
       onSelectClipId?.(id);
     },
-    [onSelectClipId]
+    [propSelectedClipId, onSelectClipId]
   );
   const [isDraggingLayer, setIsDraggingLayer] = useState<boolean>(false);
   const [isResizingLayerCorner, setIsResizingLayerCorner] = useState<string | null>(null);
@@ -381,10 +383,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   useEffect(() => {
     if (!isEncodeMode) {
       setContextMenu(null);
-      setSelectedClipId(null);
+      if (selectedClipId !== null) {
+        setSelectedClipId(null);
+      }
       setIsAlignMenuOpen(false);
     }
-  }, [isEncodeMode]);
+  }, [isEncodeMode, selectedClipId, setSelectedClipId]);
 
   // Handle outside clicks to close context menu and align menu
   useEffect(() => {
@@ -537,7 +541,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         const isNormallyActive = currentTime >= clip.startTime && currentTime <= clip.endTime;
         const isInOutgoing = hasOutgoing && currentTime >= (clip.endTime - TRANSITION_HALF) && currentTime <= (clip.endTime + TRANSITION_HALF);
         const isInIncoming = hasIncoming && currentTime >= (prevClip!.endTime - TRANSITION_HALF) && currentTime <= (prevClip!.endTime + TRANSITION_HALF);
-        const isSoloFadeEnd = clip.transition === 'fade' && !nextClip && currentTime >= (clip.endTime - TRANSITION_HALF) && currentTime <= clip.endTime;
+        const isSoloFadeEnd = clip.transition === 'fade' && !hasOutgoing && currentTime >= (clip.endTime - TRANSITION_HALF) && currentTime <= clip.endTime;
 
         if (!isNormallyActive && !isInOutgoing && !isInIncoming && !isSoloFadeEnd) {
           return;
@@ -648,29 +652,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const activeSelectedLayer = useMemo(() => {
     return activeLayers.find((l) => l.clip.id === selectedClipId) || null;
   }, [activeLayers, selectedClipId]);
-
-  // Fallback timer when playing image clips or when no video/audio element is master
-  useEffect(() => {
-    if (!isPlaying) return;
-    const hasVideoMaster = activeLayers.some((l) => l.mediaType === 'video' && l.clip.id === masterLayerId);
-    const hasAudioMaster = !hasVideoMaster && activeAudioClips && activeAudioClips.length > 0;
-    if (hasVideoMaster || hasAudioMaster) return; // Active video or audio element drives time updates
-
-    let lastTime = performance.now();
-    let animId: number;
-
-    const tick = (now: number) => {
-      const delta = (now - lastTime) / 1000;
-      lastTime = now;
-
-      const speed = settings.speed || 1;
-      onTimeUpdate?.(currentTime + delta * speed);
-      animId = requestAnimationFrame(tick);
-    };
-
-    animId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animId);
-  }, [isPlaying, masterLayerId, activeLayers, currentTime, settings.speed, onTimeUpdate]);
 
   // =========================================================================
   // 🖐️ DIRECT DRAG & DROP FOR PREVIEW LAYERS (drag and drop supported)
@@ -1083,7 +1064,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               target="_blank"
               rel="noopener noreferrer"
               className="h-9 w-9 bg-red-600/10 hover:bg-red-600/20 border border-red-500/20 rounded-lg flex items-center justify-center text-red-500 transition shadow-md shrink-0"
-              title="YouTube"
             >
               <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
                 <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
@@ -1096,7 +1076,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               target="_blank"
               rel="noopener noreferrer"
               className="h-9 w-9 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg flex items-center justify-center text-slate-300 hover:text-white transition shadow-md shrink-0"
-              title="GitHub"
             >
               <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
                 <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
@@ -1265,7 +1244,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                             <button
                               onClick={() => setSelectedClipId(null)}
                               className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
-                              title="Deselect"
                             >
                               <X className="w-2.5 h-2.5" />
                             </button>
@@ -1281,7 +1259,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                                   transform: `translate(-50%, -50%) scale(${invScale})`,
                                   transformOrigin: 'center center',
                                 }}
-                                title="Drag to resize / scale layer (Top-Left)"
                               />
                               {/* Top-Right Corner Handle */}
                               <div
@@ -1291,7 +1268,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                                   transform: `translate(50%, -50%) scale(${invScale})`,
                                   transformOrigin: 'center center',
                                 }}
-                                title="Drag to resize / scale layer (Top-Right)"
                               />
                               {/* Bottom-Left Corner Handle */}
                               <div
@@ -1301,7 +1277,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                                   transform: `translate(-50%, 50%) scale(${invScale})`,
                                   transformOrigin: 'center center',
                                 }}
-                                title="Drag to resize / scale layer (Bottom-Left)"
                               />
                               {/* Bottom-Right Corner Handle */}
                               <div
@@ -1311,7 +1286,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                                   transform: `translate(50%, 50%) scale(${invScale})`,
                                   transformOrigin: 'center center',
                                 }}
-                                title="Drag to resize / scale layer (Bottom-Right)"
                               />
                             </>
                           )}
@@ -1474,7 +1448,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 <div
                   onMouseDown={(e) => handleMouseDownCrop(e, 'move')}
                   className="absolute inset-3 cursor-move flex items-center justify-center group/center"
-                  title="Drag to reposition crop box"
                 >
                   <div className="p-1.5 rounded-full bg-slate-900/80 text-violet-300 border border-violet-400/40 opacity-0 group-hover/center:opacity-100 transition shadow-lg flex items-center space-x-1 text-[10px]">
                     <Move className="w-3.5 h-3.5" />
@@ -1485,22 +1458,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 <div
                   onMouseDown={(e) => handleMouseDownCrop(e, 'nw')}
                   className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
-                  title="Resize Top-Left"
                 />
                 <div
                   onMouseDown={(e) => handleMouseDownCrop(e, 'ne')}
                   className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
-                  title="Resize Top-Right"
                 />
                 <div
                   onMouseDown={(e) => handleMouseDownCrop(e, 'sw')}
                   className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nesw-resize hover:scale-125 transition"
-                  title="Resize Bottom-Left"
                 />
                 <div
                   onMouseDown={(e) => handleMouseDownCrop(e, 'se')}
                   className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-violet-600 rounded-sm shadow-md cursor-nwse-resize hover:scale-125 transition"
-                  title="Resize Bottom-Right"
                 />
 
                 <div
@@ -1534,7 +1503,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       }
                     }}
                     className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
-                    title="Reset to 100% Full Frame"
                   >
                     <RotateCcw className="w-3 h-3" />
                   </button>

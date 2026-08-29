@@ -93,7 +93,6 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
               <button
                 onClick={handleCopyLog}
                 className="text-xs text-slate-400 hover:text-white transition flex items-center space-x-1 px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 border border-white/10"
-                title="Copy logs to clipboard"
               >
                 {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
                 <span>{copied ? 'Copied' : 'Copy Logs'}</span>
@@ -207,7 +206,6 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
             <button
               onClick={onClose}
               className="relative w-full h-11 bg-slate-800/90 hover:bg-slate-800 text-slate-200 rounded-xl text-xs font-semibold transition border border-white/10 overflow-hidden shadow-inner flex items-center justify-between px-4 select-none group"
-              title="Click to Cancel or close"
             >
               {/* Progress bar background fill */}
               <div

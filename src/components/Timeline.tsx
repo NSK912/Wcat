@@ -1821,7 +1821,6 @@ export const Timeline: React.FC<TimelineProps> = ({
             startHeightResize(e.touches[0].clientY);
           }
         }}
-        title="Drag up or down to resize timeline & toolbar"
       >
         <div className="w-20 h-1 rounded-full bg-slate-600/50 group-hover:bg-indigo-400 group-hover:h-1.5 group-hover:w-28 transition-all duration-150 shadow-sm flex items-center justify-center">
           <div className="w-6 h-0.5 bg-slate-300/40 rounded-full" />
@@ -1845,7 +1844,6 @@ export const Timeline: React.FC<TimelineProps> = ({
             <button
               onClick={onFullscreenClick}
               className="h-8 w-8 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center shadow-sm border border-white/10 transition shrink-0 cursor-pointer"
-              title="Fullscreen"
             >
               <Maximize2 className="w-3.5 h-3.5" />
             </button>
@@ -1879,7 +1877,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                 onClick={handleUndo}
                 disabled={!canUndo}
                 className="h-8 w-8 bg-slate-800/90 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800/90 text-slate-200 hover:text-white rounded-lg border border-white/10 flex items-center justify-center transition cursor-pointer disabled:cursor-not-allowed shadow-sm"
-                title="Undo (Ctrl+Z / ⌘Z)"
                 aria-label="Undo"
               >
                 <Undo2 className="w-3.5 h-3.5" />
@@ -1888,7 +1885,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                 onClick={handleRedo}
                 disabled={!canRedo}
                 className="h-8 w-8 bg-slate-800/90 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800/90 text-slate-200 hover:text-white rounded-lg border border-white/10 flex items-center justify-center transition cursor-pointer disabled:cursor-not-allowed shadow-sm"
-                title="Redo (Ctrl+Y / ⌘⇧Z)"
                 aria-label="Redo"
               >
                 <Redo2 className="w-3.5 h-3.5" />
@@ -1898,7 +1894,6 @@ export const Timeline: React.FC<TimelineProps> = ({
             <button
               onClick={handleSplitAtPlayhead}
               className="h-8 px-2.5 bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-white/10 text-xs font-medium flex items-center space-x-1.5 transition cursor-pointer shadow-sm"
-              title="Split clip at current playhead position"
             >
               <Scissors className="w-3.5 h-3.5 text-indigo-400" />
               <span className="hidden sm:inline">Split</span>
@@ -1922,7 +1917,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                     handleDuplicateClip(effectiveTrack.id, effectiveClip.id);
                   }}
                   className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 rounded transition cursor-pointer"
-                  title="Duplicate Clip in this Track"
                 >
                   <Copy className="w-3.5 h-3.5" />
                 </button>
@@ -1934,7 +1928,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                     handleDeleteClip(effectiveTrack.id, effectiveClip.id);
                   }}
                   className="h-6 w-6 flex items-center justify-center text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 rounded transition cursor-pointer"
-                  title="Delete Clip"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
@@ -1974,7 +1967,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                         ? 'border-indigo-400 bg-indigo-950/70 shadow-[0_0_8px_rgba(99,102,241,0.3)]'
                         : 'border-white/10 hover:border-indigo-500/50'
                     } px-2 py-0.5 rounded text-[11px] whitespace-nowrap cursor-pointer transition shrink-0`}
-                    title="Click to preview, drag or use arrows to reorder"
                   >
                     <span className="text-indigo-300 font-mono font-bold">#{idx + 1}</span>
                     <span className="text-slate-200 truncate max-w-[120px] lg:max-w-[180px]">
@@ -2020,7 +2012,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                 onClick={() => setZoomLevel((z) => Math.max(1, z - 0.5))}
                 disabled={zoomLevel <= 1}
                 className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
-                title="Zoom Out"
               >
                 <ZoomOut className="w-3.5 h-3.5" />
               </button>
@@ -2031,7 +2022,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                 onClick={() => setZoomLevel((z) => Math.min(3, z + 0.5))}
                 disabled={zoomLevel >= 3}
                 className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
-                title="Zoom In"
               >
                 <ZoomIn className="w-3.5 h-3.5" />
               </button>
@@ -2041,7 +2031,6 @@ export const Timeline: React.FC<TimelineProps> = ({
           {/* Add Media Button */}
           <button
             onClick={onMultiUploadClick || onUploadClick}
-            title="Add Media Files"
             className="h-8 w-8 flex items-center justify-center bg-white/5 hover:bg-white/10 text-slate-200 rounded-lg transition border border-white/10 backdrop-blur-sm group shrink-0 cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5 text-indigo-400 group-hover:scale-110 transition-transform" />
@@ -2053,7 +2042,6 @@ export const Timeline: React.FC<TimelineProps> = ({
               onClick={() => onExportClick(tracks)}
               disabled={isProcessing}
               className="h-8 px-2.5 flex items-center justify-center bg-indigo-950/60 hover:bg-indigo-900/80 disabled:bg-indigo-950/30 text-indigo-200 rounded-lg text-[11px] font-semibold border border-indigo-500/30 backdrop-blur-sm shadow-md transition transform active:scale-95 shrink-0 cursor-pointer"
-              title="Remux (Fast Lossless Copy)"
             >
               <span>Remux</span>
             </button>
@@ -2068,7 +2056,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                 ? 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 shadow-violet-500/25'
                 : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-500/20'
             }`}
-            title={isEncodeMode ? 'Encode & Export with WebCodecs API' : 'Export Video'}
           >
             {isEncodeMode ? <Download className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
             <span>{isEncodeMode ? 'Encode' : 'Export'}</span>
@@ -2169,7 +2156,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                         cycleMediaType(track.id);
                       }}
                       className="p-0.5 rounded hover:bg-white/10 transition cursor-pointer"
-                      title={`Media Type: ${track.mediaType} (Click to cycle type)`}
                     >
                       {getMediaIcon(track.mediaType)}
                     </button>
@@ -2202,7 +2188,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                           handleStartRename(track);
                         }}
                         className="text-[11px] font-medium text-slate-200 truncate flex-1 flex items-center space-x-1"
-                        title="Double-click to rename"
                       >
                         <span className="truncate">{track.name}</span>
                         {track.clips?.length > 0 && (
@@ -2238,7 +2223,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                             ? '#06b6d4'
                             : '#d946ef',
                       }}
-                      title="Change Track Color"
                     />
                   </div>
                 </div>
@@ -2254,7 +2238,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                       className={`p-1 rounded text-[10px] transition cursor-pointer ${
                         track.hidden ? 'text-rose-400 bg-rose-500/10' : 'text-slate-400 hover:text-white'
                       }`}
-                      title={track.hidden ? 'Show Track' : 'Hide Track'}
                     >
                       {track.hidden ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
                     </button>
@@ -2267,7 +2250,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                       className={`p-1 rounded text-[10px] transition cursor-pointer ${
                         track.muted ? 'text-amber-400 bg-amber-500/10' : 'text-slate-400 hover:text-white'
                       }`}
-                      title={track.muted ? 'Unmute Track' : 'Mute Track'}
                     >
                       {track.muted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
                     </button>
@@ -2280,7 +2262,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                       className={`p-1 rounded text-[10px] transition cursor-pointer ${
                         track.locked ? 'text-red-400 bg-red-500/10' : 'text-slate-400 hover:text-white'
                       }`}
-                      title={track.locked ? 'Unlock Track' : 'Lock Track'}
                     >
                       {track.locked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
                     </button>
@@ -2293,7 +2274,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                         handleStartRename(track);
                       }}
                       className="p-1 rounded text-slate-400 hover:text-slate-200 transition cursor-pointer"
-                      title="Rename Track"
                     >
                       <Edit2 className="w-2.5 h-2.5" />
                     </button>
@@ -2341,7 +2321,6 @@ export const Timeline: React.FC<TimelineProps> = ({
             <div
               onMouseDown={handleStartScrub}
               className="ruler-bar h-5 bg-slate-950/90 hover:bg-slate-900 border-b border-white/10 flex items-center relative z-20 cursor-pointer select-none transition-colors"
-              title="Click or drag ruler to scrub video"
             >
               {rulerTicks.map((tick, i) => (
                 <div
@@ -2422,8 +2401,8 @@ export const Timeline: React.FC<TimelineProps> = ({
                         const filmstripWidthPct = Math.max(100, (fileDur / srcSpan) * 100);
                         const filmstripLeftPct = -((srcStart / srcSpan) * 100);
 
-                        const nextClip = track.clips[clipIdx + 1];
-                        const isSnappedToNext = nextClip && Math.abs(clip.endTime - nextClip.startTime) < 0.05;
+                        const nextClip = clipIdx < track.clips.length - 1 ? track.clips[clipIdx + 1] : null;
+                        const isSnappedToNext = nextClip && Math.abs(clip.endTime - nextClip.startTime) < 0.15;
 
                         return (
                           <React.Fragment key={clip.id}>
@@ -2533,7 +2512,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                                 className={`absolute left-0 top-0 bottom-0 w-3 rounded-l-[3px] shadow-md cursor-ew-resize z-30 shrink-0 flex items-center justify-center group ${clipColorConfig.clipHandle}`}
                                 onMouseDown={(e) => startTrimDrag(e, 'left', track.id, clip.id)}
                                 onClick={(e) => e.stopPropagation()}
-                                title="Drag to adjust Start (In point)"
                               >
                                 <div className="w-0.5 h-3.5 bg-slate-950/80 rounded-full" />
                               </div>
@@ -2545,7 +2523,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                                 className={`absolute right-0 top-0 bottom-0 w-3 rounded-r-[3px] shadow-md cursor-ew-resize z-30 shrink-0 flex items-center justify-center group ${clipColorConfig.clipHandle}`}
                                 onMouseDown={(e) => startTrimDrag(e, 'right', track.id, clip.id)}
                                 onClick={(e) => e.stopPropagation()}
-                                title="Drag to adjust End (Out point)"
                               >
                                 <div className="w-0.5 h-3.5 bg-slate-950/80 rounded-full" />
                               </div>
@@ -2564,7 +2541,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                             </div>
                           </div>
 
-                          {/* Inter-clip Add Button if snapped */}
+                          {/* Inter-clip Add Button */}
                           {isSnappedToNext && (
                             <div 
                               className="absolute z-40 pointer-events-auto flex items-center justify-center -translate-x-1/2 -translate-y-1/2"
@@ -2576,7 +2553,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                                   setActiveTransitionMenu({ trackId: track.id, clipId: clip.id });
                                 }}
                                 className={`w-5 h-5 bg-slate-900 rounded-md border border-white/20 shadow-lg flex items-center justify-center text-white hover:scale-110 hover:bg-indigo-600 transition-all cursor-pointer active:scale-95 ${clipColorConfig.clipBorder} ${activeTransitionMenu?.trackId === track.id && activeTransitionMenu?.clipId === clip.id ? 'bg-indigo-600' : ''}`}
-                                title="Add Media / Transition"
                               >
                                 {clip.transition && clip.transition !== 'none' ? (
                                   <div className="w-2.5 h-2.5 bg-white rounded-sm opacity-80" style={{ clipPath: 'polygon(0 0, 100% 50%, 0 100%)' }} />
@@ -2637,7 +2613,6 @@ export const Timeline: React.FC<TimelineProps> = ({
               <div
                 onMouseDown={handleStartScrub}
                 className="pointer-events-auto cursor-grab active:cursor-grabbing p-1.5 -m-1.5 flex items-center justify-center group/cat hover:scale-125 transition-transform z-30 select-none"
-                title="Drag cat to scrub video timeline"
               >
                 <img
                   src={wcatSeekPng}
@@ -2652,7 +2627,6 @@ export const Timeline: React.FC<TimelineProps> = ({
               <div
                 onMouseDown={handleStartScrub}
                 className="w-[2px] flex-1 bg-rose-500 shadow-[0_0_10px_#f43f5e] pointer-events-auto cursor-col-resize hover:w-[4px] transition-all"
-                title="Drag red line to seek"
               />
             </div>
           </div>
