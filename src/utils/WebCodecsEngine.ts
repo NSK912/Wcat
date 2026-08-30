@@ -1541,7 +1541,8 @@ export async function processWebCodecsMultiTrackTimeline(
   tracks: TimelineTrackData[],
   settings: EditSettings,
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void,
+  abortSignal?: AbortSignal
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   await HardwareBlurEngine.instance.init();
   if (!isWebCodecsSupported()) {
@@ -1786,6 +1787,9 @@ export async function processWebCodecsMultiTrackTimeline(
 
   // Synchronous Lockstep Audio/Video Compositing Loop
   for (let f = 0; f < frames; f++) {
+    if (abortSignal?.aborted) {
+      throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
+    }
     const t = exportStart + f * frameDur;
     const outT = f * frameDur;
 
@@ -1955,6 +1959,9 @@ export async function processWebCodecsMultiTrackTimeline(
 
     // Ensure audio track covers the full export duration up to exportDuration
     while (currentAudioTime < exportDuration - 0.0005) {
+      if (abortSignal?.aborted) {
+        throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
+      }
       const currentTimelinePos = exportStart + currentAudioTime;
         const audioSources: AudioSourceInfo[] = [];
 
@@ -2049,7 +2056,8 @@ export async function processWebCodecsConcatStream(
   inputItems: any[],
   settings: EditSettings,
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void,
+  abortSignal?: AbortSignal
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   await HardwareBlurEngine.instance.init();
   const isTracks = inputItems.length > 0 && inputItems[0].clips !== undefined;
@@ -2059,7 +2067,8 @@ export async function processWebCodecsConcatStream(
       inputItems as TimelineTrackData[],
       settings,
       writable,
-      onProgress
+      onProgress,
+      abortSignal
     );
   }
 

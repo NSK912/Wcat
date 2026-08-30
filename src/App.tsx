@@ -174,6 +174,7 @@ export default function App() {
   const holdRafRef = useRef<number | null>(null);
   const holdStartTimeRef = useRef<number>(0);
   const hintTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const exportAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const handleResize = () => {
@@ -820,7 +821,7 @@ export default function App() {
   };
 
   // Run FFmpeg / WebCodecs Export Process
-  const executeExportProcess = async (tracks?: any[], forceIframeMode: boolean = false) => {
+  const executeExportProcess = async (tracks?: any[], forceIframeMode: boolean = false, signal?: AbortSignal) => {
     if (!videoUrl) return;
 
     let fileHandle: any = null;
@@ -998,7 +999,7 @@ export default function App() {
             setProcessingProgress(prog.percentage / 100);
             setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
             if (prog.log) addLog(prog.log);
-          });
+          }, signal);
         } 
         // =====================================================================
         // 🔵 COPY MODE: MULTI-TRACK CONCATENATION (FAST STREAM COPY)
@@ -1008,7 +1009,7 @@ export default function App() {
             setProcessingProgress(prog.percentage / 100);
             setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
             if (prog.log) addLog(prog.log);
-          });
+          }, signal);
         }
 
         if (writable) {
@@ -1169,7 +1170,18 @@ export default function App() {
   };
 
   const handleExport = async (tracks?: any[]) => {
-    await executeExportProcess(tracks, useIframeSaveMode);
+    if (exportAbortControllerRef.current) {
+      exportAbortControllerRef.current.abort();
+    }
+    exportAbortControllerRef.current = new AbortController();
+    try {
+      await executeExportProcess(tracks, useIframeSaveMode, exportAbortControllerRef.current.signal);
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        setProcessingMessage('Export cancelled by user');
+        setIsProcessingComplete(true);
+      }
+    }
   };
 
   const handleDownloadOutput = () => {
@@ -1655,7 +1667,7 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const nextScale = Math.max(0.1, Math.round((activeSelectedLayer.transform.scale - 0.1) * 10) / 10);
+                                  const nextScale = Math.max(0.01, Math.round((activeSelectedLayer.transform.scale - 0.1) * 100) / 100);
                                   handleUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
                                     ...activeSelectedLayer.transform,
                                     scale: nextScale,
@@ -1665,12 +1677,11 @@ export default function App() {
                               >
                                 <ZoomOut className="w-3.5 h-3.5" />
                               </button>
-
                               <input
                                 type="range"
-                                min="0.1"
+                                min="0.01"
                                 max="3.0"
-                                step="0.05"
+                                step="0.01"
                                 value={activeSelectedLayer.transform.scale}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
@@ -1681,11 +1692,10 @@ export default function App() {
                                 }}
                                 className="flex-1 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-violet-500"
                               />
-
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const nextScale = Math.min(3.0, Math.round((activeSelectedLayer.transform.scale + 0.1) * 10) / 10);
+                                  const nextScale = Math.min(3.0, Math.round((activeSelectedLayer.transform.scale + 0.1) * 100) / 100);
                                   handleUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
                                     ...activeSelectedLayer.transform,
                                     scale: nextScale,
@@ -1947,7 +1957,12 @@ export default function App() {
         isDone={isProcessingComplete}
         outputUrl={outputUrl}
         outputFilename={outputFilename}
-        onClose={() => setIsProcessingModalOpen(false)}
+        onClose={() => {
+          setIsProcessingModalOpen(false);
+          if (exportAbortControllerRef.current && !isProcessingComplete) {
+            exportAbortControllerRef.current.abort();
+          }
+        }}
         onDownload={handleDownloadOutput}
       />
 

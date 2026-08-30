@@ -1266,7 +1266,8 @@ async function processMediabunnyRemuxStream(
 async function processMediabunnyConcatStream(
   files: File[],
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void,
+  abortSignal?: AbortSignal
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   let stage = 'Initializing Concat Pipeline';
   let totalWritten = 0;
@@ -1355,6 +1356,7 @@ async function processMediabunnyConcatStream(
     let lastBytes = 0;
 
     for (let fIdx = 0; fIdx < files.length; fIdx++) {
+      if (abortSignal?.aborted) throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
       const file = files[fIdx];
       onProgress({
         percentage: Math.round(((fIdx) / files.length) * 90) + 8,
@@ -1509,7 +1511,8 @@ async function processMediabunnyConcatStream(
 export async function processNativeConcatStream(
   files: File[],
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void,
+  abortSignal?: AbortSignal
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
     if (!files.length) return { success: false };
@@ -1531,7 +1534,7 @@ export async function processNativeConcatStream(
         log: `[ENGINE] Selected Native Zero-RAM EBML Streaming Engine for ${firstFormat.toUpperCase()} files`
       });
       try {
-        return await processNativeEBMLConcatStream(files, writable, onProgress);
+        return await processNativeEBMLConcatStream(files, writable, onProgress, abortSignal);
       } catch (nativeErr) {
         console.warn("Native EBML concat failed, falling back to Mediabunny:", nativeErr);
         onProgress({
@@ -1551,7 +1554,7 @@ export async function processNativeConcatStream(
       speedMBs: 0,
       log: `[ENGINE] Selected Mediabunny Engine for ${firstFormat.toUpperCase()} files\n[NOTICE] Processing ${firstFormat.toUpperCase()} containers with Mediabunny Engine will be slower than MKV/WebM due to MP4 index recalculation.`
     });
-    return await processMediabunnyConcatStream(files, writable, onProgress);
+    return await processMediabunnyConcatStream(files, writable, onProgress, abortSignal);
   } catch (error) {
     console.error("Concat Stream Router Error:", error);
     return { success: false };
@@ -1561,12 +1564,14 @@ export async function processNativeConcatStream(
 async function processNativeEBMLConcatStream(
   files: File[],
   writable: FileSystemWritableFileStream | null,
-  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+  onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void,
+  abortSignal?: AbortSignal
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
     const fileMetas: FileMeta[] = [];
     let totalDurationMs = 0;
     for (let i = 0; i < files.length; i++) {
+        if (abortSignal?.aborted) throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
         const meta = await parseWebMFile(files[i]);
         fileMetas.push(meta);
         totalDurationMs += meta.fileDurationMs;
@@ -1632,6 +1637,7 @@ async function processNativeEBMLConcatStream(
     const CHUNK_SIZE = 1024 * 1024; // 1MB chunks for streaming
 
     for (let fIdx = 0; fIdx < files.length; fIdx++) {
+        if (abortSignal?.aborted) throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
         const file = files[fIdx];
         const meta = fileMetas[fIdx];
         let fileMaxFrameTc = 0;
