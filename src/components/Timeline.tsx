@@ -198,6 +198,13 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [editingName, setEditingName] = useState<string>('');
   const [activeTransitionMenu, setActiveTransitionMenu] = useState<{ trackId: string, clipId: string } | null>(null);
 
+  const getDisplayTrackName = useCallback((track: TimelineTrackData, allTracks: TimelineTrackData[]) => {
+    if (!track) return '';
+    const actualTrackIdx = allTracks.findIndex(t => t.id === track.id);
+    if (actualTrackIdx === -1) return track.name;
+    return /^Track \d+$/.test(track.name) ? `Track ${actualTrackIdx + 1}` : track.name;
+  }, []);
+
   // Universal, Free-form Timeline Tracks (Each track holds MULTIPLE independent clips)
   const [internalTracks, setInternalTracks] = useState<TimelineTrackData[]>([
     {
@@ -244,6 +251,24 @@ export const Timeline: React.FC<TimelineProps> = ({
   const cleanupEmptyTracks = useCallback((tracksList: TimelineTrackData[]): TimelineTrackData[] => {
     if (tracksList.length <= 1) return tracksList;
     return tracksList.filter((t, idx) => idx === 0 || t.clips.length > 0);
+  }, []);
+
+  // Horizontal scroll on Ctrl + Mouse Wheel
+  useEffect(() => {
+    const scrollEl = timelineScrollRef.current;
+    if (!scrollEl) return;
+    
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        scrollEl.scrollLeft += e.deltaY;
+      }
+    };
+    
+    scrollEl.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      scrollEl.removeEventListener('wheel', handleWheel);
+    };
   }, []);
 
   // Ensure activeTrackId remains valid when tracks are removed
@@ -577,6 +602,87 @@ export const Timeline: React.FC<TimelineProps> = ({
     return 'any';
   };
 
+  const prevIsEncodeModeRef = useRef<boolean>(isEncodeMode);
+
+  // When exiting Encode Mode, restore pristine Copy Mode tracks layout
+  useEffect(() => {
+    const wasEncodeMode = prevIsEncodeModeRef.current;
+    prevIsEncodeModeRef.current = isEncodeMode;
+
+    if (wasEncodeMode && !isEncodeMode && selectedFiles && selectedFiles.length > 0) {
+      setTracks((prev) => {
+        // Collect latest clip data for each file to preserve trims if possible
+        const clipMap = new Map<string, TimelineClip>();
+        prev.forEach((t) => {
+          t.clips.forEach((c) => {
+            if (c.file && !clipMap.has(getFileKey(c.file))) {
+              clipMap.set(getFileKey(c.file), c);
+            }
+          });
+        });
+
+        const colorOrder: TrackColor[] = ['indigo', 'violet', 'emerald', 'amber', 'rose', 'cyan', 'fuchsia'];
+        const restoredTracks: TimelineTrackData[] = selectedFiles.map((file, idx) => {
+          const key = getFileKey(file);
+          const detectedType = detectMediaType(file);
+          const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
+          const trackColor = colorOrder[idx % colorOrder.length];
+          const existingClip = clipMap.get(key);
+
+          const clip: TimelineClip = existingClip ? {
+            ...existingClip,
+            startTime: 0,
+            endTime: existingClip.sourceEndTime - existingClip.sourceStartTime, // Reset position to start
+            color: trackColor
+          } : {
+            id: `clip-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+            name: file.name,
+            mediaType: detectedType,
+            startTime: 0,
+            endTime: knownDuration,
+            sourceStartTime: 0,
+            sourceEndTime: knownDuration,
+            fileDuration: knownDuration,
+            file: file,
+            fileName: file.name,
+            previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+            color: trackColor,
+            isTrimmed: false,
+          };
+
+          return {
+            id: `track-${idx + 1}`,
+            name: selectedFiles.length > 1 ? `Track ${idx + 1}` : 'Track 1',
+            mediaType: 'any' as MediaType,
+            color: trackColor,
+            clips: [clip],
+            muted: false,
+            locked: false,
+            hidden: false,
+          };
+        });
+
+        // Ensure at least 2 tracks if only 1 file is selected
+        while (restoredTracks.length < 2) {
+          const nextIdx = restoredTracks.length + 1;
+          restoredTracks.push({
+            id: `track-${nextIdx}`,
+            name: `Track ${nextIdx}`,
+            mediaType: 'any' as MediaType,
+            color: colorOrder[(nextIdx - 1) % colorOrder.length],
+            clips: [],
+            muted: false,
+            locked: false,
+            hidden: false,
+          });
+        }
+        
+        return restoredTracks;
+      });
+      setActiveTrackId('track-1');
+    }
+  }, [isEncodeMode, selectedFiles, fileDurations, setTracks]);
+
   // Sync timeline tracks and multi-clips dynamically according to selectedFiles
   useEffect(() => {
     if (!selectedFiles || selectedFiles.length === 0) return;
@@ -850,7 +956,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   // Start inline rename
   const handleStartRename = (track: TimelineTrackData) => {
     setEditingTrackId(track.id);
-    setEditingName(track.name);
+    setEditingName(getDisplayTrackName(track, tracks));
   };
 
   const handleSaveRename = (trackId: string) => {
@@ -919,11 +1025,12 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
 
   // Calculate project total timeline duration dynamically across all clips in all tracks
+  const BASE_DURATION = 60; // 60 seconds = 100% width at 1x zoom
   const allClips = tracks.flatMap((t) => t.clips);
   const computedTimelineDuration = Math.max(
     duration || 0,
     ...allClips.map((c) => c.endTime || 0),
-    10
+    BASE_DURATION
   );
 
   // Auto-Sequence all clips (Option: Sequence all clips into Track 1 in order)
@@ -1360,13 +1467,13 @@ export const Timeline: React.FC<TimelineProps> = ({
               const snapPrefix = activeSnapPoint !== null ? `🧲 Snap (${formatTime(activeSnapPoint)}) ` : '';
               if (targetTrack.id !== trackId) {
                 setDragTooltip(
-                  `${snapPrefix}[Move to ${targetTrack.name}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
+                  `${snapPrefix}[Move to ${getDisplayTrackName(targetTrack, tracks)}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
                     newEnd - newStart
                   )})`
                 );
               } else {
                 setDragTooltip(
-                  `${snapPrefix}[${currentTrack.name}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
+                  `${snapPrefix}[${getDisplayTrackName(currentTrack, tracks)}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
                     newEnd - newStart
                   )})`
                 );
@@ -1378,7 +1485,8 @@ export const Timeline: React.FC<TimelineProps> = ({
         let rawStart = startStartTime + deltaTime;
         // In Copy Mode / Single track, cannot expand left beyond 0 or past duration
         // Also cannot expand left past the original source start if source is at 0
-        const minPossibleStart = !isEncodeMode ? 0 : Math.max(0, startStartTime - startSourceStartTime);
+        const isImage = currentClip.mediaType === 'image' || currentClip.file?.type.startsWith('image/');
+        const minPossibleStart = (!isEncodeMode || isImage) ? 0 : Math.max(0, startStartTime - startSourceStartTime);
         rawStart = Math.max(minPossibleStart, Math.min(rawStart, startEndTime - minSpan));
 
         if (shouldSnap) {
@@ -1421,9 +1529,12 @@ export const Timeline: React.FC<TimelineProps> = ({
       } else if (type === 'right') {
         let rawEnd = startEndTime + deltaTime;
         // Limit rawEnd to not exceed original video/media duration
-        const maxPossibleEnd = !isEncodeMode
-          ? (clipMaxDuration > 0 ? clipMaxDuration : totalDuration)
-          : (clipMaxDuration > 0 ? startStartTime + (clipMaxDuration - startSourceStartTime) : Infinity);
+        const isImage = currentClip.mediaType === 'image' || currentClip.file?.type.startsWith('image/');
+        const maxPossibleEnd = isImage 
+          ? Infinity 
+          : (!isEncodeMode
+            ? (clipMaxDuration > 0 ? clipMaxDuration : totalDuration)
+            : (clipMaxDuration > 0 ? startStartTime + (clipMaxDuration - startSourceStartTime) : Infinity));
 
         rawEnd = Math.max(startStartTime + minSpan, Math.min(rawEnd, maxPossibleEnd));
 
@@ -1768,7 +1879,8 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Ruler tick marks calculated dynamically based on total computed timeline duration
   const rulerTicks = [];
-  const tickCount = Math.min(30, Math.max(6, Math.floor(10 * zoomLevel)));
+  const activeZoomLevel = isEncodeMode ? zoomLevel : 1;
+  const tickCount = Math.ceil((computedTimelineDuration / BASE_DURATION) * 10 * activeZoomLevel);
   for (let i = 0; i <= tickCount; i++) {
     const timeVal = (i / tickCount) * computedTimelineDuration;
     rulerTicks.push({
@@ -1786,6 +1898,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const effectiveClip =
     (activeClipId ? effectiveTrack?.clips?.find((c) => c.id === activeClipId) : null) ||
     effectiveTrack?.clips?.[0];
+  const effectiveClipIndex = effectiveClip ? effectiveTrack.clips.findIndex(c => c.id === effectiveClip.id) : -1;
 
   const getMediaIcon = (type: MediaType) => {
     switch (type) {
@@ -1903,8 +2016,16 @@ export const Timeline: React.FC<TimelineProps> = ({
             {effectiveTrack && effectiveClip && (
               <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-2 shadow-sm relative shrink-0">
                 {/* Track Name Badge */}
-                <span className="text-xs font-medium text-slate-200 select-none hidden sm:inline-flex items-center">
-                  {effectiveTrack.name}
+                <span 
+                  className="text-xs font-medium text-slate-200 select-none hidden sm:inline-flex items-center max-w-[250px] truncate"
+                  title={effectiveClip.name || getDisplayTrackName(effectiveTrack, tracks)}
+                >
+                  {effectiveClipIndex >= 0 && (
+                    <span className="mr-1.5 shrink-0 text-slate-400 font-medium">
+                      Track {tracks.findIndex(t => t.id === effectiveTrack?.id) + 1}-{effectiveClipIndex + 1} |
+                    </span>
+                  )}
+                  <span className="truncate">{effectiveClip.name || getDisplayTrackName(effectiveTrack, tracks)}</span>
                 </span>
 
                 {/* Vertical Divider */}
@@ -2009,8 +2130,12 @@ export const Timeline: React.FC<TimelineProps> = ({
           {isEncodeMode && (
             <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-1.5 shrink-0 shadow-sm">
               <button
-                onClick={() => setZoomLevel((z) => Math.max(1, z - 0.5))}
-                disabled={zoomLevel <= 1}
+                onClick={() => setZoomLevel((z) => {
+                  let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
+                  if (newZ < 0.1) newZ = 0.1;
+                  return Number(newZ.toFixed(1));
+                })}
+                disabled={zoomLevel <= 0.1}
                 className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
               >
                 <ZoomOut className="w-3.5 h-3.5" />
@@ -2019,8 +2144,12 @@ export const Timeline: React.FC<TimelineProps> = ({
                 {zoomLevel.toFixed(1)}x
               </span>
               <button
-                onClick={() => setZoomLevel((z) => Math.min(3, z + 0.5))}
-                disabled={zoomLevel >= 3}
+                onClick={() => setZoomLevel((z) => {
+                  let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
+                  if (newZ > 1.0 && z < 1.0) newZ = 1.0;
+                  return Math.min(5.0, Number(newZ.toFixed(1)));
+                })}
+                disabled={zoomLevel >= 5.0}
                 className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
               >
                 <ZoomIn className="w-3.5 h-3.5" />
@@ -2189,7 +2318,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                         }}
                         className="text-[11px] font-medium text-slate-200 truncate flex-1 flex items-center space-x-1"
                       >
-                        <span className="truncate">{track.name}</span>
+                        <span className="truncate">{getDisplayTrackName(track, tracks)}</span>
                         {track.clips?.length > 0 && (
                           <span className="text-[8px] text-indigo-400 font-mono bg-indigo-950/80 px-1 py-0.2 rounded border border-indigo-500/20 shrink-0">
                             {track.clips.length}
@@ -2304,7 +2433,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           <div
             ref={trimContainerRef}
             className={`relative select-none ${isScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
-            style={{ width: `${(isEncodeMode ? zoomLevel : 1) * 100}%`, minWidth: '100%' }}
+            style={{ width: `${Math.max(100, (computedTimelineDuration / BASE_DURATION) * 100 * activeZoomLevel)}%`, minWidth: '100%' }}
             onMouseDown={(e) => {
               // If clicked directly on tracks container background (not on a clip or button)
               const target = e.target as HTMLElement;
@@ -2441,15 +2570,15 @@ export const Timeline: React.FC<TimelineProps> = ({
                                   clipThumbs.map((thumb, idx) => (
                                     <div
                                       key={idx}
-                                      className="relative h-full overflow-hidden bg-slate-900 border-r border-white/10 last:border-r-0 shrink-0"
-                                      style={{ width: `${100 / clipThumbs.length}%` }}
-                                    >
-                                      <img
-                                        src={thumb}
-                                        alt={`${clip.name} Frame ${idx + 1}`}
-                                        className="w-full h-full object-cover select-none pointer-events-none"
-                                      />
-                                    </div>
+                                      className="relative h-full overflow-hidden border-r border-white/10 last:border-r-0 shrink-0"
+                                      style={{ 
+                                        width: `${100 / clipThumbs.length}%`,
+                                        backgroundImage: `url(${thumb})`,
+                                        backgroundSize: 'auto 100%',
+                                        backgroundRepeat: 'repeat-x',
+                                        backgroundPosition: 'left center'
+                                      }}
+                                    />
                                   ))
                                 ) : (
                                   Array.from({ length: 8 }).map((_, idx) => (
@@ -2491,13 +2620,15 @@ export const Timeline: React.FC<TimelineProps> = ({
                               </div>
                             ) : (clip.mediaType === 'image' || clip.file?.type.startsWith('image/')) && clipImageSrc ? (
                               /* Image Preview inside clip */
-                              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-80 overflow-hidden bg-slate-900">
-                                <img
-                                  src={clipImageSrc}
-                                  alt="Clip Image"
-                                  className="w-full h-full object-cover select-none pointer-events-none"
-                                />
-                              </div>
+                              <div 
+                                className="absolute inset-0 pointer-events-none opacity-80 overflow-hidden"
+                                style={{
+                                  backgroundImage: `url(${clipImageSrc})`,
+                                  backgroundSize: 'auto 100%',
+                                  backgroundRepeat: 'repeat-x',
+                                  backgroundPosition: 'left center'
+                                }}
+                              />
                             ) : (
                               /* Universal subtle Pattern inside clip */
                               <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-40 bg-[radial-gradient(#6366f1_1px,transparent_1px)] [background-size:12px_12px]" />
@@ -2535,7 +2666,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                                 <span
                                   className={`text-[9px] font-mono font-bold text-white px-2 py-0.5 rounded shadow-md whitespace-nowrap truncate backdrop-blur-md ${clipColorConfig.clipText}`}
                                 >
-                                  {clip.fileName ? clip.fileName : clip.name}: {formatTime(clip.startTime)} - {formatTime(clip.endTime)} ({formatTime(clipDuration)})
+                                  Track {tracks.findIndex(t => t.id === track.id) + 1}-{clipIdx + 1} | {clip.fileName ? clip.fileName : clip.name}: {formatTime(clip.startTime)} - {formatTime(clip.endTime)} ({formatTime(clipDuration)})
                                 </span>
                               </div>
                             </div>
