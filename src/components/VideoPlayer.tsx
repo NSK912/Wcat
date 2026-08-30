@@ -1220,34 +1220,49 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                           />
 
                           {/* Top Badge showing Track Name and Clip Name - Constant Screen Size */}
-                          <div
-                            className="absolute top-0 left-0 flex items-center space-x-1.5 bg-slate-900/95 border border-violet-400/80 text-violet-200 text-[10px] font-medium px-2 py-0.5 rounded shadow-lg backdrop-blur-md pointer-events-auto whitespace-nowrap"
-                            style={{
-                              transform: `translate(0, -100%) translateY(-6px) scale(${invScale})`,
-                              transformOrigin: 'bottom left',
-                            }}
-                            onPointerDown={(e) => e.stopPropagation()}
-                          >
-                            {layer.locked ? (
-                              <Lock className="w-3 h-3 text-amber-400" />
-                            ) : layer.mediaType === 'video' ? (
-                              <VideoIcon className="w-3 h-3 text-violet-400" />
-                            ) : (
-                              <ImageIcon className="w-3 h-3 text-emerald-400" />
-                            )}
-                            <span className="font-mono font-bold text-violet-300">{layer.subLayerName || layer.trackName}:</span>
-                            <span className="max-w-[120px] truncate">{layer.clip.name}</span>
-                            <span className="text-slate-400 text-[9px]">({Math.round(layer.transform.scale * 100)}%)</span>
-                            {layer.locked && (
-                              <span className="text-amber-400 text-[9px] font-semibold">(Locked)</span>
-                            )}
-                            <button
-                              onClick={() => setSelectedClipId(null)}
-                              className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
-                            >
-                              <X className="w-2.5 h-2.5" />
-                            </button>
-                          </div>
+                          {(() => {
+                            const rot = layer.transform.rotation || 0;
+                            const normalizedRot = ((rot % 360) + 360) % 360;
+                            const isUpsideDown = normalizedRot > 90 && normalizedRot < 270;
+                            return (
+                              <div
+                                className="absolute top-0 left-0 pointer-events-none"
+                                style={{
+                                  transform: `translate(0, -100%) translateY(-6px) scale(${invScale})`,
+                                  transformOrigin: 'bottom left',
+                                }}
+                              >
+                                <div
+                                  className="flex items-center space-x-1.5 bg-slate-900/95 border border-violet-400/80 text-violet-200 text-[10px] font-medium px-2 py-0.5 rounded shadow-lg backdrop-blur-md pointer-events-auto whitespace-nowrap"
+                                  style={{
+                                    transform: isUpsideDown ? 'rotate(180deg)' : 'none',
+                                    transformOrigin: 'center center',
+                                  }}
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                  {layer.locked ? (
+                                    <Lock className="w-3 h-3 text-amber-400" />
+                                  ) : layer.mediaType === 'video' ? (
+                                    <VideoIcon className="w-3 h-3 text-violet-400" />
+                                  ) : (
+                                    <ImageIcon className="w-3 h-3 text-emerald-400" />
+                                  )}
+                                  <span className="font-mono font-bold text-violet-300">{layer.subLayerName || layer.trackName}:</span>
+                                  <span className="max-w-[120px] truncate">{layer.clip.name}</span>
+                                  <span className="text-slate-400 text-[9px]">({Math.round(layer.transform.scale * 100)}%)</span>
+                                  {layer.locked && (
+                                    <span className="text-amber-400 text-[9px] font-semibold">(Locked)</span>
+                                  )}
+                                  <button
+                                    onClick={() => setSelectedClipId(null)}
+                                    className="ml-1 p-0.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer"
+                                  >
+                                    <X className="w-2.5 h-2.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })()}
 
                           {/* Top-Left Corner Handle (Resize/Scale) - Only when unlocked */}
                           {!layer.locked && (

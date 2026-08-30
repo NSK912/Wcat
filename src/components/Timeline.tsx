@@ -247,10 +247,17 @@ export const Timeline: React.FC<TimelineProps> = ({
   const lastNewStartRef = useRef<number>(0);
   const lastNewEndRef = useRef<number>(0);
 
-  // Auto-cleanup empty tracks (Keep index 0 / initial track, remove any empty track at index > 0)
+  // Auto-cleanup trailing empty tracks only, always keep Track 1 and Track 2
   const cleanupEmptyTracks = useCallback((tracksList: TimelineTrackData[]): TimelineTrackData[] => {
-    if (tracksList.length <= 1) return tracksList;
-    return tracksList.filter((t, idx) => idx === 0 || t.clips.length > 0);
+    let lastPopulatedIdx = -1;
+    for (let i = tracksList.length - 1; i >= 0; i--) {
+      if (tracksList[i].clips.length > 0) {
+        lastPopulatedIdx = i;
+        break;
+      }
+    }
+    const maxKeepIdx = Math.max(1, lastPopulatedIdx);
+    return tracksList.filter((_, idx) => idx <= maxKeepIdx);
   }, []);
 
   // Horizontal scroll on Ctrl + Mouse Wheel

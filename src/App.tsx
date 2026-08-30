@@ -1518,11 +1518,6 @@ export default function App() {
                       <span className="tracking-wide uppercase">Layer Tool</span>
                     </div>
                     <div className="flex items-center space-x-2">
-                      {activeSelectedLayer && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-600/30 text-violet-300 border border-violet-500/40 font-mono font-bold">
-                          {activeSelectedLayer.subLayerName}
-                        </span>
-                      )}
                       <button onClick={() => setIsRightPanelExpanded(false)} className="text-slate-400 hover:text-white transition-colors p-1 rounded-md hover:bg-white/10">
                         <ChevronRight className="w-3 h-3" />
                       </button>
