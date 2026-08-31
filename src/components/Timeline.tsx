@@ -18,6 +18,7 @@ import {
   Lock,
   Unlock,
   Trash2,
+  X,
   Music,
   Image as ImageIcon,
   Video as VideoIcon,
@@ -1247,6 +1248,23 @@ export const Timeline: React.FC<TimelineProps> = ({
       const updated = prev.map((t) => (t.id === trackId ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t));
       return cleanupEmptyTracks(updated);
     });
+
+    // In Copy Mode, update active clip and trim markers when a piece is deleted
+    if (!isEncodeMode) {
+      const track = tracks.find((t) => t.id === trackId);
+      const remainingClips = track?.clips.filter((c) => c.id !== clipId) || [];
+      if (remainingClips.length > 0) {
+        const nextActive = remainingClips[0];
+        setActiveClipId(nextActive.id);
+        const minStart = Math.min(...remainingClips.map((c) => c.startTime));
+        const maxEnd = Math.max(...remainingClips.map((c) => c.endTime));
+        if (onStartTimeChange) onStartTimeChange(minStart);
+        if (onEndTimeChange) onEndTimeChange(maxEnd);
+        if (nextActive.file && onSelectFile) {
+          onSelectFile(nextActive.file, nextActive.startTime, nextActive.fileDuration, nextActive.sourceStartTime, nextActive.endTime);
+        }
+      }
+    }
   };
 
   // Dynamically sync preview video when playhead enters any clip's time range
@@ -1878,7 +1896,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       setActiveClipId(clipB.id);
     } else {
       // =========================================================================
-      // 🔵 COPY MODE: Split Logic & Track State Update (Trim end & remove tail)
+      // 🔵 COPY MODE: Split Logic & Track State Update (Split into 2 parts for user selection)
       // =========================================================================
       const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
       if (!activeTrack) return;
@@ -1898,11 +1916,22 @@ export const Timeline: React.FC<TimelineProps> = ({
 
       const clipA: TimelineClip = {
         ...targetClip,
-        id: targetClip.id,
+        id: `${targetClip.id}-a-${Date.now()}`,
         startTime: targetClip.startTime,
         endTime: pos,
         sourceStartTime: targetClip.sourceStartTime || 0,
         sourceEndTime: splitSourcePos,
+        isTrimmed: true,
+      };
+
+      const clipB: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-b-${Date.now()}`,
+        startTime: pos,
+        endTime: targetClip.endTime,
+        sourceStartTime: splitSourcePos,
+        sourceEndTime:
+          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
         isTrimmed: true,
       };
 
@@ -1912,11 +1941,10 @@ export const Timeline: React.FC<TimelineProps> = ({
             const newClips: TimelineClip[] = [];
             t.clips.forEach((c) => {
               if (c.id === targetClip.id) {
-                newClips.push(clipA);
-              } else if (c.startTime < pos) {
+                newClips.push(clipA, clipB);
+              } else {
                 newClips.push(c);
               }
-              // Omit any clips starting at or after pos (trailing part deleted)
             });
             return { ...t, clips: newClips };
           }
@@ -1924,11 +1952,7 @@ export const Timeline: React.FC<TimelineProps> = ({
         })
       );
 
-      setActiveClipId(clipA.id);
-
-      if (onEndTimeChange) {
-        onEndTimeChange(pos);
-      }
+      setActiveClipId(clipB.id);
     }
   };
 
@@ -2016,6 +2040,9 @@ export const Timeline: React.FC<TimelineProps> = ({
         return <Disc className="w-3 h-3 text-cyan-400" />;
     }
   };
+
+  // In Copy Mode, if any track has > 1 clips (after split), the user must delete the unwanted piece first
+  const isPendingDeleteInCopyMode = !isEncodeMode && tracks.some((t) => (t.clips || []).length > 1);
 
   return (
     <div
@@ -2261,27 +2288,44 @@ export const Timeline: React.FC<TimelineProps> = ({
           {/* Remux Button: ONLY shown when NOT in Encode Mode */}
           {!isEncodeMode && (!selectedFiles || selectedFiles.length <= 1) && (
             <button
-              onClick={() => onExportClick(tracks)}
-              disabled={isProcessing}
-              className="h-8 px-2.5 flex items-center justify-center bg-indigo-950/60 hover:bg-indigo-900/80 disabled:bg-indigo-950/30 text-indigo-200 rounded-lg text-[11px] font-semibold border border-indigo-500/30 backdrop-blur-sm shadow-md transition transform active:scale-95 shrink-0 cursor-pointer"
+              onClick={() => {
+                if (isPendingDeleteInCopyMode) return;
+                onExportClick(tracks);
+              }}
+              disabled={isProcessing || isPendingDeleteInCopyMode}
+              className={`h-8 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-semibold transition shrink-0 ${
+                isPendingDeleteInCopyMode
+                  ? 'bg-black text-slate-600 border border-slate-800/80 cursor-not-allowed opacity-40 shadow-none pointer-events-none'
+                  : 'bg-indigo-950/60 hover:bg-indigo-900/80 disabled:bg-indigo-950/30 text-indigo-200 border border-indigo-500/30 backdrop-blur-sm shadow-md transform active:scale-95 cursor-pointer'
+              }`}
             >
               <span>Remux</span>
             </button>
           )}
 
           {/* Export / Encode Button */}
-          <button
-            onClick={() => onExportClick(tracks)}
-            disabled={isProcessing}
-            className={`h-8 px-3.5 flex items-center space-x-1 text-white rounded-lg text-xs font-semibold shadow-md transition transform active:scale-95 shrink-0 cursor-pointer ${
-              isEncodeMode
-                ? 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 shadow-violet-500/25'
-                : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-500/20'
-            }`}
-          >
-            {isEncodeMode ? <Download className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
-            <span>{isEncodeMode ? 'Encode' : 'Export'}</span>
-          </button>
+          {(() => {
+            const isPendingDelete = isPendingDeleteInCopyMode;
+            return (
+              <button
+                onClick={() => {
+                  if (isPendingDelete) return;
+                  onExportClick(tracks);
+                }}
+                disabled={isProcessing || isPendingDelete}
+                className={`h-8 px-3.5 flex items-center space-x-1 rounded-lg text-xs font-semibold shadow-md transition shrink-0 ${
+                  isPendingDelete
+                    ? 'bg-black text-slate-600 border border-slate-800/80 cursor-not-allowed opacity-40 shadow-none pointer-events-none'
+                    : isEncodeMode
+                    ? 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 shadow-violet-500/25 text-white transform active:scale-95 cursor-pointer'
+                    : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-500/20 text-white transform active:scale-95 cursor-pointer'
+                }`}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{isEncodeMode ? 'Encode' : 'Export'}</span>
+              </button>
+            );
+          })()}
         </div>
       </div>
 
@@ -2752,7 +2796,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                               </div>
                             )}
 
-                            {/* Clip Name & Time Badge */}
+                            {/* Clip Name & Time Badge + Quick Delete Button */}
                             <div className="relative z-20 flex items-center justify-between px-2 w-full h-full pointer-events-none overflow-hidden">
                               <div className="flex items-center space-x-1 min-w-0 truncate">
                                 <span className="shrink-0 drop-shadow">{getMediaIcon(clip.mediaType)}</span>
@@ -2762,6 +2806,27 @@ export const Timeline: React.FC<TimelineProps> = ({
                                   Track {tracks.findIndex(t => t.id === track.id) + 1}-{clipIdx + 1} | {clip.fileName ? clip.fileName : clip.name}: {formatTime(clip.startTime)} - {formatTime(clip.endTime)} ({formatTime(clipDuration)})
                                 </span>
                               </div>
+
+                              {/* Quick Delete Action (Prominently visible in Copy Mode when track has >1 pieces, or on hover) */}
+                              {(!isEncodeMode || track.clips.length > 1) && (
+                                <div className="pointer-events-auto ml-1.5 shrink-0 flex items-center">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteClip(track.id, clip.id);
+                                    }}
+                                    title="คลิกเพื่อลบส่วนนี้ / Click to delete this piece"
+                                    className={`px-1.5 py-0.5 rounded flex items-center space-x-1 text-[10px] font-medium shadow-md transition-all cursor-pointer select-none active:scale-95 ${
+                                      !isEncodeMode && track.clips.length > 1
+                                        ? 'bg-rose-600 hover:bg-rose-500 text-white hover:scale-105 ring-1 ring-white/30'
+                                        : 'bg-slate-900/80 hover:bg-rose-600 text-slate-300 hover:text-white opacity-0 group-hover:opacity-100'
+                                    }`}
+                                  >
+                                    <Trash2 className="w-3 h-3 text-white" />
+                                    <span className="hidden sm:inline">ลบส่วนนี้</span>
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           </div>
 

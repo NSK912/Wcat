@@ -823,6 +823,9 @@ export default function App() {
   // Run FFmpeg / WebCodecs Export Process
   const executeExportProcess = async (tracks?: any[], forceIframeMode: boolean = false, signal?: AbortSignal) => {
     if (!videoUrl) return;
+    if (!isEncodeMode && tracks && tracks.some((t) => (t.clips || []).length > 1)) {
+      return;
+    }
 
     let fileHandle: any = null;
     const detectedExt = (videoName ? videoName.split('.').pop()?.toLowerCase() : 'mp4') || 'mp4';
