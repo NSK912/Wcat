@@ -1878,7 +1878,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       setActiveClipId(clipB.id);
     } else {
       // =========================================================================
-      // 🔵 COPY MODE: Split Logic & Track State Update
+      // 🔵 COPY MODE: Split Logic & Track State Update (Trim end & remove tail)
       // =========================================================================
       const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
       if (!activeTrack) return;
@@ -1898,22 +1898,11 @@ export const Timeline: React.FC<TimelineProps> = ({
 
       const clipA: TimelineClip = {
         ...targetClip,
-        id: `${targetClip.id}-a-${Date.now()}`,
+        id: targetClip.id,
         startTime: targetClip.startTime,
         endTime: pos,
         sourceStartTime: targetClip.sourceStartTime || 0,
         sourceEndTime: splitSourcePos,
-        isTrimmed: true,
-      };
-
-      const clipB: TimelineClip = {
-        ...targetClip,
-        id: `${targetClip.id}-b-${Date.now()}`,
-        startTime: pos,
-        endTime: targetClip.endTime,
-        sourceStartTime: splitSourcePos,
-        sourceEndTime:
-          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
         isTrimmed: true,
       };
 
@@ -1923,10 +1912,11 @@ export const Timeline: React.FC<TimelineProps> = ({
             const newClips: TimelineClip[] = [];
             t.clips.forEach((c) => {
               if (c.id === targetClip.id) {
-                newClips.push(clipA, clipB);
-              } else {
+                newClips.push(clipA);
+              } else if (c.startTime < pos) {
                 newClips.push(c);
               }
+              // Omit any clips starting at or after pos (trailing part deleted)
             });
             return { ...t, clips: newClips };
           }
@@ -1934,11 +1924,10 @@ export const Timeline: React.FC<TimelineProps> = ({
         })
       );
 
-      setActiveClipId(clipB.id);
+      setActiveClipId(clipA.id);
 
-      if (onStartTimeChange && onEndTimeChange) {
-        onStartTimeChange(clipA.startTime);
-        onEndTimeChange(clipB.endTime);
+      if (onEndTimeChange) {
+        onEndTimeChange(pos);
       }
     }
   };
@@ -2127,8 +2116,8 @@ export const Timeline: React.FC<TimelineProps> = ({
               <span className="hidden sm:inline">Split</span>
             </button>
 
-            {/* Track & Clip Quick Action Tools */}
-            {effectiveTrack && effectiveClip && (
+            {/* Track & Clip Quick Action Tools (Only in Encode Mode) */}
+            {isEncodeMode && effectiveTrack && effectiveClip && (
               <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-2 shadow-sm relative shrink-0">
                 {/* Track Name Badge */}
                 <span 
@@ -2776,8 +2765,8 @@ export const Timeline: React.FC<TimelineProps> = ({
                             </div>
                           </div>
 
-                          {/* Inter-clip Add Button */}
-                          {isSnappedToNext && (
+                          {/* Inter-clip Add / Transition Button (Only in Encode Mode) */}
+                          {isEncodeMode && isSnappedToNext && (
                             <div 
                               className="absolute z-40 pointer-events-auto flex items-center justify-center -translate-x-1/2 -translate-y-1/2"
                               style={{ left: `${clipEndPct}%`, top: '50%' }}
