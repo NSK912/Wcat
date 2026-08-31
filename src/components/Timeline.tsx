@@ -191,12 +191,50 @@ export const Timeline: React.FC<TimelineProps> = ({
   onTracksChange,
 }) => {
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
-  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [encodeZoomLevel, setEncodeZoomLevel] = useState<number>(1);
+  const [copyZoomLevel, setCopyZoomLevel] = useState<number>(1);
   const [dragTooltip, setDragTooltip] = useState<string | null>(null);
   const [activeTrackId, setActiveTrackId] = useState<string>('track-1');
   const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>('');
   const [activeTransitionMenu, setActiveTransitionMenu] = useState<{ trackId: string, clipId: string } | null>(null);
+
+  // Zoom handlers with dedicated conditions per mode
+  const handleZoomIn = () => {
+    if (isEncodeMode) {
+      // Encode Mode: increment encode zoom
+      setEncodeZoomLevel((z) => {
+        let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
+        if (newZ > 1.0 && z < 1.0) newZ = 1.0;
+        return Math.min(5.0, Number(newZ.toFixed(1)));
+      });
+    } else {
+      // Copy Mode: increment copy zoom
+      setCopyZoomLevel((z) => {
+        let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
+        if (newZ > 1.0 && z < 1.0) newZ = 1.0;
+        return Math.min(5.0, Number(newZ.toFixed(1)));
+      });
+    }
+  };
+
+  const handleZoomOut = () => {
+    if (isEncodeMode) {
+      // Encode Mode: decrement encode zoom
+      setEncodeZoomLevel((z) => {
+        let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
+        if (newZ < 0.1) newZ = 0.1;
+        return Number(newZ.toFixed(1));
+      });
+    } else {
+      // Copy Mode: decrement copy zoom
+      setCopyZoomLevel((z) => {
+        let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
+        if (newZ < 0.1) newZ = 0.1;
+        return Number(newZ.toFixed(1));
+      });
+    }
+  };
 
   const getDisplayTrackName = useCallback((track: TimelineTrackData, allTracks: TimelineTrackData[]) => {
     if (!track) return '';
@@ -1774,67 +1812,135 @@ export const Timeline: React.FC<TimelineProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
-  // Split at playhead: cuts the clip under playhead into TWO clips inside the SAME track!
+  // Split at playhead: cuts the clip under playhead into TWO clips inside the track
   const handleSplitAtPlayhead = () => {
     if (computedTimelineDuration <= 0) return;
     const pos = currentTime;
 
-    // Find the clip under playhead in active track or any visible track
-    const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
-    const targetClip =
-      activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
-      tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
+    if (isEncodeMode) {
+      // =========================================================================
+      // 🔴 ENCODE MODE: Split Logic & Track State Update
+      // =========================================================================
+      const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+      if (!activeTrack) return;
 
-    if (!targetClip) return;
+      const targetClip =
+        activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
+        tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
 
-    // Find which track holds targetClip
-    const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id));
-    if (!parentTrack) return;
+      if (!targetClip) return;
 
-    commitToHistory();
+      const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id)) || activeTrack;
 
-    const offset = pos - targetClip.startTime;
-    const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
+      commitToHistory();
 
-    const clipA: TimelineClip = {
-      ...targetClip,
-      id: `${targetClip.id}-a-${Date.now()}`,
-      startTime: targetClip.startTime,
-      endTime: pos,
-      sourceStartTime: targetClip.sourceStartTime || 0,
-      sourceEndTime: splitSourcePos,
-      isTrimmed: true,
-    };
+      const offset = pos - targetClip.startTime;
+      const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
 
-    const clipB: TimelineClip = {
-      ...targetClip,
-      id: `${targetClip.id}-b-${Date.now()}`,
-      startTime: pos,
-      endTime: targetClip.endTime,
-      sourceStartTime: splitSourcePos,
-      sourceEndTime:
-        targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
-      isTrimmed: true,
-    };
+      const clipA: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-a-${Date.now()}`,
+        startTime: targetClip.startTime,
+        endTime: pos,
+        sourceStartTime: targetClip.sourceStartTime || 0,
+        sourceEndTime: splitSourcePos,
+        isTrimmed: true,
+      };
 
-    setTracks((prev) =>
-      prev.map((t) => {
-        if (t.id === parentTrack.id) {
-          const newClips: TimelineClip[] = [];
-          t.clips.forEach((c) => {
-            if (c.id === targetClip.id) {
-              newClips.push(clipA, clipB);
-            } else {
-              newClips.push(c);
-            }
-          });
-          return { ...t, clips: newClips };
-        }
-        return t;
-      })
-    );
+      const clipB: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-b-${Date.now()}`,
+        startTime: pos,
+        endTime: targetClip.endTime,
+        sourceStartTime: splitSourcePos,
+        sourceEndTime:
+          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
+        isTrimmed: true,
+      };
 
-    setActiveClipId(clipB.id);
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id === parentTrack.id) {
+            const newClips: TimelineClip[] = [];
+            t.clips.forEach((c) => {
+              if (c.id === targetClip.id) {
+                newClips.push(clipA, clipB);
+              } else {
+                newClips.push(c);
+              }
+            });
+            return { ...t, clips: newClips };
+          }
+          return t;
+        })
+      );
+
+      setActiveClipId(clipB.id);
+    } else {
+      // =========================================================================
+      // 🔵 COPY MODE: Split Logic & Track State Update
+      // =========================================================================
+      const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+      if (!activeTrack) return;
+
+      const targetClip =
+        activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
+        tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
+
+      if (!targetClip) return;
+
+      const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id)) || activeTrack;
+
+      commitToHistory();
+
+      const offset = pos - targetClip.startTime;
+      const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
+
+      const clipA: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-a-${Date.now()}`,
+        startTime: targetClip.startTime,
+        endTime: pos,
+        sourceStartTime: targetClip.sourceStartTime || 0,
+        sourceEndTime: splitSourcePos,
+        isTrimmed: true,
+      };
+
+      const clipB: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-b-${Date.now()}`,
+        startTime: pos,
+        endTime: targetClip.endTime,
+        sourceStartTime: splitSourcePos,
+        sourceEndTime:
+          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
+        isTrimmed: true,
+      };
+
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id === parentTrack.id) {
+            const newClips: TimelineClip[] = [];
+            t.clips.forEach((c) => {
+              if (c.id === targetClip.id) {
+                newClips.push(clipA, clipB);
+              } else {
+                newClips.push(c);
+              }
+            });
+            return { ...t, clips: newClips };
+          }
+          return t;
+        })
+      );
+
+      setActiveClipId(clipB.id);
+
+      if (onStartTimeChange && onEndTimeChange) {
+        onStartTimeChange(clipA.startTime);
+        onEndTimeChange(clipB.endTime);
+      }
+    }
   };
 
   // Mark In
@@ -1886,7 +1992,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
   // Ruler tick marks calculated dynamically based on total computed timeline duration
   const rulerTicks = [];
-  const activeZoomLevel = isEncodeMode ? zoomLevel : 1;
+  const activeZoomLevel = isEncodeMode ? encodeZoomLevel : copyZoomLevel;
   const tickCount = Math.ceil((computedTimelineDuration / BASE_DURATION) * 10 * activeZoomLevel);
   for (let i = 0; i <= tickCount; i++) {
     const timeVal = (i / tickCount) * computedTimelineDuration;
@@ -1988,10 +2094,9 @@ export const Timeline: React.FC<TimelineProps> = ({
             </span>
           </div>
 
-          {/* Timeline Editing Split Button & Track/Clip Quick Tools */}
-          {isEncodeMode && (
+          {/* Timeline Editing Split Button & Track/Clip Quick Tools (Available in both Encode Mode and Copy Mode) */}
           <div className="flex items-center space-x-1.5 pl-2 border-l border-white/10 shrink-0">
-            {/* Undo & Redo Buttons (To the left of Split button) */}
+            {/* Undo & Redo Buttons */}
             <div className="flex items-center space-x-1">
               <button
                 onClick={handleUndo}
@@ -2011,15 +2116,18 @@ export const Timeline: React.FC<TimelineProps> = ({
               </button>
             </div>
 
+            {/* Split (Cut) Button */}
             <button
               onClick={handleSplitAtPlayhead}
-              className="h-8 px-2.5 bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-white/10 text-xs font-medium flex items-center space-x-1.5 transition cursor-pointer shadow-sm"
+              className={`h-8 px-2.5 bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-white/10 text-xs font-medium flex items-center space-x-1.5 transition cursor-pointer shadow-sm ${
+                isEncodeMode ? 'hover:border-violet-500/50' : 'hover:border-indigo-500/50'
+              }`}
             >
-              <Scissors className="w-3.5 h-3.5 text-indigo-400" />
+              <Scissors className={`w-3.5 h-3.5 ${isEncodeMode ? 'text-violet-400' : 'text-indigo-400'}`} />
               <span className="hidden sm:inline">Split</span>
             </button>
 
-            {/* Track & Clip Quick Action Tools (Moved to the right of Split button) */}
+            {/* Track & Clip Quick Action Tools */}
             {effectiveTrack && effectiveClip && (
               <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-2 shadow-sm relative shrink-0">
                 {/* Track Name Badge */}
@@ -2062,7 +2170,6 @@ export const Timeline: React.FC<TimelineProps> = ({
               </div>
             )}
           </div>
-          )}
 
           {/* Multi-file Reorder Bar (Fast Copy / Remux mode only - hidden in Encode mode) */}
           {!isEncodeMode && selectedFiles && selectedFiles.length > 1 && (
@@ -2133,36 +2240,26 @@ export const Timeline: React.FC<TimelineProps> = ({
 
         {/* Action Buttons Cluster */}
         <div className="flex items-center space-x-1.5 shrink-0">
-          {/* Zoom Controls (ONLY in Encode Mode) */}
-          {isEncodeMode && (
-            <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-1.5 shrink-0 shadow-sm">
-              <button
-                onClick={() => setZoomLevel((z) => {
-                  let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
-                  if (newZ < 0.1) newZ = 0.1;
-                  return Number(newZ.toFixed(1));
-                })}
-                disabled={zoomLevel <= 0.1}
-                className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
-              >
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
-              <span className="text-xs font-medium text-slate-200 px-1 select-none flex items-center">
-                {zoomLevel.toFixed(1)}x
-              </span>
-              <button
-                onClick={() => setZoomLevel((z) => {
-                  let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
-                  if (newZ > 1.0 && z < 1.0) newZ = 1.0;
-                  return Math.min(5.0, Number(newZ.toFixed(1)));
-                })}
-                disabled={zoomLevel >= 5.0}
-                className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
-              >
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
+          {/* Zoom Controls (Available in both Copy Mode & Encode Mode with separated conditions) */}
+          <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-1.5 shrink-0 shadow-sm">
+            <button
+              onClick={handleZoomOut}
+              disabled={activeZoomLevel <= 0.1}
+              className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
+            >
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <span className="text-xs font-medium text-slate-200 px-1 select-none flex items-center">
+              {activeZoomLevel.toFixed(1)}x
+            </span>
+            <button
+              onClick={handleZoomIn}
+              disabled={activeZoomLevel >= 5.0}
+              className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
           {/* Add Media Button */}
           <button
