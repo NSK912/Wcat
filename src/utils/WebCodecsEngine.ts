@@ -301,18 +301,18 @@ function drawFitCover(
   const srcRatio = srcWidth / srcHeight;
   const dstRatio = canvasWidth / canvasHeight;
 
-  let sx = 0;
-  let sy = 0;
-  let sw = srcWidth;
-  let sh = srcHeight;
-
   if (settings.cropAspect === 'free' && settings.freeCropRect) {
     const rect = settings.freeCropRect;
-    sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
-    sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-    sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-    sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+    const sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+    const sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+    const sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+    const sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
   } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+    let sx = 0;
+    let sy = 0;
+    let sw = srcWidth;
+    let sh = srcHeight;
     if (srcRatio > dstRatio) {
       sw = srcHeight * dstRatio;
       sx = (srcWidth - sw) / 2;
@@ -320,9 +320,11 @@ function drawFitCover(
       sh = srcWidth / dstRatio;
       sy = (srcHeight - sh) / 2;
     }
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
+  } else {
+    // 5-parameter drawImage allows browser to correctly map VideoFrame visibleRect without codedWidth padding
+    ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
   }
-
-  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
   ctx.restore();
 }
 
@@ -383,7 +385,8 @@ function drawLayerToCanvas(
   const drawW = canvasWidth;
   const drawH = (srcHeight / srcWidth) * canvasWidth;
 
-  ctx.drawImage(sourceToDraw, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
+  // Use 5-parameter drawImage so native VideoFrame visibleRect is accurately mapped without right-edge black line/border
+  ctx.drawImage(sourceToDraw, -drawW / 2, -drawH / 2, drawW, drawH);
   ctx.restore();
 }
 
@@ -632,8 +635,8 @@ export function getTargetDimensions(
   targetHeight = Math.round(targetHeight * scale);
 
   // Ensure dimensions are multiples of 8 for optimal hardware encoder compatibility
-  targetWidth = Math.max(8, targetWidth - (targetWidth % 8));
-  targetHeight = Math.max(8, targetHeight - (targetHeight % 8));
+  targetWidth = Math.max(8, Math.round(targetWidth / 8) * 8);
+  targetHeight = Math.max(8, Math.round(targetHeight / 8) * 8);
 
   return { width: targetWidth, height: targetHeight };
 }
@@ -950,15 +953,16 @@ async function processImageToVideo(
       
       const srcRatio = sourceWidth / sourceHeight;
       const dstRatio = w / h;
-      let sx = 0; let sy = 0; let sw = sourceWidth; let sh = sourceHeight;
       
       if (settings.cropAspect === 'free' && settings.freeCropRect) {
         const rect = settings.freeCropRect;
-        sx = Math.max(0, Math.min(sourceWidth - 2, Math.round(sourceWidth * (rect.x || 0))));
-        sy = Math.max(0, Math.min(sourceHeight - 2, Math.round(sourceHeight * (rect.y || 0))));
-        sw = Math.max(8, Math.min(sourceWidth - sx, Math.round(sourceWidth * (rect.width || 1))));
-        sh = Math.max(8, Math.min(sourceHeight - sy, Math.round(sourceHeight * (rect.height || 1))));
+        const sx = Math.max(0, Math.min(sourceWidth - 2, Math.round(sourceWidth * (rect.x || 0))));
+        const sy = Math.max(0, Math.min(sourceHeight - 2, Math.round(sourceHeight * (rect.y || 0))));
+        const sw = Math.max(8, Math.min(sourceWidth - sx, Math.round(sourceWidth * (rect.width || 1))));
+        const sh = Math.max(8, Math.min(sourceHeight - sy, Math.round(sourceHeight * (rect.height || 1))));
+        canvasCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
       } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+        let sx = 0; let sy = 0; let sw = sourceWidth; let sh = sourceHeight;
         if (srcRatio > dstRatio) {
           sw = sourceHeight * dstRatio;
           sx = (sourceWidth - sw) / 2;
@@ -966,8 +970,10 @@ async function processImageToVideo(
           sh = sourceWidth / dstRatio;
           sy = (sourceHeight - sh) / 2;
         }
+        canvasCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
+      } else {
+        canvasCtx.drawImage(bmp, 0, 0, w, h);
       }
-      canvasCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
       canvasCtx.restore();
       
       if (settings.watermarkText && settings.watermarkText.trim()) {
@@ -1303,18 +1309,18 @@ export async function processWebCodecsEncodeStream(
             const srcRatio = srcWidth / srcHeight;
             const dstRatio = w / h;
 
-            let sx = 0;
-            let sy = 0;
-            let sw = srcWidth;
-            let sh = srcHeight;
-
             if (settings.cropAspect === 'free' && settings.freeCropRect) {
               const rect = settings.freeCropRect;
-              sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
-              sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-              sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-              sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+              const sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+              const sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+              const sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+              const sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+              ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
             } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+              let sx = 0;
+              let sy = 0;
+              let sw = srcWidth;
+              let sh = srcHeight;
               if (srcRatio > dstRatio) {
                 // Source is wider than destination: crop sides
                 sw = srcHeight * dstRatio;
@@ -1324,9 +1330,11 @@ export async function processWebCodecsEncodeStream(
                 sh = srcWidth / dstRatio;
                 sy = (srcHeight - sh) / 2;
               }
+              ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
+            } else {
+              // 5-parameter drawImage maps VideoFrame visibleRect directly without codedWidth padding
+              ctx.drawImage(img as any, 0, 0, w, h);
             }
-
-            ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
             ctx.restore();
 
             // Apply Watermark Overlay
@@ -1675,8 +1683,8 @@ export async function processWebCodecsMultiTrackTimeline(
     if (hasValidDims) break;
   }
 
-  sourceWidth = Math.max(8, sourceWidth - (sourceWidth % 8));
-  sourceHeight = Math.max(8, sourceHeight - (sourceHeight % 8));
+  sourceWidth = Math.max(8, Math.round(sourceWidth / 8) * 8);
+  sourceHeight = Math.max(8, Math.round(sourceHeight / 8) * 8);
 
   const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
   const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
@@ -1695,6 +1703,10 @@ export async function processWebCodecsMultiTrackTimeline(
     canvasWidth = targetDims.width;
     canvasHeight = targetDims.height;
   }
+
+  // Ensure canvas dimensions are strictly multiples of 8 for hardware encoder macroblock alignment
+  canvasWidth = Math.max(8, Math.round(canvasWidth / 8) * 8);
+  canvasHeight = Math.max(8, Math.round(canvasHeight / 8) * 8);
 
   const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
   const targetQuality = resolveQuality(settings.videoQuality);
@@ -2525,21 +2537,21 @@ export async function processWebCodecsConcatStream(
                 // Layer media is sized relative to canvas width with native video aspect ratio
                 const drawW = w;
                 const drawH = (srcHeight / srcWidth) * w;
-                ctx.drawImage(sourceToDraw, 0, 0, srcWidth, srcHeight, -drawW / 2, -drawH / 2, drawW, drawH);
+                ctx.drawImage(sourceToDraw, -drawW / 2, -drawH / 2, drawW, drawH);
                 ctx.restore();
               } else {
-                let sx = 0;
-                let sy = 0;
-                let sw = srcWidth;
-                let sh = srcHeight;
-
                 if (settings.cropAspect === 'free' && settings.freeCropRect) {
                   const rect = settings.freeCropRect;
-                  sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
-                  sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-                  sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-                  sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+                  const sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
+                  const sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
+                  const sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
+                  const sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
+                  ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
                 } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
+                  let sx = 0;
+                  let sy = 0;
+                  let sw = srcWidth;
+                  let sh = srcHeight;
                   if (srcRatio > dstRatio) {
                     sw = srcHeight * dstRatio;
                     sx = (srcWidth - sw) / 2;
@@ -2547,9 +2559,10 @@ export async function processWebCodecsConcatStream(
                     sh = srcWidth / dstRatio;
                     sy = (srcHeight - sh) / 2;
                   }
+                  ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
+                } else {
+                  ctx.drawImage(img as any, 0, 0, w, h);
                 }
-
-                ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
               }
               ctx.restore();
 
