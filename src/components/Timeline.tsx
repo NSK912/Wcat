@@ -2015,6 +2015,132 @@ export const Timeline: React.FC<TimelineProps> = ({
     });
   }
 
+  // =========================================================================
+  // 🚀 HIGH-PRECISION INTERACTIVE HORIZONTAL SCROLL & JUMP NAVIGATOR
+  // =========================================================================
+  const [scrollState, setScrollState] = useState({ scrollLeft: 0, scrollWidth: 1, clientWidth: 1 });
+  const customScrollTrackRef = useRef<HTMLDivElement>(null);
+
+  const updateScrollState = useCallback(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    setScrollState((prev) => {
+      if (
+        prev.scrollLeft === el.scrollLeft &&
+        prev.scrollWidth === el.scrollWidth &&
+        prev.clientWidth === el.clientWidth
+      ) {
+        return prev;
+      }
+      return {
+        scrollLeft: el.scrollLeft,
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    updateScrollState();
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      updateScrollState();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [updateScrollState, activeZoomLevel, computedTimelineDuration, tracks]);
+
+  // Click on horizontal track to JUMP immediately to that position + drag support
+  const handleScrollTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const track = customScrollTrackRef.current;
+    const scrollEl = timelineScrollRef.current;
+    if (!track || !scrollEl) return;
+
+    const rect = track.getBoundingClientRect();
+    const scrollableWidth = scrollEl.scrollWidth - scrollEl.clientWidth;
+    if (scrollableWidth <= 0 || rect.width <= 0) return;
+
+    const thumbRatio = Math.max(0.03, Math.min(1, scrollEl.clientWidth / scrollEl.scrollWidth));
+    const thumbPixelWidth = Math.max(28, thumbRatio * rect.width);
+    const trackTravelWidth = Math.max(1, rect.width - thumbPixelWidth);
+
+    const jumpToClientX = (clientX: number) => {
+      const clickX = clientX - rect.left;
+      const targetThumbLeft = clickX - thumbPixelWidth / 2;
+      const newRatio = Math.max(0, Math.min(1, targetThumbLeft / trackTravelWidth));
+      scrollEl.scrollLeft = newRatio * scrollableWidth;
+      setScrollState({
+        scrollLeft: scrollEl.scrollLeft,
+        scrollWidth: scrollEl.scrollWidth,
+        clientWidth: scrollEl.clientWidth,
+      });
+    };
+
+    // Instant Jump!
+    jumpToClientX(e.clientX);
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      jumpToClientX(moveEvent.clientX);
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // Drag thumb directly
+  const handleThumbMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const track = customScrollTrackRef.current;
+    const scrollEl = timelineScrollRef.current;
+    if (!track || !scrollEl) return;
+
+    const rect = track.getBoundingClientRect();
+    const scrollableWidth = scrollEl.scrollWidth - scrollEl.clientWidth;
+    if (scrollableWidth <= 0 || rect.width <= 0) return;
+
+    const thumbRatio = Math.max(0.03, Math.min(1, scrollEl.clientWidth / scrollEl.scrollWidth));
+    const thumbPixelWidth = Math.max(28, thumbRatio * rect.width);
+    const trackTravelWidth = Math.max(1, rect.width - thumbPixelWidth);
+
+    const startClientX = e.clientX;
+    const startScrollLeft = scrollEl.scrollLeft;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startClientX;
+      const deltaScroll = (deltaX / trackTravelWidth) * scrollableWidth;
+      scrollEl.scrollLeft = Math.max(0, Math.min(scrollableWidth, startScrollLeft + deltaScroll));
+      setScrollState({
+        scrollLeft: scrollEl.scrollLeft,
+        scrollWidth: scrollEl.scrollWidth,
+        clientWidth: scrollEl.clientWidth,
+      });
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const scrollableTimelineWidth = Math.max(0, scrollState.scrollWidth - scrollState.clientWidth);
+  const thumbWidthRatio = scrollState.scrollWidth > 0 
+    ? Math.max(0.03, Math.min(1, scrollState.clientWidth / scrollState.scrollWidth)) 
+    : 1;
+  const thumbWidthPct = thumbWidthRatio * 100;
+  const scrollRatio = scrollableTimelineWidth > 0 ? scrollState.scrollLeft / scrollableTimelineWidth : 0;
+  const thumbLeftPct = scrollRatio * (100 - thumbWidthPct);
+
   const displayedTracks = isEncodeMode 
     ? tracks 
     : (tracks.filter((t) => t.id === activeTrackId).length ? tracks.filter((t) => t.id === activeTrackId) : tracks.slice(0, 1));
@@ -2368,8 +2494,10 @@ export const Timeline: React.FC<TimelineProps> = ({
           </div>
         </div>
       ) : (
-        <div className="flex border border-white/15 rounded-xl overflow-hidden bg-black/60 shadow-inner flex-1 min-h-0">
-        {/* Track Headers Panel (Left side: Name, Media Type Tag, Mute, Lock, Hide, Color, Upload, Delete) */}
+        <div className="flex flex-col border border-white/15 rounded-xl overflow-hidden bg-black/60 shadow-inner flex-1 min-h-0">
+          {/* Main Workspace Area (Track Headers on left, Scrubbing Canvas on right) */}
+          <div className="flex flex-1 min-h-0 overflow-hidden">
+            {/* Track Headers Panel (Left side: Name, Media Type Tag, Mute, Lock, Hide, Color, Upload, Delete) */}
         <div
           ref={leftHeadersScrollRef}
           onScroll={(e) => {
@@ -2377,7 +2505,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               timelineScrollRef.current.scrollTop = e.currentTarget.scrollTop;
             }
           }}
-          className="w-32 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0"
+          className="w-32 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0 no-scrollbar"
         >
           {/* Top Header Label */}
           <div className="h-4 bg-black/80 px-2 flex items-center justify-center border-b border-white/10 shrink-0 sticky top-0 z-30">
@@ -2564,8 +2692,13 @@ export const Timeline: React.FC<TimelineProps> = ({
             if (leftHeadersScrollRef.current && leftHeadersScrollRef.current.scrollTop !== e.currentTarget.scrollTop) {
               leftHeadersScrollRef.current.scrollTop = e.currentTarget.scrollTop;
             }
+            setScrollState({
+              scrollLeft: e.currentTarget.scrollLeft,
+              scrollWidth: e.currentTarget.scrollWidth,
+              clientWidth: e.currentTarget.clientWidth,
+            });
           }}
-          className="flex-1 relative overflow-x-auto overflow-y-auto min-h-0"
+          className="flex-1 relative overflow-x-auto overflow-y-auto min-h-0 no-scrollbar"
         >
           <div
             ref={trimContainerRef}
@@ -2678,7 +2811,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                               } ${clipColorConfig.clipBg} ${isClipActive ? 'ring-2 ring-white/60 shadow-indigo-500/20' : ''}`}
                             style={{
                               left: `${clipStartPct}%`,
-                              width: `${Math.max(0.8, clipEndPct - clipStartPct)}%`,
+                              width: `${Math.max(0, clipEndPct - clipStartPct)}%`,
                             }}
                             onMouseDown={(e) => {
                               setActiveTrackId(track.id);
@@ -2797,7 +2930,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                             )}
 
                             {/* Clip Name & Time Badge + Quick Delete Button */}
-                            <div className="relative z-20 flex items-center justify-between px-2 w-full h-full pointer-events-none overflow-hidden">
+                            <div className="relative z-20 flex items-center justify-between px-4 w-full h-full pointer-events-none overflow-hidden">
                               <div className="flex items-center space-x-1 min-w-0 truncate">
                                 <span className="shrink-0 drop-shadow">{getMediaIcon(clip.mediaType)}</span>
                                 <span
@@ -2807,23 +2940,18 @@ export const Timeline: React.FC<TimelineProps> = ({
                                 </span>
                               </div>
 
-                              {/* Quick Delete Action (Prominently visible in Copy Mode when track has >1 pieces, or on hover) */}
-                              {(!isEncodeMode || track.clips.length > 1) && (
-                                <div className="pointer-events-auto ml-1.5 shrink-0 flex items-center">
+                              {/* Quick Delete Action (Only in Copy Mode when track has >1 pieces after splitting) */}
+                              {!isEncodeMode && track.clips.length > 1 && (
+                                <div className="pointer-events-auto ml-1.5 mr-1 shrink-0 flex items-center">
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleDeleteClip(track.id, clip.id);
                                     }}
-                                    title="คลิกเพื่อลบส่วนนี้ / Click to delete this piece"
-                                    className={`px-1.5 py-0.5 rounded flex items-center space-x-1 text-[10px] font-medium shadow-md transition-all cursor-pointer select-none active:scale-95 ${
-                                      !isEncodeMode && track.clips.length > 1
-                                        ? 'bg-rose-600 hover:bg-rose-500 text-white hover:scale-105 ring-1 ring-white/30'
-                                        : 'bg-slate-900/80 hover:bg-rose-600 text-slate-300 hover:text-white opacity-0 group-hover:opacity-100'
-                                    }`}
+                                    title="ลบส่วนนี้ / Delete this piece"
+                                    className="w-6 h-6 rounded flex items-center justify-center shadow-md transition-all cursor-pointer select-none active:scale-90 bg-rose-600 hover:bg-rose-500 text-white hover:scale-110 ring-1 ring-white/40"
                                   >
                                     <Trash2 className="w-3 h-3 text-white" />
-                                    <span className="hidden sm:inline">ลบส่วนนี้</span>
                                   </button>
                                 </div>
                               )}
@@ -2920,6 +3048,43 @@ export const Timeline: React.FC<TimelineProps> = ({
             </div>
           </div>
         </div>
+      </div>
+
+      {/* 5. High-Precision Click-to-Jump & Drag Horizontal Scroll Navigator */}
+        {scrollableTimelineWidth > 1 && (
+          <div className="h-5 bg-slate-950/95 border-t border-white/10 flex items-center px-1.5 shrink-0 select-none z-30">
+            {/* Left track headers spacer */}
+            <div className="w-32 shrink-0 pr-2 flex items-center justify-between border-r border-white/10 text-[9px] font-mono text-slate-400">
+              <span className="truncate flex items-center space-x-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block" />
+                <span>NAVIGATOR</span>
+              </span>
+              <span className="text-[8px] text-indigo-400 font-semibold font-mono">
+                {Math.round((scrollState.scrollLeft / Math.max(1, scrollableTimelineWidth)) * 100)}%
+              </span>
+            </div>
+
+            {/* Jumpable Horizontal Track */}
+            <div
+              ref={customScrollTrackRef}
+              onMouseDown={handleScrollTrackMouseDown}
+              className="flex-1 h-3 bg-slate-900/90 hover:bg-slate-800/90 rounded-full mx-2 relative cursor-pointer group flex items-center border border-white/10 transition-colors shadow-inner"
+              title="คลิกที่ตำแหน่งใดๆ บนแทร็กเพื่อกระโดดทันที หรือลากแถบเพื่อเลื่อนอย่างรวดเร็ว (Click anywhere to jump immediately or drag)"
+            >
+              {/* Draggable Viewport Thumb Pill */}
+              <div
+                onMouseDown={handleThumbMouseDown}
+                style={{
+                  left: `${thumbLeftPct}%`,
+                  width: `${thumbWidthPct}%`,
+                }}
+                className="absolute top-0.5 bottom-0.5 rounded-full bg-slate-600 group-hover:bg-indigo-500 hover:!bg-indigo-400 active:!bg-indigo-400 transition-colors shadow-md flex items-center justify-center cursor-grab active:cursor-grabbing border border-white/30 z-20"
+              >
+                <div className="w-2.5 h-0.5 rounded-full bg-white/80" />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       )}
     </div>
