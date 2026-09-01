@@ -2494,25 +2494,23 @@ export const Timeline: React.FC<TimelineProps> = ({
           </div>
         </div>
       ) : (
-        <div className="flex flex-col border border-white/15 rounded-xl overflow-hidden bg-black/60 shadow-inner flex-1 min-h-0">
-          {/* Main Workspace Area (Track Headers on left, Scrubbing Canvas on right) */}
-          <div className="flex flex-1 min-h-0 overflow-hidden">
-            {/* Track Headers Panel (Left side: Name, Media Type Tag, Mute, Lock, Hide, Color, Upload, Delete) */}
-        <div
-          ref={leftHeadersScrollRef}
-          onScroll={(e) => {
-            if (timelineScrollRef.current && timelineScrollRef.current.scrollTop !== e.currentTarget.scrollTop) {
-              timelineScrollRef.current.scrollTop = e.currentTarget.scrollTop;
-            }
-          }}
-          className="w-32 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0 no-scrollbar"
-        >
-          {/* Top Header Label */}
-          <div className="h-4 bg-black/80 px-2 flex items-center justify-center border-b border-white/10 shrink-0 sticky top-0 z-30">
-            <span className="text-[9px] font-mono text-indigo-400 font-bold">
-              {isEncodeMode ? `${displayedTracks.length} Tracks` : "Ready"}
-            </span>
-          </div>
+        <div className="flex border border-white/15 rounded-xl overflow-hidden bg-black/60 shadow-inner flex-1 min-h-0">
+          {/* Track Headers Panel (Left side: Name, Media Type Tag, Mute, Lock, Hide, Color, Upload, Delete) - Full height without horizontal split */}
+          <div
+            ref={leftHeadersScrollRef}
+            onScroll={(e) => {
+              if (timelineScrollRef.current && timelineScrollRef.current.scrollTop !== e.currentTarget.scrollTop) {
+                timelineScrollRef.current.scrollTop = e.currentTarget.scrollTop;
+              }
+            }}
+            className="w-32 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0 no-scrollbar"
+          >
+            {/* Top Header Label */}
+            <div className="h-4 bg-black/80 px-2 flex items-center justify-center border-b border-white/10 shrink-0 sticky top-0 z-30">
+              <span className="text-[9px] font-mono text-indigo-400 font-bold">
+                {isEncodeMode ? `${displayedTracks.length} Tracks` : "Ready"}
+              </span>
+            </div>
 
           {/* Track Headers List */}
           <div className="flex flex-col divide-y divide-white/10">
@@ -2685,21 +2683,23 @@ export const Timeline: React.FC<TimelineProps> = ({
           </div>
         </div>
 
-        {/* Tracks Main Scrubbing & Trimming Area */}
-        <div
-          ref={timelineScrollRef}
-          onScroll={(e) => {
-            if (leftHeadersScrollRef.current && leftHeadersScrollRef.current.scrollTop !== e.currentTarget.scrollTop) {
-              leftHeadersScrollRef.current.scrollTop = e.currentTarget.scrollTop;
-            }
-            setScrollState({
-              scrollLeft: e.currentTarget.scrollLeft,
-              scrollWidth: e.currentTarget.scrollWidth,
-              clientWidth: e.currentTarget.clientWidth,
-            });
-          }}
-          className="flex-1 relative overflow-x-auto overflow-y-auto min-h-0 no-scrollbar"
-        >
+        {/* Right Side: Tracks Main Canvas + Bottom Horizontal Scroll Navigator */}
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+          {/* Tracks Main Scrubbing & Trimming Area */}
+          <div
+            ref={timelineScrollRef}
+            onScroll={(e) => {
+              if (leftHeadersScrollRef.current && leftHeadersScrollRef.current.scrollTop !== e.currentTarget.scrollTop) {
+                leftHeadersScrollRef.current.scrollTop = e.currentTarget.scrollTop;
+              }
+              setScrollState({
+                scrollLeft: e.currentTarget.scrollLeft,
+                scrollWidth: e.currentTarget.scrollWidth,
+                clientWidth: e.currentTarget.clientWidth,
+              });
+            }}
+            className="flex-1 relative overflow-x-auto overflow-y-auto min-h-0 no-scrollbar"
+          >
           <div
             ref={trimContainerRef}
             className={`relative select-none ${isScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
@@ -3048,43 +3048,33 @@ export const Timeline: React.FC<TimelineProps> = ({
             </div>
           </div>
         </div>
-      </div>
 
-      {/* 5. High-Precision Click-to-Jump & Drag Horizontal Scroll Navigator */}
+        {/* 5. High-Precision Click-to-Jump & Drag Horizontal Scroll Navigator (Right Side Only) */}
         {scrollableTimelineWidth > 1 && (
-          <div className="h-5 bg-slate-950/95 border-t border-white/10 flex items-center px-1.5 shrink-0 select-none z-30">
-            {/* Left track headers spacer */}
-            <div className="w-32 shrink-0 pr-2 flex items-center justify-between border-r border-white/10 text-[9px] font-mono text-slate-400">
-              <span className="truncate flex items-center space-x-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block" />
-                <span>NAVIGATOR</span>
-              </span>
-              <span className="text-[8px] text-indigo-400 font-semibold font-mono">
-                {Math.round((scrollState.scrollLeft / Math.max(1, scrollableTimelineWidth)) * 100)}%
-              </span>
-            </div>
-
-            {/* Jumpable Horizontal Track */}
+          <div className="h-4 bg-slate-950/95 border-t border-white/10 flex items-center px-1.5 shrink-0 select-none z-30">
             <div
               ref={customScrollTrackRef}
               onMouseDown={handleScrollTrackMouseDown}
-              className="flex-1 h-3 bg-slate-900/90 hover:bg-slate-800/90 rounded-full mx-2 relative cursor-pointer group flex items-center border border-white/10 transition-colors shadow-inner"
-              title="คลิกที่ตำแหน่งใดๆ บนแทร็กเพื่อกระโดดทันที หรือลากแถบเพื่อเลื่อนอย่างรวดเร็ว (Click anywhere to jump immediately or drag)"
+              className="flex-1 h-2.5 bg-slate-900/90 hover:bg-slate-800/90 rounded-full relative cursor-pointer group flex items-center border border-white/10 transition-colors shadow-inner"
             >
-              {/* Draggable Viewport Thumb Pill */}
+              {/* Draggable Viewport Thumb Pill with Integrated % Badge */}
               <div
                 onMouseDown={handleThumbMouseDown}
                 style={{
                   left: `${thumbLeftPct}%`,
                   width: `${thumbWidthPct}%`,
+                  minWidth: '42px',
                 }}
-                className="absolute top-0.5 bottom-0.5 rounded-full bg-slate-600 group-hover:bg-indigo-500 hover:!bg-indigo-400 active:!bg-indigo-400 transition-colors shadow-md flex items-center justify-center cursor-grab active:cursor-grabbing border border-white/30 z-20"
+                className="absolute top-0 bottom-0 rounded-full bg-slate-700/90 group-hover:bg-indigo-600/90 hover:!bg-indigo-500 active:!bg-indigo-500 transition-colors shadow-md flex items-center justify-center cursor-grab active:cursor-grabbing border border-white/30 z-20 px-1"
               >
-                <div className="w-2.5 h-0.5 rounded-full bg-white/80" />
+                <span className="text-[8px] font-mono font-bold text-white/90 leading-none select-none drop-shadow">
+                  {Math.round((scrollState.scrollLeft / Math.max(1, scrollableTimelineWidth)) * 100)}%
+                </span>
               </div>
             </div>
           </div>
         )}
+      </div>
       </div>
       )}
     </div>
