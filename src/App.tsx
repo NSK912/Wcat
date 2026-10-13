@@ -45,7 +45,9 @@ import {
   ArrowRight,
   Sliders,
   Check,
+  AlertTriangle,
 } from 'lucide-react';
+import { validateMediaFile } from './utils/fileValidator';
 
 const DEFAULT_SETTINGS: EditSettings = {
   startTime: 0,
@@ -173,8 +175,9 @@ export default function App() {
   const [holdHint, setHoldHint] = useState<boolean>(false);
   const holdRafRef = useRef<number | null>(null);
   const holdStartTimeRef = useRef<number>(0);
-  const hintTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const exportAbortControllerRef = useRef<AbortController | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isCheckingFiles, setIsCheckingFiles] = useState<boolean>(false);
 
   useEffect(() => {
     const handleResize = () => {
@@ -589,7 +592,16 @@ export default function App() {
     const count = Math.min(12, Math.max(5, Math.floor(duration / 3)));
     let currentIdx = 0;
 
+    const safetyTimeout = setTimeout(() => {
+      isCancelled = true;
+      try {
+        video.src = '';
+        video.load();
+      } catch {}
+    }, 4000);
+
     video.onerror = () => {
+      clearTimeout(safetyTimeout);
       // Gracefully ignore preview thumbnail failures
     };
 
@@ -600,11 +612,12 @@ export default function App() {
       const captureNext = () => {
         if (isCancelled) return;
         if (currentIdx >= count) {
+          clearTimeout(safetyTimeout);
           setThumbnails(thumbs);
           return;
         }
         const targetTime = (currentIdx + 0.5) * step;
-        video.currentTime = Math.min(Math.max(0, targetTime), duration - 0.05);
+        video.currentTime = Math.min(Math.max(0, targetTime), Math.max(0.05, duration - 0.05));
       };
 
       video.onseeked = () => {
@@ -630,6 +643,7 @@ export default function App() {
 
     return () => {
       isCancelled = true;
+      clearTimeout(safetyTimeout);
       video.src = '';
       video.load();
     };
@@ -639,9 +653,23 @@ export default function App() {
     const files = e.target.files;
     if (files && files.length > 0) {
       const file = files[0];
+      e.target.value = '';
+
+      setIsCheckingFiles(true);
+      setUploadError(null);
+
+      // Pre-flight Quarantine Check
+      const validation = await validateMediaFile(file);
+      setIsCheckingFiles(false);
+
+      if (!validation.valid) {
+        setUploadError(`Unable to open file "${file.name}": ${validation.error || 'File is damaged or incomplete'}`);
+        return;
+      }
+
       setSelectedFiles([file]);
       const url = getOrCreateFileUrl(file);
-      const dur = await getFileDuration(file);
+      const dur = validation.duration && validation.duration > 0 ? validation.duration : await getFileDuration(file);
       setVideoUrl(url);
       setVideoName(file.name);
       setDuration(dur);
@@ -657,24 +685,52 @@ export default function App() {
         startTime: 0,
         endTime: dur,
       }));
+    } else {
+      e.target.value = '';
     }
-    e.target.value = '';
   };
 
   const handleMultiFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
       const fileArr: File[] = Array.from(files);
-      setSelectedFiles(fileArr);
+      e.target.value = '';
 
-      // Probe all files in parallel to get their true durations
-      const durations = await Promise.all(fileArr.map((f) => getFileDuration(f)));
+      setIsCheckingFiles(true);
+      setUploadError(null);
+
+      // Pre-flight Quarantine Check for all selected files
+      const validationResults = await Promise.all(fileArr.map(f => validateMediaFile(f)));
+      setIsCheckingFiles(false);
+
+      const invalidFiles = fileArr.filter((_, idx) => !validationResults[idx].valid);
+      const validFiles = fileArr.filter((_, idx) => validationResults[idx].valid);
+
+      if (validFiles.length === 0) {
+        setUploadError(`All selected files are corrupted or unreadable: ${validationResults[0]?.error || 'Abnormal file structure'}`);
+        return;
+      }
+
+      if (invalidFiles.length > 0) {
+        setUploadError(`Skipped ${invalidFiles.length} corrupted files (${invalidFiles.map(f => f.name).slice(0, 2).join(', ')}${invalidFiles.length > 2 ? '...' : ''})`);
+      }
+
+      setSelectedFiles(validFiles);
+
+      // Get durations for valid files
+      const durations = await Promise.all(
+        validFiles.map(async (f) => {
+          const originalIdx = fileArr.indexOf(f);
+          const valDur = validationResults[originalIdx]?.duration;
+          return valDur && valDur > 0 ? valDur : await getFileDuration(f);
+        })
+      );
       const totalDur = durations.reduce((acc, d) => acc + d, 0);
 
-      const firstFile = fileArr[0];
+      const firstFile = validFiles[0];
       const url = getOrCreateFileUrl(firstFile);
       setVideoUrl(url);
-      setVideoName(fileArr.length === 1 ? firstFile.name : `${fileArr.length} files selected`);
+      setVideoName(validFiles.length === 1 ? firstFile.name : `${validFiles.length} files selected`);
       setDuration(totalDur > 0 ? totalDur : durations[0]);
 
       if (outputUrl) {
@@ -689,8 +745,9 @@ export default function App() {
         startTime: 0,
         endTime: totalDur > 0 ? totalDur : durations[0],
       }));
+    } else {
+      e.target.value = '';
     }
-    e.target.value = '';
   };
 
   const handleFilesReorder = useCallback((newFiles: File[]) => {
@@ -873,15 +930,15 @@ export default function App() {
           }
           console.warn('showSaveFilePicker error:', err);
           alert(
-            '⚠️ ไม่สามารถเปิด System Save File Picker ได้เนื่องจากข้อจำกัดความปลอดภัยของ iFrame\n\n' +
-            'กรุณาเปิดสวิตช์ "Iframe Save Mode" ใน Panel Encode (ตั้งค่า) หรือเปิดเว็บในแท็บใหม่เพื่อเลือกโฟลเดอร์เซฟไฟล์'
+            '⚠️ Unable to open System Save File Picker due to iFrame security restrictions.\n\n' +
+            'Please enable "Iframe Save Mode" in the Encode Panel (Settings) or open the web app in a new tab to select a save folder.'
           );
           return;
         }
       } else {
         alert(
-          '⚠️ เบราว์เซอร์นี้ไม่รองรับ System Save File Picker\n\n' +
-          'กรุณาเปิดสวิตช์ "Iframe Save Mode" ใน Panel Encode (ตั้งค่า)'
+          '⚠️ This browser does not support System Save File Picker.\n\n' +
+          'Please enable "Iframe Save Mode" in the Encode Panel (Settings).'
         );
         return;
       }
@@ -1227,6 +1284,30 @@ export default function App() {
 
 
 
+
+      {/* Checking & Error Notifications */}
+      {isCheckingFiles && (
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-2 bg-slate-900/95 text-indigo-300 border border-indigo-500/30 px-4 py-2.5 rounded-xl shadow-2xl backdrop-blur-md text-sm">
+          <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+          <span>Verifying media file integrity...</span>
+        </div>
+      )}
+
+      {uploadError && (
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-3 bg-red-950/95 text-red-100 border border-red-500/40 px-4 py-3 rounded-xl shadow-2xl backdrop-blur-md max-w-lg text-sm">
+          <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
+          <span className="flex-1 font-medium">{uploadError}</span>
+          <button
+            onClick={() => setUploadError(null)}
+            className="p-1.5 rounded-lg bg-red-900/30 hover:bg-red-800/50 text-red-300 hover:text-white border border-red-500/30 transition-colors"
+            title="Close"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Main Workspace Layout */}
       <div className="flex flex-1 overflow-hidden relative z-10">

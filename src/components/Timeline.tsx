@@ -562,20 +562,30 @@ export const Timeline: React.FC<TimelineProps> = ({
     const count = 8;
     const thumbs: string[] = [];
     let currentIdx = 0;
+    let isCleanedUp = false;
 
     const cleanup = () => {
+      if (isCleanedUp) return;
+      isCleanedUp = true;
       try {
+        clearTimeout(safetyTimeout);
         URL.revokeObjectURL(blobUrl);
         video.src = '';
         video.load();
       } catch {}
     };
 
+    // Safety timeout to guarantee cleanup even if video stalls or freezes
+    const safetyTimeout = setTimeout(() => {
+      cleanup();
+    }, 4000);
+
     video.onerror = () => {
       cleanup();
     };
 
     video.onloadedmetadata = () => {
+      if (isCleanedUp) return;
       const html5Dur = (video.duration && Number.isFinite(video.duration) && video.duration > 0) ? video.duration : 0;
       const fileDur = html5Dur || probedDur || 10;
       updateClipDurations(fileDur);
@@ -583,6 +593,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       const step = fileDur / count;
 
       const captureNext = () => {
+        if (isCleanedUp) return;
         if (currentIdx >= count) {
           setFileThumbnails((prev) => ({ ...prev, [key]: thumbs }));
           cleanup();
@@ -593,6 +604,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       };
 
       video.onseeked = () => {
+        if (isCleanedUp) return;
         try {
           const canvas = document.createElement('canvas');
           canvas.width = 160;
@@ -944,9 +956,20 @@ export const Timeline: React.FC<TimelineProps> = ({
     trackFileInputRef.current?.click();
   };
 
-  const handleTrackFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleTrackFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !targetUploadTrackId) return;
+
+    // Reset input value immediately so user can retry same file if needed
+    e.target.value = '';
+
+    // Fast sanitize validation check
+    const { validateMediaFile } = await import('../utils/fileValidator');
+    const validation = await validateMediaFile(file);
+    if (!validation.valid) {
+      alert(`⚠️ Unable to add file: ${validation.error || 'File is damaged or incomplete'}`);
+      return;
+    }
 
     const detectedType = detectMediaType(file);
     const url = URL.createObjectURL(file);
@@ -964,7 +987,9 @@ export const Timeline: React.FC<TimelineProps> = ({
       prev.map((t) => {
         if (t.id === targetUploadTrackId) {
           const startVal = currentTime;
-          const dur = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
+          const dur = (validation.duration && validation.duration > 0)
+            ? validation.duration
+            : (fileDurations[key] || (detectedType === 'image' ? 5 : 0));
           const newClip: TimelineClip = {
             id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
             name: file.name,
@@ -2948,7 +2973,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                                       e.stopPropagation();
                                       handleDeleteClip(track.id, clip.id);
                                     }}
-                                    title="ลบส่วนนี้ / Delete this piece"
+                                    title="Delete this piece"
                                     className="w-6 h-6 rounded flex items-center justify-center shadow-md transition-all cursor-pointer select-none active:scale-90 bg-rose-600 hover:bg-rose-500 text-white hover:scale-110 ring-1 ring-white/40"
                                   >
                                     <Trash2 className="w-3 h-3 text-white" />
