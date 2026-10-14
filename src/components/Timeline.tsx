@@ -39,6 +39,7 @@ import {
 } from 'lucide-react';
 import { formatTime } from '../utils/sampleVideos';
 import { Input, BlobSource, ALL_FORMATS } from 'mediabunny';
+import { probeVideoSafe, generateThumbnailsSafe } from '../utils/webcodecsPlayerClient';
 import wcatSeekPng from '../../assets/Wcat seek.png';
 import wcatSeekSvg from '../../public/wcat-seek.svg';
 import {
@@ -492,10 +493,22 @@ export const Timeline: React.FC<TimelineProps> = ({
         const nextTracks = prev.map((t) => ({
           ...t,
           clips: t.clips.map((c) => {
-            if (c.file && getFileKey(c.file) === key) {
-              const needsInit = !c.isTrimmed && (c.endTime <= c.startTime || !c.fileDuration || c.sourceEndTime === 0);
-              const newEnd = needsInit ? c.startTime + fileDur : c.endTime;
-              const newSourceEnd = needsInit ? fileDur : (c.sourceEndTime || fileDur);
+            const isTargetFile =
+              (c.file && getFileKey(c.file) === key) ||
+              c.name === file.name ||
+              c.fileName === file.name;
+
+            if (isTargetFile) {
+              const wasUntrimmed =
+                !c.isTrimmed ||
+                !c.fileDuration ||
+                c.endTime <= c.startTime ||
+                (c.endTime - c.startTime) <= 10.05 ||
+                Math.abs((c.endTime - c.startTime) - (c.fileDuration || 0)) < 0.1;
+
+              const newEnd = wasUntrimmed ? c.startTime + fileDur : Math.min(c.startTime + fileDur, c.endTime);
+              const newSourceEnd = wasUntrimmed ? fileDur : Math.min(fileDur, c.sourceEndTime || fileDur);
+
               if (c.fileDuration !== fileDur || c.endTime !== newEnd || c.sourceEndTime !== newSourceEnd) {
                 changed = true;
                 return {
@@ -552,63 +565,30 @@ export const Timeline: React.FC<TimelineProps> = ({
       return;
     }
 
-    // 2. HTML5 <video> element thumbnail extraction & fallback duration check
-    const video = document.createElement('video');
-    const blobUrl = URL.createObjectURL(file);
-    video.src = blobUrl;
-    video.muted = true;
-    video.preload = 'metadata';
+    // 2. WebCodecs Dedicated Worker thumbnail extraction & exact duration check (NEVER HTML5 <video>)
+    if (!isAudio) {
+      if (probedDur > 0) {
+        updateClipDurations(probedDur);
+      } else if (duration > 0) {
+        updateClipDurations(duration);
+      } else {
+        probeVideoSafe(file)
+          .then((probe) => {
+            if (probe.duration > 0) {
+              updateClipDurations(probe.duration);
+            }
+          })
+          .catch(() => {});
+      }
 
-    const count = 8;
-    const thumbs: string[] = [];
-    let currentIdx = 0;
-
-    const cleanup = () => {
-      try {
-        URL.revokeObjectURL(blobUrl);
-        video.src = '';
-        video.load();
-      } catch {}
-    };
-
-    video.onerror = () => {
-      cleanup();
-    };
-
-    video.onloadedmetadata = () => {
-      const html5Dur = (video.duration && Number.isFinite(video.duration) && video.duration > 0) ? video.duration : 0;
-      const fileDur = html5Dur || probedDur || 10;
-      updateClipDurations(fileDur);
-
-      const step = fileDur / count;
-
-      const captureNext = () => {
-        if (currentIdx >= count) {
-          setFileThumbnails((prev) => ({ ...prev, [key]: thumbs }));
-          cleanup();
-          return;
-        }
-        const targetTime = (currentIdx + 0.5) * step;
-        video.currentTime = Math.min(Math.max(0, targetTime), Math.max(0.1, fileDur - 0.05));
-      };
-
-      video.onseeked = () => {
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = 160;
-          canvas.height = 90;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            thumbs.push(canvas.toDataURL('image/jpeg', 0.7));
+      generateThumbnailsSafe(file, 8)
+        .then((thumbs) => {
+          if (thumbs && thumbs.length > 0) {
+            setFileThumbnails((prev) => ({ ...prev, [key]: thumbs.filter(Boolean) }));
           }
-        } catch {}
-        currentIdx++;
-        captureNext();
-      };
-
-      captureNext();
-    };
+        })
+        .catch(() => {});
+    }
   };
 
   // Extract separate video thumbnails for each distinct video file
@@ -632,10 +612,46 @@ export const Timeline: React.FC<TimelineProps> = ({
 
       // 2. Video/Audio File Metadata Extraction (Specific to this file)
       if (mediaType === 'video' || mediaType === 'audio') {
-        extractThumbnailsForFile(file);
+        if (!inFlightExtractionsRef.current.has(key)) {
+          inFlightExtractionsRef.current.add(key);
+          extractThumbnailsForFile(file);
+        }
       }
     });
   }, [selectedFiles]);
+
+  // Auto-expand clips to project duration if they were created before duration was resolved or were collapsed
+  useEffect(() => {
+    if (!duration || duration <= 0) return;
+
+    setTracks((prev) => {
+      let changed = false;
+      const nextTracks = prev.map((t) => ({
+        ...t,
+        clips: t.clips.map((c) => {
+          const isCollapsed =
+            !c.isTrimmed &&
+            (c.endTime <= c.startTime ||
+              c.endTime - c.startTime <= 0.1 ||
+              Math.abs(c.endTime - c.startTime - 10) < 0.1 ||
+              (c.fileDuration || 0) <= 0);
+
+          if (isCollapsed) {
+            changed = true;
+            return {
+              ...c,
+              endTime: c.startTime + duration,
+              sourceStartTime: c.sourceStartTime || 0,
+              sourceEndTime: duration,
+              fileDuration: duration,
+            };
+          }
+          return c;
+        }),
+      }));
+      return changed ? nextTracks : prev;
+    });
+  }, [duration, setTracks]);
 
   const detectMediaType = (file: File): MediaType => {
     if (file.type.startsWith('video/')) return 'video';
@@ -752,7 +768,14 @@ export const Timeline: React.FC<TimelineProps> = ({
         const newTracks: TimelineTrackData[] = selectedFiles.map((file, idx) => {
           const key = getFileKey(file);
           const detectedType = detectMediaType(file);
-          const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
+          const knownDuration =
+            fileDurations[key] && fileDurations[key] > 0
+              ? fileDurations[key]
+              : duration > 0
+              ? duration
+              : detectedType === 'image'
+              ? 5
+              : 0;
           const trackColor = colorOrder[idx % colorOrder.length];
 
           const clip: TimelineClip = {

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  .parent {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 300px;
+    height: 500px;
+    background: #333;
+    overflow: hidden;
+  }
+  .wrapper {
+    position: relative;
+    background: black;
+    /* max constraints for the specific aspect ratio */
+    max-width: 854px;
+    max-height: 480px;
+    /* make sure wrapper can shrink */
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .svg-spacer {
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain; /* this is magic */
+    visibility: hidden;
+  }
+  .video {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100%; height: 100%;
+    object-fit: cover;
+    background: blue;
+  }
+</style>
+</head>
+<body>
+  <div class="parent">
+    <div class="wrapper">
+      <svg viewBox="0 0 16 9" class="svg-spacer"></svg>
+      <div class="video"></div>
+    </div>
+  </div>
+</body>
+</html>

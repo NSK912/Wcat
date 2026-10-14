@@ -3,12 +3,31 @@
   "private": true,
   "version": "3.5.0.6",
   "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "clean": "rm -rf dist dist-electron server.js release",
+    "lint": "tsc --noEmit",
+    "electron:build": "vite build && npx tsc electron/main.ts --outDir dist-electron --target esnext --module nodenext --moduleResolution nodenext && electron-builder --linux AppImage"
+  },
+  "build": {
+    "appId": "com.app.videocutter",
+    "productName": "VideoCutterPro",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "AudioVideo"
+    }
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -28,6 +47,8 @@
     "@types/node": "^22.14.0",
     "@webgpu/types": "^0.1.72",
     "autoprefixer": "^10.4.21",
+    "electron": "^44.7.1",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",

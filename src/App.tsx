@@ -8,6 +8,7 @@ import {
   processWebCodecsConcatStream,
   isWebCodecsSupported,
 } from './utils/WebCodecsEngine';
+import { probeVideoSafe, generateThumbnailsSafe } from './utils/webcodecsPlayerClient';
 import { VideoPlayer } from './components/VideoPlayer';
 import { Timeline } from './components/Timeline';
 import { ProcessingModal } from './components/ProcessingModal';
@@ -74,7 +75,7 @@ const DEFAULT_SETTINGS: EditSettings = {
   videoQuality: 'high',
   resolution: '1080',
   encodeSpeed: 'ultra-fast',
-  fps: 60,
+  fps: 0, // 0 = Auto / Original video FPS (no lock to 60fps)
 };
 
 const getFileDuration = async (file: File): Promise<number> => {
@@ -82,11 +83,20 @@ const getFileDuration = async (file: File): Promise<number> => {
     return 5;
   }
 
-  // 1. Try Mediabunny WebCodecs demuxer first (100% accurate for MKV, MP4, WebM, TS, AVI, etc.)
+  // 1. Try Mediabunny demuxer metadata first (instantaneous & non-blocking)
   try {
     const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+    const metaDur = await input.getDurationFromMetadata();
+    if (metaDur && Number.isFinite(metaDur) && metaDur > 0) {
+      return metaDur;
+    }
+
     const vTracks = await input.getVideoTracks();
     if (vTracks.length > 0) {
+      const vMeta = await vTracks[0].getDurationFromMetadata();
+      if (vMeta && Number.isFinite(vMeta) && vMeta > 0) {
+        return vMeta;
+      }
       const dur = await vTracks[0].computeDuration();
       if (dur && Number.isFinite(dur) && dur > 0) {
         return dur;
@@ -94,43 +104,63 @@ const getFileDuration = async (file: File): Promise<number> => {
     }
     const aTracks = await input.getAudioTracks();
     if (aTracks.length > 0) {
+      const aMeta = await aTracks[0].getDurationFromMetadata();
+      if (aMeta && Number.isFinite(aMeta) && aMeta > 0) {
+        return aMeta;
+      }
       const dur = await aTracks[0].computeDuration();
       if (dur && Number.isFinite(dur) && dur > 0) {
         return dur;
       }
     }
   } catch (e) {
-    console.warn('Mediabunny duration probe fallback to HTML5 video', e);
+    console.warn('Mediabunny direct probe failed:', e);
   }
 
-  // 2. HTML5 <video> element fallback with timeout safeguard
-  return new Promise((resolve) => {
-    const video = document.createElement('video');
-    video.preload = 'metadata';
-    const url = URL.createObjectURL(file);
-    video.src = url;
+  // 2. Safe HTML5 video/audio metadata detection with strict 2-second timeout
+  try {
+    const isAudio = file.type.startsWith('audio/');
+    const media = document.createElement(isAudio ? 'audio' : 'video');
+    media.preload = 'metadata';
+    const blobUrl = URL.createObjectURL(file);
+    media.src = blobUrl;
 
-    const timeout = setTimeout(() => {
-      URL.revokeObjectURL(url);
-      resolve(0); // 0 means full length (do not artificially cap at 10 or 15)
-    }, 2000);
-
-    video.onloadedmetadata = () => {
-      clearTimeout(timeout);
-      const dur = video.duration;
-      URL.revokeObjectURL(url);
-      if (dur && Number.isFinite(dur) && dur > 0) {
-        resolve(dur);
-      } else {
+    const html5Dur = await new Promise<number>((resolve) => {
+      const timer = setTimeout(() => {
+        URL.revokeObjectURL(blobUrl);
+        media.removeAttribute('src');
+        if (typeof (media as any).load === 'function') (media as any).load();
         resolve(0);
-      }
-    };
-    video.onerror = () => {
-      clearTimeout(timeout);
-      URL.revokeObjectURL(url);
-      resolve(0);
-    };
-  });
+      }, 2000);
+
+      media.onloadedmetadata = () => {
+        clearTimeout(timer);
+        const d = media.duration;
+        URL.revokeObjectURL(blobUrl);
+        media.removeAttribute('src');
+        if (typeof (media as any).load === 'function') (media as any).load();
+        resolve(Number.isFinite(d) && d > 0 ? d : 0);
+      };
+
+      media.onerror = () => {
+        clearTimeout(timer);
+        URL.revokeObjectURL(blobUrl);
+        media.removeAttribute('src');
+        if (typeof (media as any).load === 'function') (media as any).load();
+        resolve(0);
+      };
+    });
+
+    if (html5Dur > 0) return html5Dur;
+  } catch {}
+
+  // 3. Web Worker safe probe
+  try {
+    const probed = await probeVideoSafe(file);
+    if (probed.duration > 0) return probed.duration;
+  } catch {}
+
+  return 0;
 };
 
 const INITIAL_TIMELINE_TRACKS: TimelineTrackData[] = [
@@ -221,7 +251,7 @@ export default function App() {
       flipV: false,
       watermarkText: '',
       muteAudio: false,
-      fps: 60,
+      fps: prev.fps || 0,
       audioCodec: 'opus',
       audioBitrate: 192,
     }));
@@ -455,13 +485,18 @@ export default function App() {
       const containerRect = container.getBoundingClientRect();
       const Rc = containerRect.height > 0 ? containerRect.width / containerRect.height : 16 / 9;
       
-      const mediaEl = layerEl.querySelector('img, video');
+      const mediaEl = layerEl.querySelector('img, canvas, video');
       if (mediaEl) {
         let Rm = 16 / 9;
         if (mediaEl.tagName === 'IMG') {
           const img = mediaEl as HTMLImageElement;
           if (img.naturalWidth && img.naturalHeight) {
             Rm = img.naturalWidth / img.naturalHeight;
+          }
+        } else if (mediaEl.tagName === 'CANVAS') {
+          const cvs = mediaEl as HTMLCanvasElement;
+          if (cvs.width && cvs.height) {
+            Rm = cvs.width / cvs.height;
           }
         } else if (mediaEl.tagName === 'VIDEO') {
           const vid = mediaEl as HTMLVideoElement;
@@ -573,67 +608,31 @@ export default function App() {
     };
   }, []);
 
-  // Generate video preview thumbnails dynamically based on video duration
+  // Generate video preview thumbnails dynamically via WebCodecs Web Worker (Never HTML5 video)
+  const lastThumbFileRef = useRef<File | null>(null);
   useEffect(() => {
     if (!videoUrl || !duration) {
       setThumbnails([]);
       return;
     }
+    const file = selectedFiles.length > 0 ? selectedFiles[0] : null;
+    if (!file || lastThumbFileRef.current === file) {
+      return;
+    }
+    lastThumbFileRef.current = file;
+
     let isCancelled = false;
-    const video = document.createElement('video');
-    video.src = videoUrl;
-    video.muted = true;
-    video.preload = 'metadata';
-
-    const thumbs: string[] = [];
-    const count = Math.min(12, Math.max(5, Math.floor(duration / 3)));
-    let currentIdx = 0;
-
-    video.onerror = () => {
-      // Gracefully ignore preview thumbnail failures
-    };
-
-    video.onloadedmetadata = () => {
-      if (isCancelled) return;
-      const step = duration / count;
-
-      const captureNext = () => {
-        if (isCancelled) return;
-        if (currentIdx >= count) {
-          setThumbnails(thumbs);
-          return;
-        }
-        const targetTime = (currentIdx + 0.5) * step;
-        video.currentTime = Math.min(Math.max(0, targetTime), duration - 0.05);
-      };
-
-      video.onseeked = () => {
-        if (isCancelled) return;
-        try {
-          const canvas = document.createElement('canvas');
-          canvas.width = 160;
-          canvas.height = 90;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            thumbs.push(canvas.toDataURL('image/jpeg', 0.7));
-          }
-        } catch {
-          // Ignore cross-origin canvas security exceptions
-        }
-        currentIdx++;
-        captureNext();
-      };
-
-      captureNext();
-    };
+    const count = 6;
+    generateThumbnailsSafe(file, count).then((thumbs) => {
+      if (!isCancelled && thumbs && thumbs.length > 0) {
+        setThumbnails(thumbs.filter(Boolean));
+      }
+    });
 
     return () => {
       isCancelled = true;
-      video.src = '';
-      video.load();
     };
-  }, [videoUrl, duration]);
+  }, [videoUrl, duration, selectedFiles]);
 
   const handleSingleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -1359,27 +1358,38 @@ export default function App() {
                       <span className="text-[11px] text-slate-400 font-mono">Frame Rate (FPS):</span>
                       <Dropdown
                         id="select-fps"
-                        value={isCustomFpsMode || ![30, 60, 120].includes(settings.fps || 60) ? 'custom' : String(settings.fps || 60)}
+                        value={
+                          isCustomFpsMode || (settings.fps && ![0, 24, 30, 60, 120].includes(settings.fps))
+                            ? 'custom'
+                            : !settings.fps || settings.fps === 0
+                            ? 'auto'
+                            : String(settings.fps)
+                        }
                         onChange={(val) => {
                           if (val === 'custom') {
                             setIsCustomFpsMode(true);
-                            if ([30, 60, 120].includes(settings.fps || 60)) {
+                            if (!settings.fps || [0, 24, 30, 60, 120].includes(settings.fps)) {
                               updateSettings({ fps: 24 });
                             }
+                          } else if (val === 'auto') {
+                            setIsCustomFpsMode(false);
+                            updateSettings({ fps: 0 });
                           } else {
                             setIsCustomFpsMode(false);
                             updateSettings({ fps: Number(val) });
                           }
                         }}
                         options={[
+                          { value: 'auto', label: 'Auto (Original Video FPS)' },
+                          { value: '24', label: '24 fps (Cinematic)' },
                           { value: '30', label: '30 fps (Standard)' },
                           { value: '60', label: '60 fps (Smooth)' },
                           { value: '120', label: '120 fps (Ultra High)' },
-                          { value: 'custom', label: 'Custom Custom...' },
+                          { value: 'custom', label: 'Custom FPS...' },
                         ]}
                       />
 
-                      {(isCustomFpsMode || ![30, 60, 120].includes(settings.fps || 60)) && (
+                      {(isCustomFpsMode || (settings.fps && ![0, 24, 30, 60, 120].includes(settings.fps))) && (
                         <div className="flex flex-col gap-1.5 p-2 rounded-lg bg-slate-900/90 border border-violet-500/30 animate-fadeIn mt-0.5">
                           <div className="flex items-center gap-1.5">
                             <div className="relative flex-1 flex items-center">
@@ -1388,7 +1398,7 @@ export default function App() {
                                 type="number"
                                 min="1"
                                 max="240"
-                                value={settings.fps || 60}
+                                value={settings.fps || 30}
                                 onChange={(e) => {
                                   const val = parseInt(e.target.value, 10);
                                   if (!isNaN(val)) {
@@ -1403,7 +1413,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   id="btn-fps-increment"
-                                  onClick={() => updateSettings({ fps: Math.min(240, (settings.fps || 60) + 1) })}
+                                  onClick={() => updateSettings({ fps: Math.min(240, (settings.fps || 30) + 1) })}
                                   className="p-0.5 text-slate-400 hover:text-violet-300 hover:bg-violet-950/60 rounded transition cursor-pointer leading-none active:scale-90"
                                 >
                                   <ChevronUp className="w-3 h-3" />
@@ -1411,7 +1421,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   id="btn-fps-decrement"
-                                  onClick={() => updateSettings({ fps: Math.max(1, (settings.fps || 60) - 1) })}
+                                  onClick={() => updateSettings({ fps: Math.max(1, (settings.fps || 30) - 1) })}
                                   className="p-0.5 text-slate-400 hover:text-violet-300 hover:bg-violet-950/60 rounded transition cursor-pointer leading-none active:scale-90"
                                 >
                                   <ChevronDown className="w-3 h-3" />

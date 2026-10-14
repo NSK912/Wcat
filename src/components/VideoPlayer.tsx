@@ -7,6 +7,7 @@ import {
   MediaType,
   TrackColor,
 } from '../types';
+import { WebCodecsPlayerCanvas } from './WebCodecsPlayerCanvas';
 import {
   Play,
   Pause,
@@ -194,7 +195,7 @@ const AudioTrack: React.FC<{
   );
 };
 
-// Layer Video Player Component for Multi-Track Playback in Encode Mode
+// Layer Video Player Component for Multi-Track Playback in Encode Mode (WebCodecs Canvas)
 const LayerVideoElement: React.FC<{
   layer: ActiveLayerItem;
   currentTime: number;
@@ -206,73 +207,40 @@ const LayerVideoElement: React.FC<{
   onDurationLoaded?: (dur: number) => void;
   onAspectLoaded?: (aspect: number) => void;
 }> = ({ layer, currentTime, isPlaying, playbackRate, filterStyle, isMaster, onTimeUpdate, onDurationLoaded, onAspectLoaded }) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = playbackRate;
-      videoRef.current.volume = layer.muted ? 0 : layer.volume * (layer.transitionOpacity ?? 1);
-      videoRef.current.muted = layer.muted;
-    }
-  }, [playbackRate, layer.muted, layer.volume, layer.transitionOpacity]);
-
-  useEffect(() => {
-    if (videoRef.current) {
-      const targetTime = Math.max(0, (layer.clip.sourceStartTime || 0) + (currentTime - layer.clip.startTime));
-      if (!isPlaying) {
-        if (Math.abs(videoRef.current.currentTime - targetTime) > 0.005) {
-          videoRef.current.currentTime = targetTime;
-        }
-      } else {
-        if (Math.abs(videoRef.current.currentTime - targetTime) > 1.5) {
-          videoRef.current.currentTime = targetTime;
-        }
-      }
-    }
-  }, [currentTime, layer.clip.startTime, layer.clip.sourceStartTime, isPlaying]);
-
-  useEffect(() => {
-    if (videoRef.current) {
-      if (isPlaying) {
-        const targetTime = Math.max(0, (layer.clip.sourceStartTime || 0) + (currentTime - layer.clip.startTime));
-        if (Math.abs(videoRef.current.currentTime - targetTime) > 0.05) {
-          videoRef.current.currentTime = targetTime;
-        }
-        videoRef.current.play().catch((err) => console.warn('Layer video playback paused:', err));
-      } else {
-        videoRef.current.pause();
-      }
-    }
-  }, [isPlaying, layer.url]);
+  const localTarget = Math.max(0, (layer.clip.sourceStartTime || 0) + (currentTime - layer.clip.startTime));
 
   return (
-    <video
-      ref={videoRef}
-      src={layer.url}
-      playsInline
-      preload="auto"
+    <WebCodecsPlayerCanvas
+      file={layer.clip.file}
+      url={layer.url}
+      currentTime={localTarget}
+      isPlaying={isPlaying}
+      playbackRate={playbackRate}
       muted={layer.muted}
+      volume={layer.volume * (layer.transitionOpacity ?? 1)}
       className="w-full h-auto max-w-none block pointer-events-none select-none rounded shadow-md object-cover"
       style={{
         filter: [filterStyle, layer.transform.blur ? `blur(${layer.transform.blur}px)` : ''].filter(Boolean).join(' ') || undefined,
         opacity: (layer.transform.opacity ?? 1) * (layer.transitionOpacity ?? 1),
         clipPath: layer.transitionClipPath,
       }}
-      onTimeUpdate={() => {
-        if (isMaster && videoRef.current && isPlaying && onTimeUpdate) {
-          const mappedTime = layer.clip.startTime + (videoRef.current.currentTime - (layer.clip.sourceStartTime || 0));
+      onTimeUpdate={(localTime) => {
+        if (isMaster && isPlaying && onTimeUpdate) {
+          const mappedTime = layer.clip.startTime + (localTime - (layer.clip.sourceStartTime || 0));
           onTimeUpdate(mappedTime);
         }
       }}
-      onLoadedMetadata={(e) => {
-        const v = e.target as HTMLVideoElement;
-        if (isMaster && onDurationLoaded && v.duration > 0) {
-          onDurationLoaded(v.duration);
-        }
-        if (v.videoWidth && v.videoHeight && onAspectLoaded) {
-          onAspectLoaded(v.videoWidth / v.videoHeight);
+      onDurationLoaded={(dur) => {
+        if (isMaster && onDurationLoaded && dur > 0) {
+          onDurationLoaded(dur);
         }
       }}
+      onAspectLoaded={(aspect) => {
+        if (onAspectLoaded && aspect > 0) {
+          onAspectLoaded(aspect);
+        }
+      }}
+      isMaster={isMaster}
     />
   );
 };
@@ -287,6 +255,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   clipEndTime = 0,
   hasActiveClip = false,
   selectedFiles,
+  selectedFile,
   isPlaying,
   onTimeUpdate,
   onDurationLoaded,
@@ -314,7 +283,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!isEncodeMode) return 12;
     return isRightPanelExpanded ? 304 : 28;
   }, [isEncodeMode, isRightPanelExpanded]);
-  const singleVideoRef = useRef<HTMLVideoElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -875,44 +843,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     });
   };
 
-  // Single video player event handlers for Copy Mode / standard playback
-  useEffect(() => {
-    if (!isEncodeMode || activeLayers.length === 0) {
-      if (singleVideoRef.current) {
-        if (isPlaying && hasActiveClip && videoUrl && !loadError) {
-          singleVideoRef.current.play().catch((err) => console.warn('Playback paused:', err));
-        } else {
-          singleVideoRef.current.pause();
-        }
-      }
-    }
-  }, [isPlaying, videoUrl, loadError, hasActiveClip, isEncodeMode, activeLayers.length]);
-
-  useEffect(() => {
-    if (!isEncodeMode || activeLayers.length === 0) {
-      if (singleVideoRef.current && hasActiveClip && videoUrl) {
-        const localTarget = Math.max(0, sourceStartTime + (currentTime - mediaOffset));
-        if (!isPlaying) {
-          if (Math.abs(singleVideoRef.current.currentTime - localTarget) > 0.005) {
-            singleVideoRef.current.currentTime = localTarget;
-          }
-        } else {
-          if (Math.abs(singleVideoRef.current.currentTime - localTarget) > 1.5) {
-            singleVideoRef.current.currentTime = localTarget;
-          }
-        }
-      }
-    }
-  }, [currentTime, mediaOffset, sourceStartTime, hasActiveClip, videoUrl, isPlaying, isEncodeMode, activeLayers.length]);
-
-  useEffect(() => {
-    if (singleVideoRef.current) {
-      singleVideoRef.current.playbackRate = settings.speed;
-      singleVideoRef.current.volume = settings.muteAudio ? 0 : settings.volume;
-      singleVideoRef.current.muted = isEncodeMode || settings.muteAudio;
-    }
-  }, [settings.speed, settings.volume, settings.muteAudio, isEncodeMode]);
-
   // Right-click context menu handler (Aspect ratio picker)
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     if (!isEncodeMode || !videoUrl || loadError) return;
@@ -1109,7 +1039,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <button
               onClick={() => {
                 setLoadError(null);
-                if (singleVideoRef.current) singleVideoRef.current.load();
               }}
               className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-lg border border-white/10 flex items-center space-x-1 transition cursor-pointer"
             >
@@ -1352,9 +1281,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                     }}
                   />
                 ) : (
-                  <video
-                    ref={singleVideoRef}
-                    src={videoUrl}
+                  <WebCodecsPlayerCanvas
+                    file={selectedFile}
+                    url={videoUrl}
+                    currentTime={Math.max(0, (sourceStartTime || 0) + (currentTime - mediaOffset))}
+                    isPlaying={isPlaying && hasActiveClip}
+                    playbackRate={settings.speed}
+                    muted={isEncodeMode || settings.muteAudio}
+                    volume={settings.volume}
                     className={`transition-all duration-200 ${
                       isScalingActive && !isFreeCropActive
                         ? 'w-full h-full object-cover'
@@ -1364,34 +1298,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                       filter: getCssFilter(),
                       transform: getGlobalTransform(),
                     }}
-                    onTimeUpdate={() => {
-                      if (singleVideoRef.current && isPlaying && hasActiveClip) {
+                    onTimeUpdate={(localTime) => {
+                      if (isPlaying && hasActiveClip) {
                         const mappedTime =
-                          mediaOffset + (singleVideoRef.current.currentTime - (sourceStartTime || 0));
+                          mediaOffset + (localTime - (sourceStartTime || 0));
                         onTimeUpdate(mappedTime);
                       }
                     }}
-                    onLoadedMetadata={(e) => {
-                      const video = e.target as HTMLVideoElement;
-                      const dur = video.duration;
+                    onDurationLoaded={(dur) => {
                       if (!isNaN(dur) && dur > 0) {
                         onDurationLoaded(dur);
                       }
-                      if (video.videoWidth && video.videoHeight) {
-                        setNativeAspect(video.videoWidth / video.videoHeight);
-                      }
-                      const initialLocal = Math.max(0, (sourceStartTime || 0) + (currentTime - mediaOffset));
-                      if (initialLocal > 0) {
-                        video.currentTime = initialLocal;
-                      } else if (video.currentTime === 0) {
-                        video.currentTime = 0.001;
+                    }}
+                    onAspectLoaded={(aspect) => {
+                      if (aspect && aspect > 0) {
+                        setNativeAspect(aspect);
                       }
                     }}
-                    onError={() => setLoadError('Video format not supported natively in browser preview')}
+                    onError={(err) => setLoadError(err || 'WebCodecs video decoding notice')}
                     onEnded={() => onTogglePlay()}
-                    playsInline
-                    preload="auto"
-                    muted={isEncodeMode || settings.muteAudio}
+                    isMaster={!isEncodeMode}
                   />
                 )
               ) : (
@@ -1544,10 +1470,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           {!isFreeCropActive && !isDraggingLayer && !isResizingLayerCorner && !isEncodeMode && (
             <div
               onClick={() => {
-                if (singleVideoRef.current && !hasLayers) {
-                  if (isPlaying) singleVideoRef.current.pause();
-                  else singleVideoRef.current.play().catch(console.error);
-                }
                 onTogglePlay();
               }}
               className={`absolute inset-0 flex items-center justify-center transition cursor-pointer group pointer-events-auto ${
