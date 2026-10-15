@@ -820,9 +820,14 @@ export default function App() {
   };
 
   // Run FFmpeg / WebCodecs Export Process
-  const executeExportProcess = async (tracks?: any[], forceIframeMode: boolean = false, signal?: AbortSignal) => {
+  const executeExportProcess = async (
+    tracks?: any[],
+    forceIframeMode: boolean = false,
+    signal?: AbortSignal,
+    exportMode: 'export' | 'remux' = 'export'
+  ) => {
     if (!videoUrl) return;
-    if (!isEncodeMode && tracks && tracks.some((t) => (t.clips || []).length > 1)) {
+    if (!isEncodeMode && exportMode !== 'remux' && tracks && tracks.some((t) => (t.clips || []).length > 1)) {
       return;
     }
 
@@ -830,9 +835,11 @@ export default function App() {
     const detectedExt = (videoName ? videoName.split('.').pop()?.toLowerCase() : 'mp4') || 'mp4';
     const sourceExt = ['mp4', 'mkv', 'webm', 'ts', 'mov', 'm4v'].includes(detectedExt) ? detectedExt : 'mp4';
 
-    const baseName = videoName ? videoName.split('.')[0] : 'video';
+    const baseName = videoName ? videoName.replace(/\.[^/.]+$/, '') : 'video';
     let defaultOutputName = '';
-    if (isEncodeMode) {
+    if (exportMode === 'remux') {
+      defaultOutputName = `remuxed_${baseName}.${sourceExt}`;
+    } else if (isEncodeMode) {
       const isMulti = (tracks && tracks.some(t => !t.hidden && t.clips.length > 0)) || selectedFiles.length > 1;
       defaultOutputName = isMulti ? `encoded_project.${sourceExt}` : `encoded_${baseName}.${sourceExt}`;
     } else {
@@ -872,15 +879,15 @@ export default function App() {
           }
           console.warn('showSaveFilePicker error:', err);
           alert(
-            '⚠️ ไม่สามารถเปิด System Save File Picker ได้เนื่องจากข้อจำกัดความปลอดภัยของ iFrame\n\n' +
-            'กรุณาเปิดสวิตช์ "Iframe Save Mode" ใน Panel Encode (ตั้งค่า) หรือเปิดเว็บในแท็บใหม่เพื่อเลือกโฟลเดอร์เซฟไฟล์'
+            '⚠️ System Save File Picker could not be opened due to browser/iFrame security restrictions.\n\n' +
+            'Please enable "Iframe Save Mode" in the Encode Settings panel or open the application in a new tab.'
           );
           return;
         }
       } else {
         alert(
-          '⚠️ เบราว์เซอร์นี้ไม่รองรับ System Save File Picker\n\n' +
-          'กรุณาเปิดสวิตช์ "Iframe Save Mode" ใน Panel Encode (ตั้งค่า)'
+          '⚠️ This browser environment does not support System Save File Picker.\n\n' +
+          'Please enable "Iframe Save Mode" in the Encode Settings panel.'
         );
         return;
       }
@@ -954,9 +961,11 @@ export default function App() {
 
       const allVisibleClips = tracks ? tracks.filter(t => !t.hidden).flatMap(t => t.clips || []) : [];
       const hasTimelineClips = allVisibleClips.length > 0;
-      const hasMultipleClips = isEncodeMode
-        ? (hasTimelineClips || selectedFiles.length > 1)
-        : (allVisibleClips.length > 1 || selectedFiles.length > 1);
+      const hasMultipleClips = exportMode === 'remux'
+        ? false
+        : (isEncodeMode
+            ? (hasTimelineClips || selectedFiles.length > 1)
+            : (allVisibleClips.length > 1 || selectedFiles.length > 1));
       const hasImageClips =
         allVisibleClips.some(c => c.mediaType === 'image' || (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)))) ||
         selectedFiles.some(f => f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name));
@@ -1082,8 +1091,8 @@ export default function App() {
           settings.muteAudio;
 
         const isInputImage = inputFile.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(inputFile.name);
-        // When Encode Panel is closed (isEncodeMode is false), strictly use Lossless Fast Stream Copy
-        const shouldUseEncodeMode = isEncodeMode ? true : isInputImage;
+        // When Remux is requested, strictly force Remux Stream Copy (no re-encode)
+        const shouldUseEncodeMode = exportMode === 'remux' ? false : (isEncodeMode ? true : isInputImage);
         let result;
 
         // =====================================================================
@@ -1104,10 +1113,10 @@ export default function App() {
           );
         } 
         // =====================================================================
-        // 🔵 COPY MODE: SINGLE-TRACK FULL LENGTH (FAST NATIVE REMUX)
+        // 🔵 REMUX MODE OR COPY MODE FULL LENGTH (FAST NATIVE REMUX)
         // =====================================================================
-        else if (isFullLengthRemux) {
-          addLog(`Mode: Full length container repair / fast-start optimization for ${inputFile.name}`);
+        else if (exportMode === 'remux' || isFullLengthRemux) {
+          addLog(`Mode: Full length container repair / fast-start remux for ${inputFile.name}`);
           result = await processNativeRemuxStream(
             inputFile,
             writable,
@@ -1171,13 +1180,13 @@ export default function App() {
     }
   };
 
-  const handleExport = async (tracks?: any[]) => {
+  const handleExport = async (tracks?: any[], mode: 'export' | 'remux' = 'export') => {
     if (exportAbortControllerRef.current) {
       exportAbortControllerRef.current.abort();
     }
     exportAbortControllerRef.current = new AbortController();
     try {
-      await executeExportProcess(tracks, useIframeSaveMode, exportAbortControllerRef.current.signal);
+      await executeExportProcess(tracks, useIframeSaveMode, exportAbortControllerRef.current.signal, mode);
     } catch (err: any) {
       if (err.name === 'AbortError') {
         setProcessingMessage('Export cancelled by user');

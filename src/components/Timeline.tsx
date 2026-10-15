@@ -76,7 +76,7 @@ interface TimelineProps {
   onUploadClick: () => void;
   onMultiUploadClick?: () => void;
   onReset: () => void;
-  onExportClick: (tracks: TimelineTrackData[]) => void;
+  onExportClick: (tracks: TimelineTrackData[], mode?: 'export' | 'remux') => void;
   onFullscreenClick: () => void;
   isLoaded: boolean;
   isProcessing: boolean;
@@ -2439,7 +2439,7 @@ export const Timeline: React.FC<TimelineProps> = ({
             <button
               onClick={() => {
                 if (isPendingDeleteInCopyMode) return;
-                onExportClick(tracks);
+                onExportClick(tracks, 'remux');
               }}
               disabled={isProcessing || isPendingDeleteInCopyMode}
               className={`h-8 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-semibold transition shrink-0 ${
@@ -2459,7 +2459,7 @@ export const Timeline: React.FC<TimelineProps> = ({
               <button
                 onClick={() => {
                   if (isPendingDelete) return;
-                  onExportClick(tracks);
+                  onExportClick(tracks, 'export');
                 }}
                 disabled={isProcessing || isPendingDelete}
                 className={`h-8 px-3.5 flex items-center space-x-1 rounded-lg text-xs font-semibold shadow-md transition shrink-0 ${
@@ -2971,7 +2971,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                                       e.stopPropagation();
                                       handleDeleteClip(track.id, clip.id);
                                     }}
-                                    title="ลบส่วนนี้ / Delete this piece"
+                                    title="Delete this piece"
                                     className="w-6 h-6 rounded flex items-center justify-center shadow-md transition-all cursor-pointer select-none active:scale-90 bg-rose-600 hover:bg-rose-500 text-white hover:scale-110 ring-1 ring-white/40"
                                   >
                                     <Trash2 className="w-3 h-3 text-white" />
