@@ -97,9 +97,12 @@ const getFileDuration = async (file: File): Promise<number> => {
       if (vMeta && Number.isFinite(vMeta) && vMeta > 0) {
         return vMeta;
       }
-      const dur = await vTracks[0].computeDuration();
-      if (dur && Number.isFinite(dur) && dur > 0) {
-        return dur;
+      // Never scan full 30GB file with computeDuration - only for small files (<100MB)
+      if (file.size < 100 * 1024 * 1024) {
+        const dur = await vTracks[0].computeDuration();
+        if (dur && Number.isFinite(dur) && dur > 0) {
+          return dur;
+        }
       }
     }
     const aTracks = await input.getAudioTracks();
@@ -108,9 +111,11 @@ const getFileDuration = async (file: File): Promise<number> => {
       if (aMeta && Number.isFinite(aMeta) && aMeta > 0) {
         return aMeta;
       }
-      const dur = await aTracks[0].computeDuration();
-      if (dur && Number.isFinite(dur) && dur > 0) {
-        return dur;
+      if (file.size < 100 * 1024 * 1024) {
+        const dur = await aTracks[0].computeDuration();
+        if (dur && Number.isFinite(dur) && dur > 0) {
+          return dur;
+        }
       }
     }
   } catch (e) {
@@ -879,15 +884,15 @@ export default function App() {
           }
           console.warn('showSaveFilePicker error:', err);
           alert(
-            '⚠️ System Save File Picker could not be opened due to browser/iFrame security restrictions.\n\n' +
-            'Please enable "Iframe Save Mode" in the Encode Settings panel or open the application in a new tab.'
+            '⚠️ ไม่สามารถเปิดหน้าต่างเลือกที่บันทึกไฟล์ (Save File Picker) ได้เนื่องจากข้อจำกัดความปลอดภัยของเบราว์เซอร์หรือ iFrame\n\n' +
+            '👉 วิธีแก้ไข: กรุณาเปิดใช้งานตัวเลือก "Iframe Save Mode" ในแผงตั้งค่า Encode Settings หรือเปิดแอปในแท็บใหม่'
           );
           return;
         }
       } else {
         alert(
-          '⚠️ This browser environment does not support System Save File Picker.\n\n' +
-          'Please enable "Iframe Save Mode" in the Encode Settings panel.'
+          '⚠️ เบราว์เซอร์นี้ไม่รองรับระบบเลือกที่บันทึกไฟล์โดยตรง (System Save File Picker)\n\n' +
+          '👉 กรุณาเปิดใช้งานตัวเลือก "Iframe Save Mode" ในแผงตั้งค่า Encode Settings เพื่อดาวน์โหลดไฟล์'
         );
         return;
       }
