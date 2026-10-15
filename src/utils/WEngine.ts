@@ -1089,7 +1089,8 @@ async function processMediabunnyRemuxStream(
           const speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
           lastTime = now;
           lastBytes = totalWritten;
-          const prog = Math.min(99, Math.max(1, Math.round((totalWritten / file.size) * 100)));
+          // Scale stream copying to 2% - 90% so that the final container flush takes 91% - 100%
+          const prog = Math.min(90, Math.max(2, Math.round((totalWritten / file.size) * 88) + 2));
           lastProgress = prog;
           const remainingBytes = Math.max(0, file.size - totalWritten);
           const etaSec = speedMBs > 0 ? remainingBytes / (speedMBs * 1024 * 1024) : 0;
@@ -1120,10 +1121,10 @@ async function processMediabunnyRemuxStream(
 
       stage = 'Finalizing Remux Container Output';
       onProgress({
-        percentage: 99,
-        statusText: 'Finalizing container headers & sync indexes...',
+        percentage: 91,
+        statusText: 'Data packaging complete. Synchronizing container index...',
         speedMBs: 0,
-        log: `[STAGE 3/3] Finalizing container structure and metadata indexes...`
+        log: `[STAGE 3/4] Data packaging complete (${(totalWritten / (1024 * 1024)).toFixed(2)} MB). Synchronizing container index...`
       });
 
       let blobUrl: string | undefined;
@@ -1133,13 +1134,6 @@ async function processMediabunnyRemuxStream(
         blobUrl = URL.createObjectURL(blob);
         totalWritten = target.buffer.byteLength;
       }
-
-      onProgress({
-        percentage: 100,
-        statusText: 'Container remuxing completed successfully!',
-        speedMBs: 0,
-        log: `[DONE] Remux finished successfully! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
-      });
 
       return { success: true, totalBytesWritten: totalWritten, blobUrl };
     } catch (nativeErr: any) {
@@ -1227,7 +1221,8 @@ async function processMediabunnyRemuxStream(
         const speedMBs = ((totalWritten - lastBytes) / (1024 * 1024)) / elapsed;
         lastTime = now;
         lastBytes = totalWritten;
-        const prog = Math.min(99, Math.max(1, Math.round((totalWritten / file.size) * 100)));
+        // Scale stream copying to 2% - 90% so that the final container flush takes 91% - 100%
+        const prog = Math.min(90, Math.max(2, Math.round((totalWritten / file.size) * 88) + 2));
         lastProgress = prog;
         const remainingBytes = Math.max(0, file.size - totalWritten);
         const etaSec = speedMBs > 0 ? remainingBytes / (speedMBs * 1024 * 1024) : 0;
@@ -1355,10 +1350,10 @@ async function processMediabunnyRemuxStream(
     }
 
     onProgress({
-      percentage: 100,
-      statusText: 'Container remuxing completed with Packet Repair!',
+      percentage: 91,
+      statusText: 'Repaired data packaging complete. Synchronizing container index...',
       speedMBs: 0,
-      log: `[DONE] Repair remux finished! Total written: ${(totalWritten / (1024 * 1024)).toFixed(2)} MB`
+      log: `[STAGE 3/4] Repaired stream packaging complete (${(totalWritten / (1024 * 1024)).toFixed(2)} MB). Preparing disk flush...`
     });
 
     return { success: true, totalBytesWritten: totalWritten, blobUrl };

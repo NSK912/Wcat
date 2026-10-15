@@ -86,7 +86,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
         <div className="flex items-center justify-between pb-2 border-b border-white/10">
           <div className="flex items-center space-x-2">
             <Terminal className="w-4 h-4 text-indigo-400" />
-            <h3 className="text-sm font-semibold text-slate-200">คอนโซลบันทึกการทำงาน (Console Log)</h3>
+            <h3 className="text-sm font-semibold text-slate-200">Processing Console Log</h3>
           </div>
           <div className="flex items-center space-x-2">
             {logs.length > 0 && (
@@ -95,7 +95,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
                 className="text-xs text-slate-400 hover:text-white transition flex items-center space-x-1 px-2.5 py-1 rounded-md bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer"
               >
                 {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{copied ? 'คัดลอกแล้ว' : 'คัดลอก Log'}</span>
+                <span>{copied ? 'Copied' : 'Copy Logs'}</span>
               </button>
             )}
           </div>
@@ -106,16 +106,16 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
           <div className="bg-rose-950/40 border border-rose-500/30 rounded-xl p-3 text-xs space-y-1.5 animate-in fade-in">
             <div className="flex items-center space-x-1.5 text-rose-400 font-semibold">
               <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              <span>สรุปการวินิจฉัยปัญหา (Diagnostic Summary)</span>
+              <span>Diagnostic Summary</span>
             </div>
             {diagnosisLine && (
               <p className="text-slate-200 pl-5 leading-relaxed">
-                <span className="font-semibold text-amber-300">สาเหตุ (Cause):</span> {diagnosisLine}
+                <span className="font-semibold text-amber-300">Cause:</span> {diagnosisLine}
               </p>
             )}
             {suggestionLine && (
               <p className="text-slate-300 pl-5 leading-relaxed">
-                <span className="font-semibold text-cyan-300">คำแนะนำ (Recommendation):</span> {suggestionLine}
+                <span className="font-semibold text-cyan-300">Recommendation:</span> {suggestionLine}
               </p>
             )}
           </div>
@@ -172,15 +172,20 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
           {isDone ? (
             <div className="flex flex-col space-y-2">
               <div className="flex space-x-2">
-                {outputUrl && (
+                {outputUrl ? (
                   <button
                     onClick={onDownload}
                     className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-emerald-600/20 flex items-center justify-center space-x-2 transition cursor-pointer"
                   >
                     <Download className="w-4 h-4" />
-                    <span>ดาวน์โหลด (Download) {outputFilename}</span>
+                    <span>Download {outputFilename}</span>
                   </button>
-                )}
+                ) : !isError ? (
+                  <div className="flex-1 bg-emerald-600/20 border border-emerald-500/30 text-emerald-300 py-3 px-4 rounded-xl font-semibold text-xs flex items-center justify-center space-x-2">
+                    <Check className="w-4 h-4 text-emerald-400" />
+                    <span>Saved directly to disk: {outputFilename}</span>
+                  </div>
+                ) : null}
 
                 {isError && (
                   <button
@@ -188,18 +193,18 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
                     className="flex-1 bg-rose-600 hover:bg-rose-500 text-white py-3 rounded-xl font-semibold text-sm shadow-xl shadow-rose-600/20 flex items-center justify-center space-x-2 transition cursor-pointer"
                   >
                     <FileDown className="w-4 h-4" />
-                    <span>บันทึกไฟล์ Error Log (.txt)</span>
+                    <span>Save Error Log (.txt)</span>
                   </button>
                 )}
 
                 <button
                   onClick={onClose}
-                  title="ปิด / Close"
+                  title="Close"
                   aria-label="Close"
-                  className={`px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center cursor-pointer ${!outputUrl && !isError ? 'w-full py-3' : ''}`}
+                  className={`px-4 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition border border-white/10 flex items-center justify-center cursor-pointer ${!outputUrl && !isError ? 'px-6' : ''}`}
                 >
                   <X className="w-4 h-4 mr-1" />
-                  <span>ปิด (Close)</span>
+                  <span>Close</span>
                 </button>
               </div>
 
@@ -217,12 +222,12 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
 
               {/* Left text: Cancel */}
               <span className="relative z-10 text-white group-hover:text-amber-200 transition">
-                ยกเลิก (Cancel)
+                Cancel
               </span>
 
               {/* Right text & icon: Processing + spinning icon without background */}
               <div className="relative z-10 flex items-center space-x-2 text-white">
-                <span>กำลังทำงาน (Processing)...</span>
+                <span>Processing...</span>
                 <Loader2 className="w-4 h-4 animate-spin text-white" />
               </div>
             </button>

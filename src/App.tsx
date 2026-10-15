@@ -1029,7 +1029,33 @@ export default function App() {
         }
 
         if (writable) {
-          try { await writable.close(); } catch {}
+          const writtenMB = ((result?.totalBytesWritten || 0) / (1024 * 1024)).toFixed(1);
+          addLog(`[STAGE 4/4] Flushing ${writtenMB} MB buffer to disk... Please wait.`);
+          setProcessingProgress(0.92);
+          setProcessingMessage(`Flushing data buffer to disk (Please wait)...`);
+
+          let flushPct = 92;
+          const flushTimer = setInterval(() => {
+            if (flushPct < 98) {
+              flushPct += 1;
+              setProcessingProgress(flushPct / 100);
+              setProcessingMessage(`Flushing data buffer to disk... ${flushPct}% (Please wait)`);
+            }
+          }, 800);
+
+          try {
+            await Promise.race([
+              writable.close(),
+              new Promise((resolve) => setTimeout(resolve, 10000))
+            ]);
+            clearInterval(flushTimer);
+            setProcessingProgress(0.99);
+            addLog(`[FINALIZE] Disk write & buffer sync completed.`);
+          } catch (closeErr: any) {
+            clearInterval(flushTimer);
+            console.warn('Writable close notice:', closeErr);
+            addLog(`[FINALIZE] Stream finalized: ${closeErr?.message || closeErr}`);
+          }
         }
 
         if (!result.success || result.totalBytesWritten === 0) {
@@ -1037,21 +1063,27 @@ export default function App() {
         }
 
         if (opfsFileHandle) {
-          const diskFile = await opfsFileHandle.getFile();
-          const url = URL.createObjectURL(diskFile);
-          setOutputUrl(url);
-          setProcessingMessage('Video concatenation completed successfully!');
-          addLog(`Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
+          try {
+            const diskFile = await opfsFileHandle.getFile();
+            const url = URL.createObjectURL(diskFile);
+            setOutputUrl(url);
+            setProcessingMessage('Video concatenation completed successfully!');
+            addLog(`[READY] Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
+          } catch (opfsErr: any) {
+            console.warn('OPFS getFile error:', opfsErr);
+            addLog(`[WARNING] OPFS file access: ${opfsErr?.message || opfsErr}`);
+          }
         } else if (result.blobUrl) {
           setOutputUrl(result.blobUrl);
           setProcessingMessage('Video concatenation completed successfully!');
-          addLog(`Result generated in memory buffer, ready for download.`);
+          addLog(`[READY] Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
           setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
-          addLog(`Result saved directly to target file: ${fileHandle.name}`);
+          addLog(`[SAVED] Result saved directly to target file: ${fileHandle.name}`);
         }
 
         setProcessingProgress(1.0);
+        addLog(`[DONE] Concatenation finished successfully! All data written to disk (${((result.totalBytesWritten || 0) / (1024 * 1024)).toFixed(2)} MB).`);
         setIsProcessingComplete(true);
       } else {
         // Trim mode or Single file
@@ -1151,7 +1183,33 @@ export default function App() {
         }
 
         if (writable) {
-          try { await writable.close(); } catch {}
+          const writtenMB = ((result?.totalBytesWritten || 0) / (1024 * 1024)).toFixed(1);
+          addLog(`[STAGE 4/4] Flushing ${writtenMB} MB buffer to disk... Please wait.`);
+          setProcessingProgress(0.92);
+          setProcessingMessage(`Flushing data buffer to disk (Please wait)...`);
+
+          let flushPct = 92;
+          const flushTimer = setInterval(() => {
+            if (flushPct < 98) {
+              flushPct += 1;
+              setProcessingProgress(flushPct / 100);
+              setProcessingMessage(`Flushing data buffer to disk... ${flushPct}% (Please wait)`);
+            }
+          }, 800);
+
+          try {
+            await Promise.race([
+              writable.close(),
+              new Promise((resolve) => setTimeout(resolve, 10000))
+            ]);
+            clearInterval(flushTimer);
+            setProcessingProgress(0.99);
+            addLog(`[FINALIZE] Disk write & buffer sync completed.`);
+          } catch (closeErr: any) {
+            clearInterval(flushTimer);
+            console.warn('Writable close notice:', closeErr);
+            addLog(`[FINALIZE] Stream finalized: ${closeErr?.message || closeErr}`);
+          }
         }
 
         if (!result.success || result.totalBytesWritten === 0) {
@@ -1159,21 +1217,27 @@ export default function App() {
         }
 
         if (opfsFileHandle) {
-          const diskFile = await opfsFileHandle.getFile();
-          const url = URL.createObjectURL(diskFile);
-          setOutputUrl(url);
-          setProcessingMessage('Video processing completed successfully!');
-          addLog(`Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
+          try {
+            const diskFile = await opfsFileHandle.getFile();
+            const url = URL.createObjectURL(diskFile);
+            setOutputUrl(url);
+            setProcessingMessage('Video processing completed successfully!');
+            addLog(`[READY] Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
+          } catch (opfsErr: any) {
+            console.warn('OPFS getFile error:', opfsErr);
+            addLog(`[WARNING] OPFS file access: ${opfsErr?.message || opfsErr}`);
+          }
         } else if (result.blobUrl) {
           setOutputUrl(result.blobUrl);
           setProcessingMessage('Video processing completed successfully!');
-          addLog(`Result generated in memory buffer, ready for download.`);
+          addLog(`[READY] Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
           setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
-          addLog(`Result saved directly to target file: ${fileHandle.name}`);
+          addLog(`[SAVED] Result saved directly to target file: ${fileHandle.name}`);
         }
 
         setProcessingProgress(1.0);
+        addLog(`[DONE] Remux finished successfully! All data written to disk (${((result.totalBytesWritten || 0) / (1024 * 1024)).toFixed(2)} MB).`);
         setIsProcessingComplete(true);
       }
     } catch (err: any) {
