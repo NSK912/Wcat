@@ -1030,31 +1030,28 @@ export default function App() {
 
         if (writable) {
           const writtenMB = ((result?.totalBytesWritten || 0) / (1024 * 1024)).toFixed(1);
-          addLog(`[STAGE 4/4] Flushing ${writtenMB} MB buffer to disk... Please wait.`);
-          setProcessingProgress(0.92);
-          setProcessingMessage(`Flushing data buffer to disk (Please wait)...`);
+          addLog(`[STAGE 4/4] Finalizing file and synchronizing ${writtenMB} MB buffer to disk...`);
+          addLog(`[NOTICE] For large files, flushing and committing to disk may take some time. Please keep this tab open.`);
+          setProcessingProgress(0.95);
+          setProcessingMessage(`Flushing data buffer to disk (${writtenMB} MB)... Please wait`);
 
-          let flushPct = 92;
+          let elapsedSec = 0;
           const flushTimer = setInterval(() => {
-            if (flushPct < 98) {
-              flushPct += 1;
-              setProcessingProgress(flushPct / 100);
-              setProcessingMessage(`Flushing data buffer to disk... ${flushPct}% (Please wait)`);
-            }
-          }, 800);
+            elapsedSec += 1;
+            setProcessingMessage(`Writing and committing ${writtenMB} MB to disk (${elapsedSec}s elapsed)... Please wait`);
+          }, 1000);
 
           try {
-            await Promise.race([
-              writable.close(),
-              new Promise((resolve) => setTimeout(resolve, 10000))
-            ]);
+            // Truly wait for disk synchronization and stream closure without arbitrary timeout
+            await writable.close();
             clearInterval(flushTimer);
             setProcessingProgress(0.99);
-            addLog(`[FINALIZE] Disk write & buffer sync completed.`);
+            addLog(`[FINALIZE] Disk write & buffer sync fully completed (${elapsedSec}s elapsed).`);
           } catch (closeErr: any) {
             clearInterval(flushTimer);
-            console.warn('Writable close notice:', closeErr);
-            addLog(`[FINALIZE] Stream finalized: ${closeErr?.message || closeErr}`);
+            console.warn('Writable close error:', closeErr);
+            addLog(`[ERROR] Stream close error: ${closeErr?.message || closeErr}`);
+            throw closeErr;
           }
         }
 
@@ -1078,6 +1075,12 @@ export default function App() {
           setProcessingMessage('Video concatenation completed successfully!');
           addLog(`[READY] Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
+          try {
+            const finalDiskFile = await fileHandle.getFile();
+            addLog(`[CONFIRMED] File finalized on disk: ${fileHandle.name} (${(finalDiskFile.size / (1024 * 1024)).toFixed(2)} MB)`);
+          } catch (fhErr) {
+            console.warn('fileHandle getFile verify:', fhErr);
+          }
           setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
           addLog(`[SAVED] Result saved directly to target file: ${fileHandle.name}`);
         }
@@ -1184,31 +1187,28 @@ export default function App() {
 
         if (writable) {
           const writtenMB = ((result?.totalBytesWritten || 0) / (1024 * 1024)).toFixed(1);
-          addLog(`[STAGE 4/4] Flushing ${writtenMB} MB buffer to disk... Please wait.`);
-          setProcessingProgress(0.92);
-          setProcessingMessage(`Flushing data buffer to disk (Please wait)...`);
+          addLog(`[STAGE 4/4] Finalizing file and synchronizing ${writtenMB} MB buffer to disk...`);
+          addLog(`[NOTICE] For large files, flushing and committing to disk may take some time. Please keep this tab open.`);
+          setProcessingProgress(0.95);
+          setProcessingMessage(`Flushing data buffer to disk (${writtenMB} MB)... Please wait`);
 
-          let flushPct = 92;
+          let elapsedSec = 0;
           const flushTimer = setInterval(() => {
-            if (flushPct < 98) {
-              flushPct += 1;
-              setProcessingProgress(flushPct / 100);
-              setProcessingMessage(`Flushing data buffer to disk... ${flushPct}% (Please wait)`);
-            }
-          }, 800);
+            elapsedSec += 1;
+            setProcessingMessage(`Writing and committing ${writtenMB} MB to disk (${elapsedSec}s elapsed)... Please wait`);
+          }, 1000);
 
           try {
-            await Promise.race([
-              writable.close(),
-              new Promise((resolve) => setTimeout(resolve, 10000))
-            ]);
+            // Truly wait for disk synchronization and stream closure without arbitrary timeout
+            await writable.close();
             clearInterval(flushTimer);
             setProcessingProgress(0.99);
-            addLog(`[FINALIZE] Disk write & buffer sync completed.`);
+            addLog(`[FINALIZE] Disk write & buffer sync fully completed (${elapsedSec}s elapsed).`);
           } catch (closeErr: any) {
             clearInterval(flushTimer);
-            console.warn('Writable close notice:', closeErr);
-            addLog(`[FINALIZE] Stream finalized: ${closeErr?.message || closeErr}`);
+            console.warn('Writable close error:', closeErr);
+            addLog(`[ERROR] Stream close error: ${closeErr?.message || closeErr}`);
+            throw closeErr;
           }
         }
 
@@ -1232,12 +1232,18 @@ export default function App() {
           setProcessingMessage('Video processing completed successfully!');
           addLog(`[READY] Result generated in memory buffer, ready for download.`);
         } else if (fileHandle) {
+          try {
+            const finalDiskFile = await fileHandle.getFile();
+            addLog(`[CONFIRMED] File finalized on disk: ${fileHandle.name} (${(finalDiskFile.size / (1024 * 1024)).toFixed(2)} MB)`);
+          } catch (fhErr) {
+            console.warn('fileHandle getFile verify:', fhErr);
+          }
           setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
           addLog(`[SAVED] Result saved directly to target file: ${fileHandle.name}`);
         }
 
         setProcessingProgress(1.0);
-        addLog(`[DONE] Remux finished successfully! All data written to disk (${((result.totalBytesWritten || 0) / (1024 * 1024)).toFixed(2)} MB).`);
+        addLog(`[DONE] ${exportMode === 'remux' ? 'Remux' : 'Processing'} finished successfully! All data written to disk (${((result.totalBytesWritten || 0) / (1024 * 1024)).toFixed(2)} MB).`);
         setIsProcessingComplete(true);
       }
     } catch (err: any) {

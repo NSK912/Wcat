@@ -103,11 +103,5 @@ export async function validateMediaFile(file: File): Promise<FileValidationResul
     }
   })();
 
-  const timeoutPromise = new Promise<FileValidationResult>((resolve) => {
-    setTimeout(() => {
-      resolve({ valid: false, error: 'File verification timeout (file is corrupted or unresponsive).' });
-    }, 3500);
-  });
-
-  return Promise.race([mediabunnyPromise, timeoutPromise]);
+  return await mediabunnyPromise;
 }
