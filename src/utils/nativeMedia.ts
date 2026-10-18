@@ -1757,6 +1757,7 @@ export class NativeCanvasSink {
   private streamStartTime: number = 0;
   private lastDecodedKeyIdx: number = -1;
   private lastDecodedSampleIdx: number = -1;
+  private inFlightChunks: number = 0;
   private activeOperationId: number = 0;
   private lockPromise: Promise<any> = Promise.resolve();
   public duration: number = 0;
@@ -1874,8 +1875,10 @@ export class NativeCanvasSink {
       this.decodedFramesQueue = [];
       this.lastDecodedKeyIdx = -1;
       this.lastDecodedSampleIdx = -1;
+      this.inFlightChunks = 0;
       this.decoder = new VideoDecoder({
         output: (frame: VideoFrame) => {
+          this.inFlightChunks = Math.max(0, this.inFlightChunks - 1);
           const ts = frame.timestamp / 1e6;
           const dur = (frame.duration || 33333) / 1e6;
 
@@ -1917,8 +1920,8 @@ export class NativeCanvasSink {
             return;
           }
 
-          // Cap queue to 2 frames max so GPU surface pool never blocks
-          while (this.decodedFramesQueue.length >= 2) {
+          // Cap queue to 8 frames max so GPU surface pool never blocks while preserving burst GOP outputs
+          while (this.decodedFramesQueue.length >= 8) {
             const oldest = this.decodedFramesQueue.shift();
             if (oldest) {
               try {
@@ -1935,6 +1938,7 @@ export class NativeCanvasSink {
           }
         },
         error: (err: any) => {
+          this.inFlightChunks = 0;
           console.warn('NativeCanvasSink VideoDecoder error:', err);
           if (this.onFrameDecoded) {
             const cb = this.onFrameDecoded;
@@ -2187,6 +2191,7 @@ export class NativeCanvasSink {
     if (this.decoder.state === 'configured') {
       try {
         this.decoder.reset();
+        this.inFlightChunks = 0;
         this.decoder.configure(this.decoderConfig!);
       } catch {
         this.setupDecoder();
@@ -2208,12 +2213,13 @@ export class NativeCanvasSink {
         }
       }
 
-      // Feed chunks into decoder (higher queue during pre-roll so B-frames & GOPs decode at 1000+ FPS)
+      // Feed chunks into decoder with strict in-flight tracking so macrotask queue is never starved
       const isPreRoll = sampleIdx < this.samples.length && this.samples[sampleIdx].timestamp < startTime - 0.05;
-      const maxQueue = isPreRoll ? 24 : 8;
+      const maxQueue = isPreRoll ? 12 : 6;
       while (
         sampleIdx < this.samples.length &&
-        this.decodedFramesQueue.length < 2 &&
+        this.decodedFramesQueue.length < 4 &&
+        (this.decodedFramesQueue.length + this.inFlightChunks) < maxQueue &&
         (this.decoder.decodeQueueSize || 0) < maxQueue
       ) {
         const sample = this.samples[sampleIdx++];
@@ -2221,6 +2227,7 @@ export class NativeCanvasSink {
         if (this.activeOperationId !== opId) return;
         if (data.length > 0 && this.decoder && this.decoder.state === 'configured') {
           try {
+            this.inFlightChunks++;
             this.decoder.decode(new EncodedVideoChunk({
               type: sample.isKeyframe ? 'key' : 'delta',
               timestamp: Math.round(sample.timestamp * 1e6),
@@ -2228,6 +2235,7 @@ export class NativeCanvasSink {
               data,
             }));
           } catch {
+            this.inFlightChunks = Math.max(0, this.inFlightChunks - 1);
             break;
           }
         }
@@ -2246,20 +2254,24 @@ export class NativeCanvasSink {
             ]);
           }
         } catch {}
+        this.inFlightChunks = 0;
       }
 
       if (this.activeOperationId !== opId) return;
 
-      // Only wait for output callback when decoder queue is full or draining at end of stream
+      // Always yield to the macrotask queue when waiting for decoded frames so VideoDecoder output callback can fire
       if (
         this.decodedFramesQueue.length === 0 &&
-        ((this.decoder && (this.decoder.decodeQueueSize || 0) >= maxQueue) ||
-          (sampleIdx >= this.samples.length && this.decoder && (this.decoder.decodeQueueSize || 0) > 0))
+        (this.inFlightChunks > 0 || (this.decoder && (this.decoder.decodeQueueSize || 0) > 0))
       ) {
         await new Promise<void>((resolve) => {
           this.onFrameDecoded = resolve;
-          setTimeout(resolve, 15);
+          setTimeout(resolve, 12);
         });
+        if (this.decodedFramesQueue.length === 0) {
+          // Allow feeding additional packets if decoder is holding B-frame reorder buffer
+          this.inFlightChunks = this.decoder?.decodeQueueSize || 0;
+        }
       }
 
       if (this.activeOperationId !== opId) return;
@@ -3100,22 +3112,43 @@ export class Quality {
   }
 }
 
+function resolveWebCodecsVideoCodecString(codec: string, width: number = 1920, height: number = 1080): string {
+  const pixels = width * height;
+  if (codec === 'avc') {
+    if (pixels > 2097152) return 'avc1.640034'; // Level 5.2 (4K/8K)
+    if (pixels > 921600) return 'avc1.64002a'; // Level 4.2 (1080p)
+    return 'avc1.640028'; // Level 4.0
+  }
+  if (codec === 'hevc') {
+    if (pixels > 2228224) return 'hvc1.1.6.L153.B0'; // Level 5.1 (4K)
+    return 'hvc1.1.6.L123.B0'; // Level 4.1 (1080p)
+  }
+  if (codec === 'vp9') {
+    if (pixels > 2228224) return 'vp09.00.51.08'; // Level 5.1 (4K)
+    return 'vp09.00.41.08'; // Level 4.1 (1080p)
+  }
+  if (codec === 'av1') {
+    if (pixels > 2228224) return 'av01.0.13M.08'; // Level 5.1 (4K)
+    if (pixels > 921600) return 'av01.0.08M.08'; // Level 4.0 (1080p)
+    return 'av01.0.04M.08'; // Level 3.0 (720p)
+  }
+  if (codec === 'vp8') return 'vp8';
+  return codec || 'avc1.64002a';
+}
+
 export async function canEncodeVideo(codec: string, config: any = {}): Promise<boolean> {
   if (typeof VideoEncoder === 'undefined' || typeof VideoEncoder.isConfigSupported !== 'function') {
     return false;
   }
   try {
-    let standardCodec = codec;
-    if (codec === 'avc') standardCodec = 'avc1.640028';
-    else if (codec === 'hevc') standardCodec = 'hvc1.1.6.L93.B0';
-    else if (codec === 'vp9') standardCodec = 'vp09.00.10.08';
-    else if (codec === 'vp8') standardCodec = 'vp8';
-    else if (codec === 'av1') standardCodec = 'av01.0.04M.08';
+    const w = config.width || 1280;
+    const h = config.height || 720;
+    const standardCodec = resolveWebCodecsVideoCodecString(codec, w, h);
 
     const testConfig: VideoEncoderConfig = {
       codec: standardCodec,
-      width: config.width || 1280,
-      height: config.height || 720,
+      width: w,
+      height: h,
       bitrate: config.bitrate || 2_500_000,
       framerate: config.framerate || 30,
       hardwareAcceleration: config.hardwareAcceleration || 'prefer-hardware',
@@ -3259,12 +3292,8 @@ export class VideoSampleSource {
     const safeW = Math.max(16, width - (width % 2));
     const safeH = Math.max(16, height - (height % 2));
 
-    let standardCodec = this.options.codec || 'avc1.640028';
-    if (standardCodec === 'avc') standardCodec = 'avc1.640028';
-    else if (standardCodec === 'hevc') standardCodec = 'hvc1.1.6.L93.B0';
-    else if (standardCodec === 'vp9') standardCodec = 'vp09.00.10.08';
-    else if (standardCodec === 'vp8') standardCodec = 'vp8';
-    else if (standardCodec === 'av1') standardCodec = 'av01.0.04M.08';
+    const requestedCodec = this.options.codec || 'avc';
+    const standardCodec = resolveWebCodecsVideoCodecString(requestedCodec, safeW, safeH);
 
     this.encoder = new VideoEncoder({
       output: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => {
@@ -3291,32 +3320,45 @@ export class VideoSampleSource {
     });
 
     const bitrate = this.options.bitrate || 4_000_000;
-    const baseConfig: VideoEncoderConfig = {
-      codec: standardCodec,
-      width: safeW,
-      height: safeH,
-      bitrate,
-      framerate: this.options.framerate || 30,
-      hardwareAcceleration: this.options.hardwareAcceleration || 'prefer-hardware',
-      latencyMode: this.options.latencyMode || 'quality',
-      ...(standardCodec.startsWith('avc1') ? { avc: { format: 'avc' } } : {}),
-    };
+    const candidateCodecs = [
+      standardCodec,
+      resolveWebCodecsVideoCodecString('vp9', safeW, safeH),
+      resolveWebCodecsVideoCodecString('avc', safeW, safeH),
+      'vp8',
+    ];
+    const hwModes: HardwareAcceleration[] = [
+      this.options.hardwareAcceleration || 'prefer-hardware',
+      'no-preference',
+      'prefer-software',
+    ];
 
-    try {
-      this.encoder.configure(baseConfig);
-      this.isConfigured = true;
-    } catch {
-      try {
-        this.encoder.configure({ ...baseConfig, hardwareAcceleration: 'no-preference' });
-        this.isConfigured = true;
-      } catch (e2) {
-        console.warn('VideoEncoder fallback configure failed:', e2);
+    for (const cStr of candidateCodecs) {
+      if (this.isConfigured) break;
+      for (const hw of hwModes) {
+        try {
+          const cfg: VideoEncoderConfig = {
+            codec: cStr,
+            width: safeW,
+            height: safeH,
+            bitrate,
+            framerate: this.options.framerate || 30,
+            hardwareAcceleration: hw,
+            latencyMode: this.options.latencyMode || 'quality',
+            ...(cStr.startsWith('avc1') ? { avc: { format: 'avc' } } : {}),
+          };
+          this.encoder.configure(cfg);
+          if (this.encoder.state === 'configured') {
+            this.isConfigured = true;
+            break;
+          }
+        } catch {}
       }
     }
   }
 
   public async add(sample: VideoSample): Promise<void> {
-    if (!this.encoder) {
+    if (!this.encoder || this.encoder.state === 'closed') {
+      this.isConfigured = false;
       const w = this.options.width || (sample.source as any).width || sample.displayWidth || 1280;
       const h = this.options.height || (sample.source as any).height || sample.displayHeight || 720;
       this.initEncoder(w, h);
@@ -3346,6 +3388,26 @@ export class VideoSampleSource {
         frame.close();
       }
     }
+
+    // Backpressure & macrotask yield so encoded chunks flush to muxer in real time
+    if (this.encoder && this.encoder.encodeQueueSize > 8) {
+      await new Promise<void>((resolve) => {
+        const enc = this.encoder;
+        if (!enc) return resolve();
+        const onDeq = () => {
+          enc.removeEventListener('dequeue', onDeq);
+          resolve();
+        };
+        enc.addEventListener('dequeue', onDeq, { once: true });
+        setTimeout(() => {
+          enc.removeEventListener('dequeue', onDeq);
+          resolve();
+        }, 12);
+      });
+    } else if (this.frameCounter % 4 === 0) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+    await this.pendingOutput;
   }
 
   public async flush(): Promise<void> {

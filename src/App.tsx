@@ -1090,9 +1090,15 @@ export default function App() {
           currentFileDuration = await getFileDuration(inputFile);
         }
 
-        const clipTrimStart = typeof singleTimelineClip?.trimStart === 'number' ? singleTimelineClip.trimStart : 0;
-        const clipDuration = typeof singleTimelineClip?.duration === 'number' && singleTimelineClip.duration > 0 ? singleTimelineClip.duration : 0;
-        const clipEndFromTimeline = clipDuration > 0 ? clipTrimStart + clipDuration : 0;
+        const clipTrimStart = typeof singleTimelineClip?.sourceStartTime === 'number' ? singleTimelineClip.sourceStartTime : 0;
+        const clipTimelineDur =
+          singleTimelineClip && typeof singleTimelineClip.endTime === 'number' && typeof singleTimelineClip.startTime === 'number' && singleTimelineClip.endTime > singleTimelineClip.startTime
+            ? singleTimelineClip.endTime - singleTimelineClip.startTime
+            : (typeof singleTimelineClip?.duration === 'number' && singleTimelineClip.duration > 0 ? singleTimelineClip.duration : 0);
+        const clipEndFromTimeline =
+          typeof singleTimelineClip?.sourceEndTime === 'number' && singleTimelineClip.sourceEndTime > clipTrimStart
+            ? singleTimelineClip.sourceEndTime
+            : (clipTimelineDur > 0 ? clipTrimStart + clipTimelineDur : 0);
 
         let currentStart = clipTrimStart > 0 ? clipTrimStart : (settings.startTime || 0);
         // Check if the user explicitly trimmed the video (either via timeline split/trim or settings)
@@ -1238,6 +1244,12 @@ export default function App() {
         setIsProcessingComplete(true);
       }
     } catch (err: any) {
+      if (err?.name === 'AbortError' || err?.message === 'AbortError' || signal?.aborted) {
+        addLog(`[CANCELLED] Export process cancelled by user.`);
+        setProcessingMessage('Export cancelled by user');
+        setIsProcessingComplete(true);
+        return;
+      }
       console.error('Video processing error:', err);
       addLog(`FATAL ERROR: ${err?.message || err}`);
       if (err?.stack) addLog(`Stack: ${err.stack}`);
