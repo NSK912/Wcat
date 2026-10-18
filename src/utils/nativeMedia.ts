@@ -147,7 +147,7 @@ export class StreamTarget {
 }
 
 export class BufferTarget {
-  private chunks: Uint8Array[] = [];
+  private chunks: { data: Uint8Array; position: number }[] = [];
   public buffer: ArrayBuffer | null = null;
   private listeners: Map<string, Set<Function>> = new Map();
   private currentLength = 0;
@@ -179,22 +179,30 @@ export class BufferTarget {
   }
 
   public async write(chunk: StreamTargetChunk | Uint8Array): Promise<void> {
-    const data = (chunk && 'data' in chunk) ? chunk.data : (chunk as Uint8Array);
-    this.chunks.push(data);
-    this.currentLength += data.byteLength;
+    const raw = (chunk && 'data' in chunk) ? chunk.data : (chunk as Uint8Array);
+    const pos = (chunk && 'position' in chunk && typeof chunk.position === 'number')
+      ? chunk.position
+      : this.currentLength;
+    const copy = new Uint8Array(raw.byteLength);
+    copy.set(raw);
+    this.chunks.push({ data: copy, position: pos });
+    const endPos = pos + copy.byteLength;
+    if (endPos > this.currentLength) {
+      this.currentLength = endPos;
+    }
     this.emit('write', {
-      position: (chunk && 'position' in chunk) ? chunk.position : this.currentLength - data.byteLength,
-      size: data.byteLength,
+      position: pos,
+      size: copy.byteLength,
       end: this.currentLength,
     });
   }
 
   public finalize(): ArrayBuffer {
     const out = new Uint8Array(this.currentLength);
-    let offset = 0;
     for (const c of this.chunks) {
-      out.set(c, offset);
-      offset += c.byteLength;
+      if (c.position >= 0 && c.position + c.data.byteLength <= out.byteLength) {
+        out.set(c.data, c.position);
+      }
     }
     this.buffer = out.buffer;
     return this.buffer;
@@ -545,6 +553,7 @@ export class MP4Demuxer {
     let stsc: { firstChunk: number; samplesPerChunk: number }[] = [];
     let stsz: number[] = [];
     let uniformSampleSize = 0;
+    let stszSampleCount = 0;
     let stco: number[] = [];
     let stss: Set<number> | null = null;
     let ctts: { count: number; offset: number }[] = [];
@@ -589,6 +598,12 @@ export class MP4Demuxer {
                     const compat = description[2].toString(16).padStart(2, '0');
                     const level = description[3].toString(16).padStart(2, '0');
                     codec = `avc1.${profile}${compat}${level}`;
+                  } else if (subType === 'av1C') {
+                    codec = 'av01.0.08M.08';
+                  } else if (subType === 'vpcC') {
+                    codec = 'vp09.00.41.08';
+                  } else if (subType === 'hvcC') {
+                    codec = 'hvc1.1.6.L123.B0';
                   }
                   break;
                 }
@@ -609,6 +624,12 @@ export class MP4Demuxer {
                         const compat = description[2].toString(16).padStart(2, '0');
                         const level = description[3].toString(16).padStart(2, '0');
                         codec = `avc1.${profile}${compat}${level}`;
+                      } else if (tag === 'av1C') {
+                        codec = 'av01.0.08M.08';
+                      } else if (tag === 'vpcC') {
+                        codec = 'vp09.00.41.08';
+                      } else if (tag === 'hvcC') {
+                        codec = 'hvc1.1.6.L123.B0';
                       }
                       break;
                     }
@@ -645,12 +666,31 @@ export class MP4Demuxer {
                   description = new Uint8Array(payload.subarray(subOffset + 8, subOffset + subSize));
                   codec = 'mp4a.40.2';
                   break;
+                } else if (subType === 'dOps') {
+                  description = new Uint8Array(payload.subarray(subOffset + 8, subOffset + subSize));
+                  codec = 'opus';
+                  break;
+                } else if (subType === 'dfLa') {
+                  const dfLaPayload = payload.subarray(subOffset + 8, subOffset + subSize);
+                  if (dfLaPayload.length > 4) {
+                    const fLaCDesc = new Uint8Array(4 + dfLaPayload.length - 4);
+                    fLaCDesc[0] = 0x66; fLaCDesc[1] = 0x4c; fLaCDesc[2] = 0x61; fLaCDesc[3] = 0x43;
+                    fLaCDesc.set(dfLaPayload.subarray(4), 4);
+                    description = fLaCDesc;
+                  }
+                  codec = 'flac';
+                  break;
                 }
                 subOffset += subSize;
               }
 
+              if (codec === 'Opus') codec = 'opus';
+              else if (codec === 'fLaC') codec = 'flac';
+              else if (codec === 'sowt') codec = 'pcm-s16';
+              else if (codec === 'mp4a') codec = 'mp4a.40.2';
+
               decoderConfig = {
-                codec: codec === 'mp4a' ? 'mp4a.40.2' : codec,
+                codec,
                 sampleRate,
                 numberOfChannels: channels,
                 description,
@@ -687,10 +727,10 @@ export class MP4Demuxer {
       } else if (bType === 'stsz') {
         if (payload.length >= 12) {
           uniformSampleSize = pView.getUint32(4);
-          const sampleCount = pView.getUint32(8);
+          stszSampleCount = pView.getUint32(8);
           if (uniformSampleSize === 0) {
             let p = 12;
-            for (let i = 0; i < sampleCount && p + 4 <= payload.length; i++) {
+            for (let i = 0; i < stszSampleCount && p + 4 <= payload.length; i++) {
               stsz.push(pView.getUint32(p));
               p += 4;
             }
@@ -744,7 +784,7 @@ export class MP4Demuxer {
     }
 
     const samples: MediaSample[] = [];
-    const totalSamples = uniformSampleSize > 0 ? (stsc.length > 0 ? 1000 : 0) : stsz.length;
+    const totalSamples = uniformSampleSize > 0 ? stszSampleCount : stsz.length;
 
     let dtsList: number[] = [];
     let currentDts = 0;
@@ -2385,12 +2425,31 @@ export interface WebMMuxerOptions {
   onChunk: (chunk: StreamTargetChunk) => Promise<void> | void;
 }
 
+function concatByteArrays(arrays: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const a of arrays) total += a.byteLength;
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const a of arrays) {
+    out.set(a, pos);
+    pos += a.byteLength;
+  }
+  return out;
+}
+
+function encodeFloat64(val: number): Uint8Array {
+  const buf = new ArrayBuffer(8);
+  new DataView(buf).setFloat64(0, val, false);
+  return new Uint8Array(buf);
+}
+
 export class WebMMuxer {
   private options: WebMMuxerOptions;
   private currentClusterTimecode: number = -1;
   private currentClusterBlocks: Uint8Array[] = [];
   private totalBytes = 0;
-  private durationSec = 0;
+  private maxEndMs = 0;
+  private durationPatchOffset = -1;
   private isHeaderSent = false;
 
   constructor(options: WebMMuxerOptions) {
@@ -2417,8 +2476,20 @@ export class WebMMuxer {
     const timecodeScale = encodeElement('2ad7b1', encodeUint(1000000));
     const muxingApp = encodeElement('4d80', encodeString('VideoCutterPro'));
     const writingApp = encodeElement('5741', encodeString('VideoCutterPro'));
-    const infoPayload = new Uint8Array([...timecodeScale, ...muxingApp, ...writingApp]);
+    const durationEl = encodeElement('4489', encodeFloat64(0));
+    const infoPayload = new Uint8Array([...timecodeScale, ...muxingApp, ...writingApp, ...durationEl]);
     const infoEl = encodeElement('1549a966', infoPayload);
+
+    const infoHeaderLen = infoEl.length - infoPayload.length;
+    this.durationPatchOffset =
+      ebmlHdr.length +
+      segId.length +
+      segSize.length +
+      infoHeaderLen +
+      timecodeScale.length +
+      muxingApp.length +
+      writingApp.length +
+      3; // 0x44, 0x89, 0x88
 
     const trackEntries: number[] = [];
 
@@ -2464,7 +2535,19 @@ export class WebMMuxer {
       const ch = this.options.channels || 2;
 
       let aPrivBytes: Uint8Array | undefined = this.options.audioDescription;
-      if (!aPrivBytes || aPrivBytes.byteLength === 0) {
+      if (aCodecIdStr === 'A_FLAC' && aPrivBytes && aPrivBytes.byteLength > 0) {
+        const hasMagic = aPrivBytes.length >= 4 && aPrivBytes[0] === 0x66 && aPrivBytes[1] === 0x4c && aPrivBytes[2] === 0x61 && aPrivBytes[3] === 0x43;
+        if (!hasMagic) {
+          const flacPriv = new Uint8Array(8 + aPrivBytes.length);
+          flacPriv.set([0x66, 0x4c, 0x61, 0x43], 0); // 'fLaC'
+          flacPriv[4] = 0x80; // Last metadata block + STREAMINFO (0)
+          flacPriv[5] = (aPrivBytes.length >> 16) & 0xff;
+          flacPriv[6] = (aPrivBytes.length >> 8) & 0xff;
+          flacPriv[7] = aPrivBytes.length & 0xff;
+          flacPriv.set(aPrivBytes, 8);
+          aPrivBytes = flacPriv;
+        }
+      } else if (!aPrivBytes || aPrivBytes.byteLength === 0) {
         if (aCodecIdStr === 'A_OPUS') {
           const opusHead = new Uint8Array(19);
           opusHead.set(encodeString('OpusHead'), 0);
@@ -2487,7 +2570,10 @@ export class WebMMuxer {
 
       const sRate = encodeElement('b5', encodeFloat(sr));
       const chans = encodeElement('9f', encodeUint(ch));
-      const audioSettings = encodeElement('e1', new Uint8Array([...sRate, ...chans]));
+      const bitDepthEl = (aCodecIdStr === 'A_PCM/INT/LIT' || aCodecIdStr === 'A_FLAC')
+        ? encodeElement('6264', encodeUint(16))
+        : new Uint8Array(0);
+      const audioSettings = encodeElement('e1', new Uint8Array([...sRate, ...chans, ...bitDepthEl]));
 
       const aEntry = encodeElement('ae', new Uint8Array([...trackNum, ...trackUid, ...trackType, ...codecId, ...aCodecPrivEl, ...audioSettings]));
       trackEntries.push(...aEntry);
@@ -2500,6 +2586,9 @@ export class WebMMuxer {
 
   public async addVideoChunk(chunk: EncodedVideoChunk, meta?: any): Promise<void> {
     if (meta?.decoderConfig) {
+      if (meta.decoderConfig.codec) {
+        this.options.videoCodec = meta.decoderConfig.codec;
+      }
       if (meta.decoderConfig.description) {
         const d = meta.decoderConfig.description;
         this.options.videoDescription = d instanceof Uint8Array
@@ -2512,7 +2601,8 @@ export class WebMMuxer {
     await this.ensureStarted();
 
     const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
-    this.durationSec = Math.max(this.durationSec, chunk.timestamp / 1e6);
+    const durMs = Math.max(1, Math.round((chunk.duration || 33333) / 1000));
+    this.maxEndMs = Math.max(this.maxEndMs, timeMs + durMs);
 
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
@@ -2521,16 +2611,25 @@ export class WebMMuxer {
   }
 
   public async addAudioChunk(chunk: EncodedAudioChunk, meta?: any): Promise<void> {
-    if (meta?.decoderConfig?.description) {
-      const d = meta.decoderConfig.description;
-      this.options.audioDescription = d instanceof Uint8Array
-        ? d
-        : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+    if (meta?.decoderConfig) {
+      if (meta.decoderConfig.codec) {
+        this.options.audioCodec = meta.decoderConfig.codec;
+      }
+      if (meta.decoderConfig.description) {
+        const d = meta.decoderConfig.description;
+        this.options.audioDescription = d instanceof Uint8Array
+          ? d
+          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+      }
+      if (meta.decoderConfig.sampleRate) this.options.sampleRate = meta.decoderConfig.sampleRate;
+      if (meta.decoderConfig.numberOfChannels) this.options.channels = meta.decoderConfig.numberOfChannels;
     }
+    if (!this.options.audioCodec) this.options.audioCodec = 'opus';
     await this.ensureStarted();
 
     const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
-    this.durationSec = Math.max(this.durationSec, chunk.timestamp / 1e6);
+    const durMs = Math.max(1, Math.round((chunk.duration || 21333) / 1000));
+    this.maxEndMs = Math.max(this.maxEndMs, timeMs + durMs);
 
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
@@ -2596,11 +2695,17 @@ export class WebMMuxer {
   public async finalize(): Promise<void> {
     await this.ensureStarted();
     await this.flushCluster();
+    if (this.durationPatchOffset >= 0 && this.maxEndMs > 0) {
+      await this.options.onChunk({
+        data: encodeFloat64(this.maxEndMs),
+        position: this.durationPatchOffset,
+      });
+    }
   }
 }
 
 // ==========================================
-// 8. FRAGMENTED MP4 (fMP4) MUXER
+// 8. NATIVE MP4 MUXER (STANDARD ISO BMFF)
 // ==========================================
 
 function createBox(type: string, payload: Uint8Array): Uint8Array {
@@ -2662,7 +2767,6 @@ function buildEsdsBox(audioSpecificConfig?: Uint8Array, bitrate: number = 128000
 }
 
 function buildDOpsBox(channels: number = 2, sampleRate: number = 48000, description?: Uint8Array): Uint8Array {
-  // If WebCodecs provided an OpusHead (starts with 'OpusHead'), convert or extract preSkip
   let preSkip = 312;
   if (description && description.length >= 19) {
     const magic = String.fromCharCode(...description.subarray(0, 8));
@@ -2671,7 +2775,6 @@ function buildDOpsBox(channels: number = 2, sampleRate: number = 48000, descript
       preSkip = dv.getUint16(10, true);
     }
   } else if (description && description.length >= 11 && description[0] === 0) {
-    // Already a dOps payload
     return createBox('dOps', description);
   }
   const payload = new Uint8Array(11);
@@ -2683,6 +2786,83 @@ function buildDOpsBox(channels: number = 2, sampleRate: number = 48000, descript
   view.setInt16(8, 0, false); // OutputGain
   payload[10] = 0; // ChannelMappingFamily = 0
   return createBox('dOps', payload);
+}
+
+function convertAnnexBToAvccIfNeeded(data: Uint8Array): { data: Uint8Array; avcC?: Uint8Array } {
+  const isStart3 = data.length >= 4 && data[0] === 0 && data[1] === 0 && data[2] === 1;
+  const isStart4 = data.length >= 5 && data[0] === 0 && data[1] === 0 && data[2] === 0 && data[3] === 1;
+  if (!isStart3 && !isStart4) {
+    return { data };
+  }
+
+  const nalUnits: Uint8Array[] = [];
+  let sps: Uint8Array | null = null;
+  let pps: Uint8Array | null = null;
+
+  let i = 0;
+  let nalStart = -1;
+  while (i < data.length) {
+    let scLen = 0;
+    if (i + 3 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) {
+      scLen = 4;
+    } else if (i + 2 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+      scLen = 3;
+    }
+    if (scLen > 0) {
+      if (nalStart >= 0 && i > nalStart) {
+        const nalu = data.subarray(nalStart, i);
+        const nalType = nalu[0] & 0x1f;
+        if (nalType === 7 && !sps) sps = nalu;
+        else if (nalType === 8 && !pps) pps = nalu;
+        nalUnits.push(nalu);
+      }
+      nalStart = i + scLen;
+      i += scLen;
+    } else {
+      i++;
+    }
+  }
+  if (nalStart >= 0 && nalStart < data.length) {
+    const nalu = data.subarray(nalStart);
+    const nalType = nalu[0] & 0x1f;
+    if (nalType === 7 && !sps) sps = nalu;
+    else if (nalType === 8 && !pps) pps = nalu;
+    nalUnits.push(nalu);
+  }
+
+  if (nalUnits.length === 0) return { data };
+
+  let totalLen = 0;
+  for (const n of nalUnits) totalLen += 4 + n.length;
+  const out = new Uint8Array(totalLen);
+  const dv = new DataView(out.buffer);
+  let pos = 0;
+  for (const n of nalUnits) {
+    dv.setUint32(pos, n.length);
+    out.set(n, pos + 4);
+    pos += 4 + n.length;
+  }
+
+  let avcC: Uint8Array | undefined;
+  if (sps && sps.length >= 4 && pps) {
+    avcC = new Uint8Array(11 + sps.length + pps.length);
+    const av = new DataView(avcC.buffer);
+    avcC[0] = 1;
+    avcC[1] = sps[1];
+    avcC[2] = sps[2];
+    avcC[3] = sps[3];
+    avcC[4] = 0xff;
+    avcC[5] = 0xe1;
+    av.setUint16(6, sps.length);
+    avcC.set(sps, 8);
+    let p = 8 + sps.length;
+    avcC[p++] = 1;
+    av.setUint16(p, pps.length);
+    p += 2;
+    avcC.set(pps, p);
+  }
+
+  return { data: out, avcC };
 }
 
 export interface MP4MuxerOptions {
@@ -2698,20 +2878,112 @@ export interface MP4MuxerOptions {
   onChunk: (chunk: StreamTargetChunk) => Promise<void> | void;
 }
 
-interface QueuedSample {
-  data: Uint8Array;
-  timestampMs: number;
-  durationMs: number;
+interface RecordedSample {
+  offset: number;
+  size: number;
+  timestampUs: number;
+  durationUs: number;
   isKey: boolean;
+}
+
+function buildSttsBoxFromDeltas(deltas: number[]): Uint8Array {
+  const runs: { count: number; delta: number }[] = [];
+  for (const d of deltas) {
+    const safeDelta = Math.max(1, d);
+    if (runs.length > 0 && runs[runs.length - 1].delta === safeDelta) {
+      runs[runs.length - 1].count++;
+    } else {
+      runs.push({ count: 1, delta: safeDelta });
+    }
+  }
+  const payload = new Uint8Array(8 + runs.length * 8);
+  const view = new DataView(payload.buffer);
+  view.setUint32(4, runs.length);
+  for (let i = 0; i < runs.length; i++) {
+    view.setUint32(8 + i * 8, runs[i].count);
+    view.setUint32(12 + i * 8, runs[i].delta);
+  }
+  return createBox('stts', payload);
+}
+
+function buildStssBoxFromSamples(samples: RecordedSample[]): Uint8Array {
+  const keyIndices: number[] = [];
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i].isKey) keyIndices.push(i + 1);
+  }
+  if (keyIndices.length === 0 && samples.length > 0) {
+    keyIndices.push(1);
+  }
+  const payload = new Uint8Array(8 + keyIndices.length * 4);
+  const view = new DataView(payload.buffer);
+  view.setUint32(4, keyIndices.length);
+  for (let i = 0; i < keyIndices.length; i++) {
+    view.setUint32(8 + i * 4, keyIndices[i]);
+  }
+  return createBox('stss', payload);
+}
+
+function buildStscBoxEntries(entries: { firstChunk: number; samplesPerChunk: number; sampleDescIndex: number }[]): Uint8Array {
+  const payload = new Uint8Array(8 + entries.length * 12);
+  const view = new DataView(payload.buffer);
+  view.setUint32(4, entries.length);
+  for (let i = 0; i < entries.length; i++) {
+    view.setUint32(8 + i * 12, entries[i].firstChunk);
+    view.setUint32(12 + i * 12, entries[i].samplesPerChunk);
+    view.setUint32(16 + i * 12, entries[i].sampleDescIndex);
+  }
+  return createBox('stsc', payload);
+}
+
+function buildStszBoxFromSizes(sizes: number[], uniformSize: number = 0, totalCount?: number): Uint8Array {
+  if (uniformSize > 0) {
+    const payload = new Uint8Array(12);
+    const view = new DataView(payload.buffer);
+    view.setUint32(4, uniformSize);
+    view.setUint32(8, totalCount ?? sizes.length);
+    return createBox('stsz', payload);
+  }
+  const payload = new Uint8Array(12 + sizes.length * 4);
+  const view = new DataView(payload.buffer);
+  view.setUint32(4, 0);
+  view.setUint32(8, sizes.length);
+  for (let i = 0; i < sizes.length; i++) {
+    view.setUint32(12 + i * 4, sizes[i]);
+  }
+  return createBox('stsz', payload);
+}
+
+function buildStcoBoxFromOffsets(offsets: number[]): Uint8Array {
+  const needs64 = offsets.some((o) => o > 0xffffffff);
+  if (needs64) {
+    const payload = new Uint8Array(8 + offsets.length * 8);
+    const view = new DataView(payload.buffer);
+    view.setUint32(4, offsets.length);
+    for (let i = 0; i < offsets.length; i++) {
+      const hi = Math.floor(offsets[i] / 0x100000000);
+      const lo = offsets[i] >>> 0;
+      view.setUint32(8 + i * 8, hi);
+      view.setUint32(12 + i * 8, lo);
+    }
+    return createBox('co64', payload);
+  }
+  const payload = new Uint8Array(8 + offsets.length * 4);
+  const view = new DataView(payload.buffer);
+  view.setUint32(4, offsets.length);
+  for (let i = 0; i < offsets.length; i++) {
+    view.setUint32(8 + i * 4, offsets[i]);
+  }
+  return createBox('stco', payload);
 }
 
 export class MP4Muxer {
   private options: MP4MuxerOptions;
-  private sequenceNumber = 1;
   private totalBytes = 0;
-  private queuedVideo: QueuedSample[] = [];
-  private queuedAudio: QueuedSample[] = [];
-  private isHeaderSent = false;
+  private mdatHeaderOffset = 0;
+  private mdatDataBytes = 0;
+  private isMdatStarted = false;
+  private videoSamples: RecordedSample[] = [];
+  private audioSamples: RecordedSample[] = [];
   private hasAudioTrack = false;
 
   constructor(options: MP4MuxerOptions) {
@@ -2720,15 +2992,12 @@ export class MP4Muxer {
   }
 
   public async start(): Promise<void> {
-    // Lazy header emission in ensureStarted() once codec description (avcC/hvcC/av1C) and dimensions are known
+    await this.ensureMdatStarted();
   }
 
-  private async ensureStarted(): Promise<void> {
-    if (this.isHeaderSent) return;
-    this.isHeaderSent = true;
-    if (this.queuedAudio.length > 0) {
-      this.hasAudioTrack = true;
-    }
+  private async ensureMdatStarted(): Promise<void> {
+    if (this.isMdatStarted) return;
+    this.isMdatStarted = true;
 
     const ftypPayload = new Uint8Array([
       0x69, 0x73, 0x6f, 0x6d,
@@ -2739,47 +3008,193 @@ export class MP4Muxer {
       0x6d, 0x70, 0x34, 0x31,
     ]);
     const ftypBox = createBox('ftyp', ftypPayload);
+    await this.emitChunk(ftypBox);
+
+    this.mdatHeaderOffset = this.totalBytes;
+    const mdatHeader = new Uint8Array([0, 0, 0, 8, 0x6d, 0x64, 0x61, 0x74]);
+    await this.emitChunk(mdatHeader);
+  }
+
+  public async addVideoChunk(chunk: EncodedVideoChunk, meta?: any): Promise<void> {
+    if (meta?.decoderConfig) {
+      if (meta.decoderConfig.codec) {
+        this.options.videoCodec = meta.decoderConfig.codec;
+      }
+      if (meta.decoderConfig.description) {
+        const d = meta.decoderConfig.description;
+        this.options.description = d instanceof Uint8Array
+          ? d
+          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+      }
+      if (!this.options.width && meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
+      if (!this.options.height && meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
+    }
+
+    await this.ensureMdatStarted();
+
+    const rawData = new Uint8Array(chunk.byteLength);
+    chunk.copyTo(rawData);
+
+    const vc = (this.options.videoCodec || 'avc').toLowerCase();
+    let sampleData = rawData;
+    if (!vc.includes('av1') && !vc.includes('av01') && !vc.includes('vp9') && !vc.includes('vp09') && !vc.includes('hevc') && !vc.includes('hvc1')) {
+      const converted = convertAnnexBToAvccIfNeeded(rawData);
+      sampleData = converted.data;
+      if (converted.avcC && (!this.options.description || this.options.description.length === 0)) {
+        this.options.description = converted.avcC;
+      }
+    }
+
+    const offset = this.totalBytes;
+    await this.emitChunk(sampleData);
+    this.mdatDataBytes += sampleData.byteLength;
+
+    const timestampUs = Math.max(0, Math.round(chunk.timestamp));
+    const durationUs = Math.max(1000, Math.round(chunk.duration || 33333));
+
+    this.videoSamples.push({
+      offset,
+      size: sampleData.byteLength,
+      timestampUs,
+      durationUs,
+      isKey: chunk.type === 'key',
+    });
+  }
+
+  public async addAudioChunk(chunk: EncodedAudioChunk, meta?: any): Promise<void> {
+    if (meta?.decoderConfig) {
+      if (meta.decoderConfig.codec) {
+        this.options.audioCodec = meta.decoderConfig.codec;
+      }
+      if (meta.decoderConfig.description) {
+        const d = meta.decoderConfig.description;
+        this.options.audioDescription = d instanceof Uint8Array
+          ? d
+          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+      }
+      if (meta.decoderConfig.sampleRate) this.options.sampleRate = meta.decoderConfig.sampleRate;
+      if (meta.decoderConfig.numberOfChannels) this.options.channels = meta.decoderConfig.numberOfChannels;
+    }
+    this.hasAudioTrack = true;
+
+    await this.ensureMdatStarted();
+
+    const data = new Uint8Array(chunk.byteLength);
+    chunk.copyTo(data);
+
+    const offset = this.totalBytes;
+    await this.emitChunk(data);
+    this.mdatDataBytes += data.byteLength;
+
+    const timestampUs = Math.max(0, Math.round(chunk.timestamp));
+    const durationUs = Math.max(1000, Math.round(chunk.duration || 21333));
+
+    this.audioSamples.push({
+      offset,
+      size: data.byteLength,
+      timestampUs,
+      durationUs,
+      isKey: true,
+    });
+  }
+
+  private async emitChunk(data: Uint8Array): Promise<void> {
+    const pos = this.totalBytes;
+    this.totalBytes += data.byteLength;
+    await this.options.onChunk({
+      data,
+      position: pos,
+    });
+  }
+
+  public async finalize(): Promise<void> {
+    await this.ensureMdatStarted();
+
+    const mdatTotalSize = 8 + this.mdatDataBytes;
+    const mdatSizePatch = new Uint8Array(4);
+    new DataView(mdatSizePatch.buffer).setUint32(0, mdatTotalSize >>> 0);
+    await this.options.onChunk({
+      data: mdatSizePatch,
+      position: this.mdatHeaderOffset,
+    });
+
+    const videoTimescale = 90000;
+    const videoDeltas: number[] = [];
+    let videoTotalTicks = 0;
+    for (let i = 0; i < this.videoSamples.length; i++) {
+      const curr = this.videoSamples[i];
+      let deltaUs = curr.durationUs;
+      if (i + 1 < this.videoSamples.length && this.videoSamples[i + 1].timestampUs > curr.timestampUs) {
+        deltaUs = this.videoSamples[i + 1].timestampUs - curr.timestampUs;
+      }
+      const ticks = Math.max(1, Math.round((deltaUs * videoTimescale) / 1_000_000));
+      videoDeltas.push(ticks);
+      videoTotalTicks += ticks;
+    }
+    const videoDurationMs = Math.round((videoTotalTicks * 1000) / videoTimescale);
+
+    const hasAudio = this.hasAudioTrack && this.audioSamples.length > 0;
+    const sampleRate = this.options.sampleRate || 48000;
+    const channels = this.options.channels || 2;
+    const ac = (this.options.audioCodec || 'aac').toLowerCase();
+    const isPcm = ac.includes('pcm') || ac.includes('sowt');
+
+    let audioTotalTicks = 0;
+    const audioDeltas: number[] = [];
+    let totalPcmFrames = 0;
+    const pcmBytesPerFrame = channels * 2;
+    const pcmStscEntries: { firstChunk: number; samplesPerChunk: number; sampleDescIndex: number }[] = [];
+
+    if (hasAudio) {
+      if (isPcm) {
+        for (let i = 0; i < this.audioSamples.length; i++) {
+          const framesInChunk = Math.max(1, Math.floor(this.audioSamples[i].size / pcmBytesPerFrame));
+          totalPcmFrames += framesInChunk;
+          if (pcmStscEntries.length === 0 || pcmStscEntries[pcmStscEntries.length - 1].samplesPerChunk !== framesInChunk) {
+            pcmStscEntries.push({
+              firstChunk: i + 1,
+              samplesPerChunk: framesInChunk,
+              sampleDescIndex: 1,
+            });
+          }
+        }
+        audioTotalTicks = totalPcmFrames;
+      } else {
+        for (let i = 0; i < this.audioSamples.length; i++) {
+          const curr = this.audioSamples[i];
+          let deltaUs = curr.durationUs;
+          if (i + 1 < this.audioSamples.length && this.audioSamples[i + 1].timestampUs > curr.timestampUs) {
+            deltaUs = this.audioSamples[i + 1].timestampUs - curr.timestampUs;
+          }
+          const ticks = Math.max(1, Math.round((deltaUs * sampleRate) / 1_000_000));
+          audioDeltas.push(ticks);
+          audioTotalTicks += ticks;
+        }
+      }
+    }
+    const audioDurationMs = hasAudio ? Math.round((audioTotalTicks * 1000) / sampleRate) : 0;
+    const movieDurationMs = Math.max(1, videoDurationMs, audioDurationMs);
 
     const mvhdPayload = new Uint8Array(100);
     const mvhdView = new DataView(mvhdPayload.buffer);
     mvhdView.setUint32(12, 1000);
-    mvhdView.setUint32(16, 0);
+    mvhdView.setUint32(16, movieDurationMs);
     mvhdView.setUint32(20, 0x00010000);
     mvhdView.setUint16(24, 0x0100);
     mvhdView.setUint32(36, 0x00010000);
     mvhdView.setUint32(52, 0x00010000);
     mvhdView.setUint32(68, 0x40000000);
-    mvhdView.setUint32(96, this.hasAudioTrack ? 3 : 2);
+    mvhdView.setUint32(96, hasAudio ? 3 : 2);
     const mvhdBox = createBox('mvhd', mvhdPayload);
-
-    const trex1Payload = new Uint8Array(24);
-    const trex1View = new DataView(trex1Payload.buffer);
-    trex1View.setUint32(4, 1);
-    trex1View.setUint32(8, 1);
-    const trex1Box = createBox('trex', trex1Payload);
-
-    let mvexPayload: Uint8Array;
-    if (this.hasAudioTrack) {
-      const trex2Payload = new Uint8Array(24);
-      const trex2View = new DataView(trex2Payload.buffer);
-      trex2View.setUint32(4, 2);
-      trex2View.setUint32(8, 1);
-      const trex2Box = createBox('trex', trex2Payload);
-      mvexPayload = new Uint8Array(trex1Box.length + trex2Box.length);
-      mvexPayload.set(trex1Box, 0);
-      mvexPayload.set(trex2Box, trex1Box.length);
-    } else {
-      mvexPayload = trex1Box;
-    }
-    const mvexBox = createBox('mvex', mvexPayload);
 
     const w = this.options.width || 1280;
     const h = this.options.height || 720;
 
     const tkhdPayload = new Uint8Array(84);
     const tkhdView = new DataView(tkhdPayload.buffer);
-    tkhdView.setUint32(0, 0x00000007);
+    tkhdView.setUint32(0, 0x00000003);
     tkhdView.setUint32(12, 1);
+    tkhdView.setUint32(20, videoDurationMs || movieDurationMs);
     tkhdView.setUint32(36, 0x00010000);
     tkhdView.setUint32(52, 0x00010000);
     tkhdView.setUint32(68, 0x40000000);
@@ -2789,7 +3204,9 @@ export class MP4Muxer {
 
     const mdhdPayload = new Uint8Array(24);
     const mdhdView = new DataView(mdhdPayload.buffer);
-    mdhdView.setUint32(12, 1000);
+    mdhdView.setUint32(12, videoTimescale);
+    mdhdView.setUint32(16, videoTotalTicks);
+    mdhdView.setUint16(20, 0x55c4);
     const mdhdBox = createBox('mdhd', mdhdPayload);
 
     const hdlrPayload = new Uint8Array([
@@ -2802,7 +3219,6 @@ export class MP4Muxer {
     const hdlrBox = createBox('hdlr', hdlrPayload);
 
     const vmhdBox = createBox('vmhd', new Uint8Array([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]));
-
     const urlBox = createBox('url ', new Uint8Array([0, 0, 0, 1]));
     const drefPayload = new Uint8Array(8 + urlBox.length);
     new DataView(drefPayload.buffer).setUint32(4, 1);
@@ -2849,90 +3265,88 @@ export class MP4Muxer {
       if (this.options.description && this.options.description.length > 0) {
         configBox = createBox('avcC', this.options.description);
       } else {
-        configBox = createBox('avcC', new Uint8Array([0x01, 0x64, 0x00, 0x1f, 0xff, 0xe1, 0x00, 0x00, 0x00]));
+        configBox = createBox('avcC', new Uint8Array([0x01, 0x64, 0x00, 0x28, 0xff, 0xe1, 0x00, 0x00, 0x00]));
       }
     }
 
-    const vSampleBox = createBox(sampleEntryTag, new Uint8Array([...vSamplePayload, ...configBox]));
+    const vSampleBox = createBox(sampleEntryTag, concatByteArrays([vSamplePayload, configBox]));
     const stsdPayload = new Uint8Array(8 + vSampleBox.length);
     new DataView(stsdPayload.buffer).setUint32(4, 1);
     stsdPayload.set(vSampleBox, 8);
     const stsdBox = createBox('stsd', stsdPayload);
 
-    const sttsBox = createBox('stts', new Uint8Array(8));
-    const stscBox = createBox('stsc', new Uint8Array(8));
-    const stszBox = createBox('stsz', new Uint8Array(12));
-    const stcoBox = createBox('stco', new Uint8Array(8));
+    const vSttsBox = buildSttsBoxFromDeltas(videoDeltas);
+    const vStssBox = buildStssBoxFromSamples(this.videoSamples);
+    const vStscBox = buildStscBoxEntries(
+      this.videoSamples.length > 0 ? [{ firstChunk: 1, samplesPerChunk: 1, sampleDescIndex: 1 }] : []
+    );
+    const vStszBox = buildStszBoxFromSizes(this.videoSamples.map((s) => s.size));
+    const vStcoBox = buildStcoBoxFromOffsets(this.videoSamples.map((s) => s.offset));
 
-    const stblPayload = new Uint8Array([...stsdBox, ...sttsBox, ...stscBox, ...stszBox, ...stcoBox]);
-    const stblBox = createBox('stbl', stblPayload);
-    const minfPayload = new Uint8Array([...vmhdBox, ...dinfBox, ...stblBox]);
-    const minfBox = createBox('minf', minfPayload);
-    const mdiaPayload = new Uint8Array([...mdhdBox, ...hdlrBox, ...minfBox]);
-    const mdiaBox = createBox('mdia', mdiaPayload);
+    const stblBox = createBox('stbl', concatByteArrays([stsdBox, vSttsBox, vStssBox, vStscBox, vStszBox, vStcoBox]));
+    const minfBox = createBox('minf', concatByteArrays([vmhdBox, dinfBox, stblBox]));
+    const mdiaBox = createBox('mdia', concatByteArrays([mdhdBox, hdlrBox, minfBox]));
+    const trak1Box = createBox('trak', concatByteArrays([tkhdBox, mdiaBox]));
 
-    const trak1Box = createBox('trak', new Uint8Array([...tkhdBox, ...mdiaBox]));
-
-    let trak2Box = new Uint8Array(0);
-    if (this.hasAudioTrack) {
+    let trak2Box: Uint8Array = new Uint8Array(0);
+    if (hasAudio) {
       const tkhd2Payload = new Uint8Array(84);
       const tkhd2View = new DataView(tkhd2Payload.buffer);
-      tkhd2View.setUint32(0, 0x00000007);
-      tkhd2View.setUint32(12, 2); // track_ID = 2
-      tkhd2View.setUint16(32, 0x0100); // volume = 1.0
+      tkhd2View.setUint32(0, 0x00000003);
+      tkhd2View.setUint32(12, 2);
+      tkhd2View.setUint32(20, audioDurationMs || movieDurationMs);
+      tkhd2View.setUint16(32, 0x0100);
       tkhd2View.setUint32(36, 0x00010000);
       tkhd2View.setUint32(52, 0x00010000);
       tkhd2View.setUint32(68, 0x40000000);
       const tkhd2Box = createBox('tkhd', tkhd2Payload);
 
       const mdhd2Payload = new Uint8Array(24);
-      new DataView(mdhd2Payload.buffer).setUint32(12, 1000); // timescale = 1000ms
+      const mdhd2View = new DataView(mdhd2Payload.buffer);
+      mdhd2View.setUint32(12, sampleRate);
+      mdhd2View.setUint32(16, audioTotalTicks);
+      mdhd2View.setUint16(20, 0x55c4);
       const mdhd2Box = createBox('mdhd', mdhd2Payload);
 
       const hdlr2Payload = new Uint8Array([
         0, 0, 0, 0,
         0, 0, 0, 0,
-        0x73, 0x6f, 0x75, 0x6e, // 'soun'
+        0x73, 0x6f, 0x75, 0x6e,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0x53, 0x6f, 0x75, 0x6e, 0x64, 0x48, 0x61, 0x6e, 0x64, 0x6c, 0x65, 0x72, 0
       ]);
       const hdlr2Box = createBox('hdlr', hdlr2Payload);
-
       const smhdBox = createBox('smhd', new Uint8Array(8));
 
-      const channels = this.options.channels || 2;
-      const sampleRate = this.options.sampleRate || 48000;
       const aSamplePayload = new Uint8Array(28);
       const aSampleView = new DataView(aSamplePayload.buffer);
-      aSampleView.setUint16(6, 1); // data_reference_index = 1
-      aSampleView.setUint16(16, channels); // channelcount at offset 16 (24 inside box)
-      aSampleView.setUint16(18, 16); // samplesize = 16 bits at offset 18 (26 inside box)
-      aSampleView.setUint32(24, sampleRate << 16); // samplerate 16.16 fixed-point at offset 24 (32 inside box)
+      aSampleView.setUint16(6, 1);
+      aSampleView.setUint16(16, channels);
+      aSampleView.setUint16(18, 16);
+      aSampleView.setUint32(24, (sampleRate & 0xffff) << 16);
 
-      const ac = (this.options.audioCodec || 'aac').toLowerCase();
       let audioBox: Uint8Array;
       if (ac.includes('opus')) {
         const dOpsBox = buildDOpsBox(channels, sampleRate, this.options.audioDescription);
-        audioBox = createBox('Opus', new Uint8Array([...aSamplePayload, ...dOpsBox]));
+        audioBox = createBox('Opus', concatByteArrays([aSamplePayload, dOpsBox]));
       } else if (ac.includes('flac')) {
-        let dfLaBox = new Uint8Array(0);
+        let dfLaBox: Uint8Array = new Uint8Array(0);
         if (this.options.audioDescription && this.options.audioDescription.length > 0) {
           const desc = this.options.audioDescription;
-          // Strip 'fLaC' 4-byte marker if present
           const metaBlock = (desc.length > 4 && desc[0] === 0x66 && desc[1] === 0x4c && desc[2] === 0x61 && desc[3] === 0x43)
             ? desc.subarray(4)
             : desc;
           const dfLaPayload = new Uint8Array(4 + metaBlock.length);
           dfLaPayload.set(metaBlock, 4);
-          dfLaPayload[4] |= 0x80; // Last-metadata-block flag
+          dfLaPayload[4] |= 0x80;
           dfLaBox = createBox('dfLa', dfLaPayload);
         }
-        audioBox = createBox('fLaC', new Uint8Array([...aSamplePayload, ...dfLaBox]));
-      } else if (ac.includes('pcm')) {
+        audioBox = createBox('fLaC', concatByteArrays([aSamplePayload, dfLaBox]));
+      } else if (isPcm) {
         audioBox = createBox('sowt', aSamplePayload);
       } else {
         const esdsBox = buildEsdsBox(this.options.audioDescription, this.options.audioBitrate || 128000);
-        audioBox = createBox('mp4a', new Uint8Array([...aSamplePayload, ...esdsBox]));
+        audioBox = createBox('mp4a', concatByteArrays([aSamplePayload, esdsBox]));
       }
 
       const stsd2Payload = new Uint8Array(8 + audioBox.length);
@@ -2940,183 +3354,33 @@ export class MP4Muxer {
       stsd2Payload.set(audioBox, 8);
       const stsd2Box = createBox('stsd', stsd2Payload);
 
-      const stbl2Box = createBox('stbl', new Uint8Array([...stsd2Box, ...sttsBox, ...stscBox, ...stszBox, ...stcoBox]));
-      const minf2Box = createBox('minf', new Uint8Array([...smhdBox, ...dinfBox, ...stbl2Box]));
-      const mdia2Box = createBox('mdia', new Uint8Array([...mdhd2Box, ...hdlr2Box, ...minf2Box]));
-      trak2Box = createBox('trak', new Uint8Array([...tkhd2Box, ...mdia2Box]));
-    }
-
-    const moovPayload = new Uint8Array([...mvhdBox, ...trak1Box, ...trak2Box, ...mvexBox]);
-    const moovBox = createBox('moov', moovPayload);
-
-    const initData = new Uint8Array(ftypBox.length + moovBox.length);
-    initData.set(ftypBox, 0);
-    initData.set(moovBox, ftypBox.length);
-
-    await this.emitChunk(initData);
-  }
-
-  public async addVideoChunk(chunk: EncodedVideoChunk, meta?: any): Promise<void> {
-    if (meta?.decoderConfig) {
-      if (meta.decoderConfig.description) {
-        const d = meta.decoderConfig.description;
-        this.options.description = d instanceof Uint8Array
-          ? d
-          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+      let aSttsBox: Uint8Array;
+      let aStscBox: Uint8Array;
+      let aStszBox: Uint8Array;
+      if (isPcm) {
+        const sttsPayload = new Uint8Array(16);
+        const sttsView = new DataView(sttsPayload.buffer);
+        sttsView.setUint32(4, 1);
+        sttsView.setUint32(8, totalPcmFrames);
+        sttsView.setUint32(12, 1);
+        aSttsBox = createBox('stts', sttsPayload);
+        aStscBox = buildStscBoxEntries(pcmStscEntries);
+        aStszBox = buildStszBoxFromSizes([], pcmBytesPerFrame, totalPcmFrames);
+      } else {
+        aSttsBox = buildSttsBoxFromDeltas(audioDeltas);
+        aStscBox = buildStscBoxEntries([{ firstChunk: 1, samplesPerChunk: 1, sampleDescIndex: 1 }]);
+        aStszBox = buildStszBoxFromSizes(this.audioSamples.map((s) => s.size));
       }
-      if (!this.options.width && meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
-      if (!this.options.height && meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
+      const aStcoBox = buildStcoBoxFromOffsets(this.audioSamples.map((s) => s.offset));
+
+      const stbl2Box = createBox('stbl', concatByteArrays([stsd2Box, aSttsBox, aStscBox, aStszBox, aStcoBox]));
+      const minf2Box = createBox('minf', concatByteArrays([smhdBox, dinfBox, stbl2Box]));
+      const mdia2Box = createBox('mdia', concatByteArrays([mdhd2Box, hdlr2Box, minf2Box]));
+      trak2Box = createBox('trak', concatByteArrays([tkhd2Box, mdia2Box]));
     }
 
-    const data = new Uint8Array(chunk.byteLength);
-    chunk.copyTo(data);
-
-    const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
-    const durMs = Math.max(1, Math.round((chunk.duration || 33333) / 1000));
-
-    this.queuedVideo.push({
-      data,
-      timestampMs: timeMs,
-      durationMs: durMs,
-      isKey: chunk.type === 'key',
-    });
-
-    if (this.queuedVideo.length >= 30) {
-      await this.flushFragment();
-    }
-  }
-
-  public async addAudioChunk(chunk: EncodedAudioChunk, meta?: any): Promise<void> {
-    if (meta?.decoderConfig) {
-      if (meta.decoderConfig.description) {
-        const d = meta.decoderConfig.description;
-        this.options.audioDescription = d instanceof Uint8Array
-          ? d
-          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
-      }
-      if (meta.decoderConfig.sampleRate) this.options.sampleRate = meta.decoderConfig.sampleRate;
-      if (meta.decoderConfig.numberOfChannels) this.options.channels = meta.decoderConfig.numberOfChannels;
-    }
-    this.hasAudioTrack = true;
-
-    const data = new Uint8Array(chunk.byteLength);
-    chunk.copyTo(data);
-
-    const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
-    const durMs = Math.max(1, Math.round((chunk.duration || 21333) / 1000));
-
-    this.queuedAudio.push({
-      data,
-      timestampMs: timeMs,
-      durationMs: durMs,
-      isKey: true,
-    });
-
-    if (this.queuedAudio.length >= 60 && this.isHeaderSent) {
-      await this.flushAudioFragment();
-    }
-  }
-
-  private async emitTrackFragment(trackId: number, samples: QueuedSample[]): Promise<void> {
-    if (samples.length === 0) return;
-
-    let mdatDataSize = 0;
-    for (const s of samples) mdatDataSize += s.data.length;
-
-    const mfhdPayload = new Uint8Array(8);
-    new DataView(mfhdPayload.buffer).setUint32(4, this.sequenceNumber++);
-    const mfhdBox = createBox('mfhd', mfhdPayload);
-
-    const tfhdPayload = new Uint8Array(8);
-    const tfhdView = new DataView(tfhdPayload.buffer);
-    tfhdView.setUint32(0, 0x020000);
-    tfhdView.setUint32(4, trackId);
-    const tfhdBox = createBox('tfhd', tfhdPayload);
-
-    const tfdtPayload = new Uint8Array(8);
-    new DataView(tfdtPayload.buffer).setUint32(4, Math.max(0, samples[0].timestampMs));
-    const tfdtBox = createBox('tfdt', tfdtPayload);
-
-    const trunHeaderSize = 16;
-    const trunEntrySize = 12;
-    const trunPayload = new Uint8Array(trunHeaderSize + samples.length * trunEntrySize);
-    const trunView = new DataView(trunPayload.buffer);
-
-    trunView.setUint32(0, 0x000701);
-    trunView.setUint32(4, samples.length);
-
-    let trunOffset = trunHeaderSize;
-    for (const s of samples) {
-      trunView.setUint32(trunOffset, s.durationMs);
-      trunView.setUint32(trunOffset + 4, s.data.length);
-      trunView.setUint32(trunOffset + 8, s.isKey ? 0x02000000 : 0x00010000);
-      trunOffset += trunEntrySize;
-    }
-
-    const trunBox = createBox('trun', trunPayload);
-    const trafPayload = new Uint8Array([...tfhdBox, ...tfdtBox, ...trunBox]);
-    const trafBox = createBox('traf', trafPayload);
-
-    const moofPayload = new Uint8Array([...mfhdBox, ...trafBox]);
-    const moofBox = createBox('moof', moofPayload);
-
-    const dataOffsetVal = moofBox.length + 8;
-    const trunInsideTraf = tfhdBox.length + tfdtBox.length;
-    const trunInsideMoof = 8 + mfhdBox.length + 8 + trunInsideTraf;
-    const trunDataOffsetPos = trunInsideMoof + 8 + 8;
-    new DataView(moofBox.buffer, moofBox.byteOffset + trunDataOffsetPos, 4).setInt32(0, dataOffsetVal);
-
-    const mdatPayload = new Uint8Array(mdatDataSize);
-    let p = 0;
-    for (const s of samples) {
-      mdatPayload.set(s.data, p);
-      p += s.data.length;
-    }
-    const mdatBox = createBox('mdat', mdatPayload);
-
-    const fragment = new Uint8Array(moofBox.length + mdatBox.length);
-    fragment.set(moofBox, 0);
-    fragment.set(mdatBox, moofBox.length);
-
-    await this.emitChunk(fragment);
-  }
-
-  private async flushAudioFragment(): Promise<void> {
-    if (this.queuedAudio.length === 0) return;
-    await this.ensureStarted();
-    const aSamples = this.queuedAudio;
-    this.queuedAudio = [];
-    await this.emitTrackFragment(2, aSamples);
-  }
-
-  private async flushFragment(): Promise<void> {
-    if (this.queuedVideo.length === 0 && this.queuedAudio.length === 0) return;
-    await this.ensureStarted();
-
-    if (this.queuedVideo.length > 0) {
-      const vSamples = this.queuedVideo;
-      this.queuedVideo = [];
-      await this.emitTrackFragment(1, vSamples);
-    }
-    if (this.queuedAudio.length > 0) {
-      const aSamples = this.queuedAudio;
-      this.queuedAudio = [];
-      await this.emitTrackFragment(2, aSamples);
-    }
-  }
-
-  private async emitChunk(data: Uint8Array): Promise<void> {
-    const pos = this.totalBytes;
-    this.totalBytes += data.byteLength;
-    await this.options.onChunk({
-      data,
-      position: pos,
-    });
-  }
-
-  public async finalize(): Promise<void> {
-    await this.ensureStarted();
-    await this.flushFragment();
+    const moovBox = createBox('moov', concatByteArrays([mvhdBox, trak1Box, trak2Box]));
+    await this.emitChunk(moovBox);
   }
 }
 
@@ -3175,7 +3439,7 @@ function resolveWebCodecsVideoCodecString(codec: string, width: number = 1920, h
   if (codec === 'avc') {
     if (pixels > 2097152) return 'avc1.640034'; // Level 5.2 (4K/8K)
     if (pixels > 921600) return 'avc1.64002a'; // Level 4.2 (1080p)
-    return 'avc1.640028'; // Level 4.0
+    return 'avc1.640028'; // Level 4.0 (720p)
   }
   if (codec === 'hevc') {
     if (pixels > 2228224) return 'hvc1.1.6.L153.B0'; // Level 5.1 (4K)
@@ -3183,53 +3447,100 @@ function resolveWebCodecsVideoCodecString(codec: string, width: number = 1920, h
   }
   if (codec === 'vp9') {
     if (pixels > 2228224) return 'vp09.00.51.08'; // Level 5.1 (4K)
-    return 'vp09.00.41.08'; // Level 4.1 (1080p)
+    if (pixels > 921600) return 'vp09.00.40.08'; // Level 4.0 (1080p)
+    return 'vp09.00.31.08'; // Level 3.1 (720p)
   }
   if (codec === 'av1') {
-    if (pixels > 2228224) return 'av01.0.13M.08'; // Level 5.1 (4K)
+    if (pixels > 2228224) return 'av01.0.12M.08'; // Level 5.0 (4K)
     if (pixels > 921600) return 'av01.0.08M.08'; // Level 4.0 (1080p)
-    return 'av01.0.04M.08'; // Level 3.0 (720p)
+    return 'av01.0.05M.08'; // Level 3.1 (720p)
   }
   if (codec === 'vp8') return 'vp8';
-  return codec || 'avc1.64002a';
+  return codec || 'avc1.640028';
+}
+
+function getWebCodecsVideoCandidatesForFamily(codec: string, width: number, height: number): { wc: string; family: string }[] {
+  const c = (codec || 'avc').toLowerCase();
+  if (c === 'av1' || c.startsWith('av01')) {
+    return [
+      { wc: resolveWebCodecsVideoCodecString('av1', width, height), family: 'av1' },
+      { wc: 'av01.0.08M.08', family: 'av1' },
+      { wc: 'av01.0.05M.08', family: 'av1' },
+      { wc: 'av01.0.04M.08', family: 'av1' },
+      { wc: 'av01.0.12M.08', family: 'av1' },
+    ];
+  }
+  if (c === 'vp9' || c.startsWith('vp09')) {
+    return [
+      { wc: resolveWebCodecsVideoCodecString('vp9', width, height), family: 'vp9' },
+      { wc: 'vp09.00.40.08', family: 'vp9' },
+      { wc: 'vp09.00.31.08', family: 'vp9' },
+      { wc: 'vp09.00.41.08', family: 'vp9' },
+      { wc: 'vp09.00.51.08', family: 'vp9' },
+    ];
+  }
+  if (c === 'hevc' || c.startsWith('hvc1') || c.startsWith('hev1')) {
+    return [
+      { wc: resolveWebCodecsVideoCodecString('hevc', width, height), family: 'hevc' },
+      { wc: 'hvc1.1.6.L123.B0', family: 'hevc' },
+      { wc: 'hvc1.1.6.L153.B0', family: 'hevc' },
+    ];
+  }
+  if (c === 'vp8') {
+    return [{ wc: 'vp8', family: 'vp8' }];
+  }
+  return [
+    { wc: resolveWebCodecsVideoCodecString('avc', width, height), family: 'avc' },
+    { wc: 'avc1.640028', family: 'avc' },
+    { wc: 'avc1.64002a', family: 'avc' },
+    { wc: 'avc1.42E01E', family: 'avc' },
+  ];
 }
 
 export async function canEncodeVideo(codec: string, config: any = {}): Promise<boolean> {
   if (typeof VideoEncoder === 'undefined' || typeof VideoEncoder.isConfigSupported !== 'function') {
     return false;
   }
-  try {
-    const w = config.width || 1280;
-    const h = config.height || 720;
-    const standardCodec = resolveWebCodecsVideoCodecString(codec, w, h);
+  const w = Math.max(16, (config.width || 1280) - ((config.width || 1280) % 2));
+  const h = Math.max(16, (config.height || 720) - ((config.height || 720) % 2));
+  const candidates = getWebCodecsVideoCandidatesForFamily(codec, w, h);
+  const hwModes: HardwareAcceleration[] = [
+    config.hardwareAcceleration || 'prefer-hardware',
+    'no-preference',
+    'prefer-software',
+  ];
 
-    const testConfig: VideoEncoderConfig = {
-      codec: standardCodec,
-      width: w,
-      height: h,
-      bitrate: config.bitrate || 2_500_000,
-      framerate: config.framerate || 30,
-      hardwareAcceleration: config.hardwareAcceleration || 'prefer-hardware',
-    };
-    const res = await VideoEncoder.isConfigSupported(testConfig);
-    return !!res.supported;
-  } catch {
-    return false;
+  for (const cand of candidates) {
+    for (const hw of hwModes) {
+      try {
+        const testConfig: VideoEncoderConfig = {
+          codec: cand.wc,
+          width: w,
+          height: h,
+          bitrate: config.bitrate || 2_500_000,
+          framerate: config.framerate || 30,
+          hardwareAcceleration: hw,
+        };
+        const res = await VideoEncoder.isConfigSupported(testConfig);
+        if (res.supported) return true;
+      } catch {}
+    }
   }
+  return false;
 }
 
 export async function canEncodeAudio(codec: string, config: any = {}): Promise<boolean> {
-  if (codec === 'pcm-s16' || codec === 'pcm' || codec === 'pcm-s16le') {
+  const c = (codec || '').toLowerCase();
+  if (c === 'pcm-s16' || c === 'pcm' || c === 'pcm-s16le' || c === 'flac') {
     return true;
   }
   if (typeof AudioEncoder === 'undefined' || typeof AudioEncoder.isConfigSupported !== 'function') {
     return false;
   }
   try {
-    let standardCodec = codec;
-    if (codec === 'aac') standardCodec = 'mp4a.40.2';
-    else if (codec === 'opus') standardCodec = 'opus';
-    else if (codec === 'flac') standardCodec = 'flac';
+    let standardCodec = c;
+    if (c === 'aac') standardCodec = 'mp4a.40.2';
+    else if (c === 'opus') standardCodec = 'opus';
 
     const testConfig: AudioEncoderConfig = {
       codec: standardCodec,
@@ -3242,6 +3553,125 @@ export async function canEncodeAudio(codec: string, config: any = {}): Promise<b
   } catch {
     return false;
   }
+}
+
+// ==========================================
+// BUILT-IN RFC 9639 LOSSLESS FLAC ENCODER
+// ==========================================
+
+const FLAC_CRC8_TABLE = (() => {
+  const t = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    let crc = i;
+    for (let j = 0; j < 8; j++) {
+      crc = (crc & 0x80) ? ((crc << 1) ^ 0x07) & 0xff : (crc << 1) & 0xff;
+    }
+    t[i] = crc;
+  }
+  return t;
+})();
+
+const FLAC_CRC16_TABLE = (() => {
+  const t = new Uint16Array(256);
+  for (let i = 0; i < 256; i++) {
+    let crc = i << 8;
+    for (let j = 0; j < 8; j++) {
+      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x8005) & 0xffff : (crc << 1) & 0xffff;
+    }
+    t[i] = crc;
+  }
+  return t;
+})();
+
+function writeFlacUtf8Number(val: number): Uint8Array {
+  if (val < 0x80) return new Uint8Array([val]);
+  if (val < 0x800) return new Uint8Array([0xc0 | (val >> 6), 0x80 | (val & 0x3f)]);
+  if (val < 0x10000) return new Uint8Array([0xe0 | (val >> 12), 0x80 | ((val >> 6) & 0x3f), 0x80 | (val & 0x3f)]);
+  if (val < 0x200000) {
+    return new Uint8Array([
+      0xf0 | (val >> 18),
+      0x80 | ((val >> 12) & 0x3f),
+      0x80 | ((val >> 6) & 0x3f),
+      0x80 | (val & 0x3f),
+    ]);
+  }
+  return new Uint8Array([
+    0xf8 | (val >> 24),
+    0x80 | ((val >> 18) & 0x3f),
+    0x80 | ((val >> 12) & 0x3f),
+    0x80 | ((val >> 6) & 0x3f),
+    0x80 | (val & 0x3f),
+  ]);
+}
+
+function buildFlacStreamInfoBlock(sampleRate: number, channels: number, blockSize: number = 1024): Uint8Array {
+  const info = new Uint8Array(34);
+  const view = new DataView(info.buffer);
+  view.setUint16(0, blockSize);
+  view.setUint16(2, blockSize);
+  const sr = Math.min(0xfffff, Math.max(8000, Math.round(sampleRate)));
+  const ch = Math.max(1, Math.min(8, channels)) - 1;
+  const bps = 16 - 1;
+  info[10] = (sr >> 12) & 0xff;
+  info[11] = (sr >> 4) & 0xff;
+  info[12] = ((sr & 0x0f) << 4) | ((ch & 0x07) << 1) | ((bps >> 4) & 0x01);
+  info[13] = ((bps & 0x0f) << 4);
+  return info;
+}
+
+function encodeFlacVerbatimFrame(
+  interleavedFloat32: Float32Array,
+  numFrames: number,
+  channels: number,
+  sampleRate: number,
+  frameNumber: number
+): Uint8Array {
+  const ch = Math.max(1, Math.min(8, channels));
+  const utf8Num = writeFlacUtf8Number(frameNumber);
+
+  const bsCode = 0x07;
+  const srCode = sampleRate <= 65535 ? 0x0d : 0x0e;
+  const headerLen = 4 + utf8Num.length + 2 + 2 + 1;
+  const subframesLen = ch * (1 + numFrames * 2);
+  const totalLen = headerLen + subframesLen + 2;
+  const out = new Uint8Array(totalLen);
+  const view = new DataView(out.buffer);
+
+  let p = 0;
+  out[p++] = 0xff;
+  out[p++] = 0xf8;
+  out[p++] = (bsCode << 4) | srCode;
+  out[p++] = ((ch - 1) << 4) | (0x04 << 1);
+  out.set(utf8Num, p);
+  p += utf8Num.length;
+  view.setUint16(p, Math.max(0, numFrames - 1), false);
+  p += 2;
+  view.setUint16(p, srCode === 0x0d ? sampleRate : Math.round(sampleRate / 10), false);
+  p += 2;
+
+  let crc8 = 0;
+  for (let i = 0; i < p; i++) {
+    crc8 = FLAC_CRC8_TABLE[crc8 ^ out[i]];
+  }
+  out[p++] = crc8;
+
+  for (let c = 0; c < ch; c++) {
+    out[p++] = 0x02;
+    for (let f = 0; f < numFrames; f++) {
+      const idx = f * ch + c;
+      const s = idx < interleavedFloat32.length ? Math.max(-1, Math.min(1, interleavedFloat32[idx])) : 0;
+      const pcm = s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff);
+      view.setInt16(p, pcm, false);
+      p += 2;
+    }
+  }
+
+  let crc16 = 0;
+  for (let i = 0; i < p; i++) {
+    crc16 = ((crc16 << 8) & 0xffff) ^ FLAC_CRC16_TABLE[((crc16 >> 8) ^ out[i]) & 0xff];
+  }
+  view.setUint16(p, crc16, false);
+  return out;
 }
 
 export class VideoSample {
@@ -3370,6 +3800,7 @@ function calculateVideoBitrate(
 export class VideoSampleSource {
   public encoder: VideoEncoder | null = null;
   public options: any;
+  public codec: string;
   public onEncodedChunk: ((chunk: EncodedVideoChunk, meta?: any) => Promise<void>) | null = null;
   public isConfigured = false;
   private pendingOutput: Promise<void> = Promise.resolve();
@@ -3377,6 +3808,7 @@ export class VideoSampleSource {
 
   constructor(options: any = {}) {
     this.options = options;
+    this.codec = options.codec || 'avc';
   }
 
   public initEncoder(width: number, height: number): void {
@@ -3386,7 +3818,6 @@ export class VideoSampleSource {
     const safeH = Math.max(16, height - (height % 2));
 
     const requestedCodec = this.options.codec || 'avc';
-    const standardCodec = resolveWebCodecsVideoCodecString(requestedCodec, safeW, safeH);
 
     this.encoder = new VideoEncoder({
       output: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => {
@@ -3400,9 +3831,18 @@ export class VideoSampleSource {
           data,
           copyTo: (dest: Uint8Array) => dest.set(data),
         };
+        const enrichedMeta = {
+          ...meta,
+          decoderConfig: {
+            ...(meta?.decoderConfig || {}),
+            codec: meta?.decoderConfig?.codec || this.codec,
+            codedWidth: meta?.decoderConfig?.codedWidth || safeW,
+            codedHeight: meta?.decoderConfig?.codedHeight || safeH,
+          },
+        };
         if (this.onEncodedChunk) {
           const cb = this.onEncodedChunk;
-          this.pendingOutput = this.pendingOutput.then(() => cb(clonedChunk, meta)).catch((err) => {
+          this.pendingOutput = this.pendingOutput.then(() => cb(clonedChunk, enrichedMeta)).catch((err) => {
             console.warn('Error writing encoded video chunk:', err);
           });
         }
@@ -3414,11 +3854,12 @@ export class VideoSampleSource {
 
     const fps = this.options.framerate || 30;
     const bitrate = this.options.bitrate || calculateVideoBitrate(safeW, safeH, fps, this.options.quality, requestedCodec);
-    const candidateCodecs = [
-      standardCodec,
-      resolveWebCodecsVideoCodecString('vp9', safeW, safeH),
-      resolveWebCodecsVideoCodecString('avc', safeW, safeH),
-      'vp8',
+
+    const candidateEntries: { wc: string; family: string }[] = [
+      ...getWebCodecsVideoCandidatesForFamily(requestedCodec, safeW, safeH),
+      ...getWebCodecsVideoCandidatesForFamily('vp9', safeW, safeH),
+      ...getWebCodecsVideoCandidatesForFamily('avc', safeW, safeH),
+      { wc: 'vp8', family: 'vp8' },
     ];
     const hwModes: HardwareAcceleration[] = [
       this.options.hardwareAcceleration || 'prefer-hardware',
@@ -3426,22 +3867,24 @@ export class VideoSampleSource {
       'prefer-software',
     ];
 
-    for (const cStr of candidateCodecs) {
+    for (const cand of candidateEntries) {
       if (this.isConfigured) break;
       for (const hw of hwModes) {
         try {
           const cfg: VideoEncoderConfig = {
-            codec: cStr,
+            codec: cand.wc,
             width: safeW,
             height: safeH,
             bitrate,
             framerate: fps,
             hardwareAcceleration: hw,
             latencyMode: this.options.latencyMode || 'quality',
-            ...(cStr.startsWith('avc1') ? { avc: { format: 'avc' } } : {}),
+            ...(cand.wc.startsWith('avc1') ? { avc: { format: 'avc' } } : {}),
           };
           this.encoder.configure(cfg);
           if (this.encoder.state === 'configured') {
+            this.codec = cand.family;
+            this.options.codec = cand.family;
             this.isConfigured = true;
             break;
           }
@@ -3483,7 +3926,6 @@ export class VideoSampleSource {
       }
     }
 
-    // Backpressure & macrotask yield so encoded chunks flush to muxer in real time
     if (this.encoder && this.encoder.encodeQueueSize > 8) {
       await new Promise<void>((resolve) => {
         const enc = this.encoder;
@@ -3532,6 +3974,9 @@ export class AudioSampleSource {
   public onEncodedChunk: ((chunk: EncodedAudioChunk, meta?: any) => Promise<void>) | null = null;
   public isConfigured = false;
   private isPcmMode = false;
+  private isFlacMode = false;
+  private flacFrameNumber = 0;
+  private flacStreamInfo: Uint8Array | null = null;
   private pendingOutput: Promise<void> = Promise.resolve();
 
   constructor(options: any = {}) {
@@ -3551,54 +3996,80 @@ export class AudioSampleSource {
       return;
     }
 
-    if (typeof AudioEncoder === 'undefined') return;
+    if (typeof AudioEncoder !== 'undefined') {
+      let standardCodec = reqCodec;
+      if (standardCodec === 'aac') standardCodec = 'mp4a.40.2';
+      else if (standardCodec === 'opus') standardCodec = 'opus';
+      else if (standardCodec === 'flac') standardCodec = 'flac';
+      else if (standardCodec === 'mp3') standardCodec = 'mp3';
 
-    let standardCodec = reqCodec;
-    if (standardCodec === 'aac') standardCodec = 'mp4a.40.2';
-    else if (standardCodec === 'opus') standardCodec = 'opus';
-    else if (standardCodec === 'flac') standardCodec = 'flac';
-    else if (standardCodec === 'mp3') standardCodec = 'mp3';
+      this.encoder = new AudioEncoder({
+        output: (chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => {
+          const data = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(data);
+          const clonedChunk: any = {
+            type: chunk.type,
+            timestamp: chunk.timestamp,
+            duration: chunk.duration || 21333,
+            byteLength: data.byteLength,
+            data,
+            copyTo: (dest: Uint8Array) => dest.set(data),
+          };
+          const enrichedMeta = {
+            ...meta,
+            decoderConfig: {
+              ...(meta?.decoderConfig || {}),
+              codec: meta?.decoderConfig?.codec || this.codec,
+              sampleRate: meta?.decoderConfig?.sampleRate || sampleRate,
+              numberOfChannels: meta?.decoderConfig?.numberOfChannels || numberOfChannels,
+            },
+          };
+          if (this.onEncodedChunk) {
+            const cb = this.onEncodedChunk;
+            this.pendingOutput = this.pendingOutput.then(() => cb(clonedChunk, enrichedMeta)).catch((err) => {
+              console.warn('Error writing encoded audio chunk:', err);
+            });
+          }
+        },
+        error: (e) => {
+          console.warn('AudioEncoder error in AudioSampleSource:', e);
+        },
+      });
 
-    this.encoder = new AudioEncoder({
-      output: (chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => {
-        const data = new Uint8Array(chunk.byteLength);
-        chunk.copyTo(data);
-        const clonedChunk: any = {
-          type: chunk.type,
-          timestamp: chunk.timestamp,
-          duration: chunk.duration || 21333,
-          byteLength: data.byteLength,
-          data,
-          copyTo: (dest: Uint8Array) => dest.set(data),
-        };
-        if (this.onEncodedChunk) {
-          const cb = this.onEncodedChunk;
-          this.pendingOutput = this.pendingOutput.then(() => cb(clonedChunk, meta)).catch((err) => {
-            console.warn('Error writing encoded audio chunk:', err);
-          });
+      const targetBitrate = this.options.bitrate || 192_000;
+
+      try {
+        this.encoder.configure({
+          codec: standardCodec,
+          sampleRate,
+          numberOfChannels,
+          bitrate: targetBitrate,
+        });
+        if (this.encoder.state === 'configured') {
+          this.isConfigured = true;
+          return;
         }
-      },
-      error: (e) => {
-        console.warn('AudioEncoder error in AudioSampleSource:', e);
-      },
-    });
+      } catch {}
+    }
+
+    if (reqCodec === 'flac') {
+      if (this.encoder) {
+        try {
+          if (this.encoder.state !== 'closed') this.encoder.close();
+        } catch {}
+        this.encoder = null;
+      }
+      this.isFlacMode = true;
+      this.codec = 'flac';
+      this.options.codec = 'flac';
+      this.flacStreamInfo = buildFlacStreamInfoBlock(sampleRate, numberOfChannels, 1024);
+      this.isConfigured = true;
+      return;
+    }
+
+    if (!this.encoder) return;
 
     const targetBitrate = this.options.bitrate || 192_000;
-
-    try {
-      this.encoder.configure({
-        codec: standardCodec,
-        sampleRate,
-        numberOfChannels,
-        bitrate: targetBitrate,
-      });
-      if (this.encoder.state === 'configured') {
-        this.isConfigured = true;
-        return;
-      }
-    } catch {}
-
-    // Fallback order if primary codec rejected by browser AudioEncoder
     const fallbackCodecs = [
       { wc: 'opus', name: 'opus' },
       { wc: 'mp4a.40.2', name: 'aac' },
@@ -3623,6 +4094,35 @@ export class AudioSampleSource {
     }
   }
 
+  private extractInterleavedFloatData(sample: AudioSample): Float32Array | null {
+    if (sample.data) return sample.data;
+    if (sample.audioData) {
+      const numFrames = sample.audioData.numberOfFrames;
+      const ch = sample.audioData.numberOfChannels;
+      const fmt = sample.audioData.format || 'f32';
+      if (fmt.includes('planar')) {
+        const out = new Float32Array(numFrames * ch);
+        const planeBuf = new Float32Array(numFrames);
+        for (let c = 0; c < ch; c++) {
+          try {
+            sample.audioData.copyTo(planeBuf, { planeIndex: c });
+            for (let f = 0; f < numFrames; f++) {
+              out[f * ch + c] = planeBuf[f];
+            }
+          } catch {}
+        }
+        return out;
+      } else {
+        const out = new Float32Array(numFrames * ch);
+        try {
+          sample.audioData.copyTo(out, { planeIndex: 0 });
+        } catch {}
+        return out;
+      }
+    }
+    return null;
+  }
+
   public async add(sample: AudioSample): Promise<void> {
     if (!this.isConfigured && !this.encoder) {
       this.initEncoder(sample.sampleRate, sample.numberOfChannels);
@@ -3630,14 +4130,7 @@ export class AudioSampleSource {
     if (!this.isConfigured) return;
 
     if (this.isPcmMode) {
-      let floatData = sample.data;
-      if (!floatData && sample.audioData) {
-        const len = sample.audioData.numberOfFrames * sample.audioData.numberOfChannels;
-        floatData = new Float32Array(len);
-        try {
-          sample.audioData.copyTo(floatData, { planeIndex: 0 });
-        } catch {}
-      }
+      const floatData = this.extractInterleavedFloatData(sample);
       if (floatData && this.onEncodedChunk) {
         const pcm16 = new Int16Array(floatData.length);
         for (let i = 0; i < floatData.length; i++) {
@@ -3645,8 +4138,11 @@ export class AudioSampleSource {
           pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
         const bytes = new Uint8Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength);
+        const sr = sample.sampleRate || 48000;
+        const ch = sample.numberOfChannels || 2;
+        const numFrames = Math.max(1, Math.floor(floatData.length / ch));
         const tsMicros = Math.max(0, Math.round(sample.timestamp * 1e6));
-        const durMicros = Math.max(1000, Math.round((sample.duration || 0.021333) * 1e6));
+        const durMicros = Math.max(1000, Math.round((numFrames / sr) * 1e6));
         const chunk: any = {
           type: 'key',
           timestamp: tsMicros,
@@ -3660,8 +4156,45 @@ export class AudioSampleSource {
           cb(chunk, {
             decoderConfig: {
               codec: 'pcm-s16',
-              sampleRate: sample.sampleRate || 48000,
-              numberOfChannels: sample.numberOfChannels || 2,
+              sampleRate: sr,
+              numberOfChannels: ch,
+            },
+          })
+        );
+        await this.pendingOutput;
+      }
+      return;
+    }
+
+    if (this.isFlacMode) {
+      const floatData = this.extractInterleavedFloatData(sample);
+      if (floatData && this.onEncodedChunk) {
+        const sr = sample.sampleRate || 48000;
+        const ch = sample.numberOfChannels || 2;
+        const numFrames = Math.max(1, Math.floor(floatData.length / ch));
+        if (!this.flacStreamInfo) {
+          this.flacStreamInfo = buildFlacStreamInfoBlock(sr, ch, numFrames);
+        }
+        const flacBytes = encodeFlacVerbatimFrame(floatData, numFrames, ch, sr, this.flacFrameNumber++);
+        const tsMicros = Math.max(0, Math.round(sample.timestamp * 1e6));
+        const durMicros = Math.max(1000, Math.round((numFrames / sr) * 1e6));
+        const chunk: any = {
+          type: 'key',
+          timestamp: tsMicros,
+          duration: durMicros,
+          byteLength: flacBytes.byteLength,
+          data: flacBytes,
+          copyTo: (dest: Uint8Array) => dest.set(flacBytes),
+        };
+        const cb = this.onEncodedChunk;
+        const streamInfo = this.flacStreamInfo;
+        this.pendingOutput = this.pendingOutput.then(() =>
+          cb(chunk, {
+            decoderConfig: {
+              codec: 'flac',
+              sampleRate: sr,
+              numberOfChannels: ch,
+              description: streamInfo,
             },
           })
         );

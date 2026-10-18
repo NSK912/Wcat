@@ -3705,12 +3705,12 @@ export async function processWebCodecsEncodeStream(
   const targetExt = reqFormat || ext;
 
   let outputFormat;
-  if (targetExt === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') {
+  if (targetExt === 'webm' || settings.outputFormat === 'webm') {
     outputFormat = new WebMOutputFormat();
   } else if (targetExt === 'mkv' || settings.outputFormat === 'mkv') {
     outputFormat = new MkvOutputFormat();
   } else {
-    // Standard MP4 with FastStart in-memory for 100% video preview thumbnail compatibility
+    // Standard MP4 with complete sample tables and accurate duration metadata
     outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' });
   }
 
@@ -4048,38 +4048,46 @@ export async function processWebCodecsMultiTrackTimeline(
         const isImg = clip.mediaType === 'image' || clip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name);
         if (!isImg) {
           let realDur = clip.fileDuration;
-          if (!realDur || clip.endTime === undefined || clip.endTime <= clip.startTime) {
+          const isPlaceholder10 =
+            !clip.isTrimmed &&
+            clip.fileDuration === 10 &&
+            Math.abs((clip.endTime || 0) - (clip.startTime || 0) - 10) < 0.05;
+          if (!realDur || isPlaceholder10 || clip.endTime === undefined || clip.endTime <= clip.startTime) {
+            let probedDur = 0;
             const isAud = clip.mediaType === 'audio' || clip.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus)$/i.test(clip.file.name);
             if (isAud) {
               const audioBuf = await getAudioBufferForFile(clip.file);
               if (audioBuf) {
-                realDur = audioBuf.duration;
+                probedDur = audioBuf.duration;
               }
             }
-            if (!realDur) {
+            if (!probedDur) {
               try {
                 const probeInput = new Input({ source: new BlobSource(clip.file), formats: ALL_FORMATS });
                 const vTracks = await probeInput.getVideoTracks();
                 if (vTracks.length > 0) {
                   const d = await vTracks[0].computeDuration();
-                  if (d && Number.isFinite(d) && d > 0) realDur = d;
+                  if (d && Number.isFinite(d) && d > 0) probedDur = d;
                 }
-                if (!realDur) {
+                if (!probedDur) {
                   const aTracks = await probeInput.getAudioTracks();
                   if (aTracks.length > 0) {
                     const d = await aTracks[0].computeDuration();
-                    if (d && Number.isFinite(d) && d > 0) realDur = d;
+                    if (d && Number.isFinite(d) && d > 0) probedDur = d;
                   }
                 }
               } catch (e) {
                 console.warn('Demuxer probe warning in MultiTrackTimeline:', e);
               }
             }
+            if (probedDur > 0) {
+              realDur = probedDur;
+            }
           }
 
           if (realDur && realDur > 0) {
             clip.fileDuration = realDur;
-            if (clip.endTime === undefined || clip.endTime <= clip.startTime) {
+            if (clip.endTime === undefined || clip.endTime <= clip.startTime || isPlaceholder10) {
               clip.endTime = (clip.startTime || 0) + realDur;
               clip.sourceEndTime = realDur;
             }
@@ -4222,7 +4230,7 @@ export async function processWebCodecsMultiTrackTimeline(
   const firstFileExt = visibleTracks[0]?.clips[0]?.file?.name.split('.').pop()?.toLowerCase() || 'mp4';
   const effectiveFormat = requestedFormat || firstFileExt;
 
-  if (effectiveFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') outputFormat = new WebMOutputFormat();
+  if (effectiveFormat === 'webm') outputFormat = new WebMOutputFormat();
   else if (effectiveFormat === 'mkv') outputFormat = new MkvOutputFormat();
   else outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' });
 
