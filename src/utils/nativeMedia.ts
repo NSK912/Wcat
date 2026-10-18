@@ -600,8 +600,19 @@ export class MP4Demuxer {
                     const level = rawDesc[3].toString(16).padStart(2, '0');
                     codec = `avc1.${profile}${compat}${level}`;
                   } else if (subType === 'av1C') {
-                    codec = 'av01.0.08M.08';
-                    description = rawDesc.length > 4 ? rawDesc : undefined;
+                    if (rawDesc.length >= 3) {
+                      const seqProfile = (rawDesc[1] >> 5) & 0x07;
+                      const seqLevelIdx = rawDesc[1] & 0x1f;
+                      const seqTier = (rawDesc[2] >> 7) & 0x01 ? 'H' : 'M';
+                      const highBitdepth = (rawDesc[2] >> 6) & 0x01;
+                      const twelveBit = (rawDesc[2] >> 5) & 0x01;
+                      const bitDepth = highBitdepth ? (twelveBit ? '12' : '10') : '08';
+                      const levelStr = String(seqLevelIdx || 8).padStart(2, '0');
+                      codec = `av01.${seqProfile}.${levelStr}${seqTier}.${bitDepth}`;
+                    } else {
+                      codec = 'av01.0.08M.08';
+                    }
+                    description = undefined;
                   } else if (subType === 'vpcC') {
                     codec = 'vp09.00.41.08';
                     description = undefined;
@@ -615,7 +626,7 @@ export class MP4Demuxer {
               }
 
               // Fallback scan if non-standard VisualSampleEntry header size was used
-              if (!description && !codec.startsWith('av01') && !codec.startsWith('vp09')) {
+              if (!description && codec.length <= 4) {
                 for (let k = entryOffset + 24; k + 8 <= entryEnd; k++) {
                   const tag = String.fromCharCode(payload[k], payload[k + 1], payload[k + 2], payload[k + 3]);
                   if (tag === 'avcC' || tag === 'hvcC' || tag === 'vpcC' || tag === 'av1C') {
@@ -630,8 +641,19 @@ export class MP4Demuxer {
                         const level = rawDesc[3].toString(16).padStart(2, '0');
                         codec = `avc1.${profile}${compat}${level}`;
                       } else if (tag === 'av1C') {
-                        codec = 'av01.0.08M.08';
-                        description = rawDesc.length > 4 ? rawDesc : undefined;
+                        if (rawDesc.length >= 3) {
+                          const seqProfile = (rawDesc[1] >> 5) & 0x07;
+                          const seqLevelIdx = rawDesc[1] & 0x1f;
+                          const seqTier = (rawDesc[2] >> 7) & 0x01 ? 'H' : 'M';
+                          const highBitdepth = (rawDesc[2] >> 6) & 0x01;
+                          const twelveBit = (rawDesc[2] >> 5) & 0x01;
+                          const bitDepth = highBitdepth ? (twelveBit ? '12' : '10') : '08';
+                          const levelStr = String(seqLevelIdx || 8).padStart(2, '0');
+                          codec = `av01.${seqProfile}.${levelStr}${seqTier}.${bitDepth}`;
+                        } else {
+                          codec = 'av01.0.08M.08';
+                        }
+                        description = undefined;
                       } else if (tag === 'vpcC') {
                         codec = 'vp09.00.41.08';
                         description = undefined;
@@ -645,9 +667,10 @@ export class MP4Demuxer {
                 }
               }
 
-              if (codec === 'avc1') {
-                codec = 'avc1.640028';
-              }
+              if (codec === 'avc1') codec = 'avc1.640028';
+              else if (codec === 'av01') codec = 'av01.0.08M.08';
+              else if (codec === 'vp09') codec = 'vp09.00.41.08';
+              else if (codec === 'hvc1' || codec === 'hev1') codec = 'hvc1.1.6.L123.B0';
 
               decoderConfig = {
                 codec,
@@ -1626,6 +1649,8 @@ export class EBMLDemuxer {
 // 5. UNIVERSAL METADATA PROBER
 // ==========================================
 
+const parsedDemuxerCache = new WeakMap<Blob, { mp4?: MP4Demuxer; ebml?: EBMLDemuxer }>();
+
 export async function probeMediaMetadata(file: File | Blob): Promise<MediaMetadata> {
   if (file.type && file.type.startsWith('image/')) {
     return {
@@ -1645,6 +1670,27 @@ export async function probeMediaMetadata(file: File | Blob): Promise<MediaMetada
   const name = (file as File).name || '';
   const ext = name.split('.').pop()?.toLowerCase() || '';
 
+  const cached = parsedDemuxerCache.get(file);
+  if (cached?.mp4 && cached.mp4.videoTracks.length + cached.mp4.audioTracks.length > 0) {
+    const mp4 = cached.mp4;
+    const vTrack = mp4.videoTracks[0];
+    const aTrack = mp4.audioTracks[0];
+    return {
+      format: ext === 'mov' ? 'mov' : 'mp4',
+      duration: mp4.duration || (vTrack?.duration ?? aTrack?.duration ?? 0),
+      width: vTrack?.width || 1280,
+      height: vTrack?.height || 720,
+      rotation: vTrack?.rotation || 0,
+      fps: vTrack?.fps || 30,
+      hasVideo: mp4.videoTracks.length > 0,
+      hasAudio: mp4.audioTracks.length > 0,
+      videoTracks: mp4.videoTracks,
+      audioTracks: mp4.audioTracks,
+      videoCodec: vTrack?.codec,
+      audioCodec: aTrack?.codec,
+    };
+  }
+
   const headSlice = file.slice(0, 16);
   const headBuf = new Uint8Array(await headSlice.arrayBuffer());
 
@@ -1656,11 +1702,12 @@ export async function probeMediaMetadata(file: File | Blob): Promise<MediaMetada
     (headBuf[4] === 0x6d && headBuf[5] === 0x64 && headBuf[6] === 0x61 && headBuf[7] === 0x74)    // 'mdat'
   )) || ['mp4', 'm4v', 'mov', '3gp'].includes(ext);
 
-  if (isMp4OrMov) {
+  if (isMp4OrMov && !isEBML) {
     try {
       const mp4 = new MP4Demuxer(file);
       const ok = await mp4.parse();
       if (ok) {
+        parsedDemuxerCache.set(file, { mp4 });
         const vTrack = mp4.videoTracks[0];
         const aTrack = mp4.audioTracks[0];
         return {
@@ -1685,12 +1732,13 @@ export async function probeMediaMetadata(file: File | Blob): Promise<MediaMetada
 
   if (isEBML || ['webm', 'mkv'].includes(ext)) {
     try {
-      const ebml = new EBMLDemuxer(file);
-      const ok = await ebml.parse();
+      const ebml = cached?.ebml || new EBMLDemuxer(file);
+      const ok = cached?.ebml ? true : await ebml.parse();
       if (ok) {
         if (ebml.duration <= 0) {
           await ebml.scanClusters(500);
         }
+        parsedDemuxerCache.set(file, { ebml });
         const vTrack = ebml.videoTracks[0];
         const aTrack = ebml.audioTracks[0];
         return {
@@ -1790,8 +1838,12 @@ export class NativeCanvasSink {
   private offscreenCanvas: OffscreenCanvas;
   private ctx: OffscreenCanvasRenderingContext2D | null;
   private initialized = false;
+  private initPromise: Promise<boolean> | null = null;
   private isDecoderConfigured = false;
   private decoderConfig: VideoDecoderConfig | null = null;
+  private preferSoftwareDecoder = false;
+  private omitDecoderDescription = false;
+  private hadDecoderError = false;
   private samples: MediaSample[] = [];
   private decodedFramesQueue: VideoFrame[] = [];
   private onFrameDecoded: (() => void) | null = null;
@@ -1826,6 +1878,74 @@ export class NativeCanvasSink {
     if (this.initialized && this.isDecoderConfigured && this.decoder && this.decoder.state !== 'closed' && this.samples.length > 0) {
       return true;
     }
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+    this.initPromise = this.doInit().finally(() => {
+      this.initPromise = null;
+    });
+    return this.initPromise;
+  }
+
+  private async doInit(): Promise<boolean> {
+    if (this.initialized && this.isDecoderConfigured && this.decoder && this.decoder.state !== 'closed' && this.samples.length > 0) {
+      return true;
+    }
+
+    const cached = parsedDemuxerCache.get(this.file);
+    if (cached?.mp4 && cached.mp4.videoTracks.length > 0) {
+      this.mp4 = cached.mp4;
+      const vTrack = this.mp4.videoTracks[0];
+      this.duration = this.mp4.duration || vTrack.duration;
+      this.width = vTrack.width;
+      this.height = vTrack.height;
+      this.rotation = vTrack.rotation;
+      let configCodec = vTrack.decoderConfig?.codec || vTrack.codec || 'avc1.640028';
+      if (configCodec === 'avc1') configCodec = 'avc1.640028';
+      else if (configCodec === 'av01') configCodec = 'av01.0.08M.08';
+      else if (configCodec === 'vp09') configCodec = 'vp09.00.41.08';
+      else if (configCodec === 'hvc1' || configCodec === 'hev1') configCodec = 'hvc1.1.6.L123.B0';
+
+      this.decoderConfig = {
+        codec: configCodec,
+        codedWidth: vTrack.width,
+        codedHeight: vTrack.height,
+        description: vTrack.decoderConfig?.description,
+        optimizeForLatency: true,
+      };
+      if (!this.options.width && this.width > 0 && this.height > 0) {
+        this.offscreenCanvas.width = this.width;
+        this.offscreenCanvas.height = this.height;
+      }
+      this.samples = this.mp4.getVideoSamples();
+      this.setupDecoder();
+      this.initialized = true;
+      return true;
+    }
+
+    if (cached?.ebml && cached.ebml.videoTracks.length > 0) {
+      this.ebml = cached.ebml;
+      const vTrack = this.ebml.videoTracks[0];
+      this.samples = await this.ebml.scanClusters();
+      this.duration = this.ebml.duration || vTrack.duration;
+      this.width = vTrack.width;
+      this.height = vTrack.height;
+      this.decoderConfig = {
+        ...(vTrack.decoderConfig || {
+          codec: vTrack.codec || 'vp8',
+          codedWidth: vTrack.width,
+          codedHeight: vTrack.height,
+        }),
+        optimizeForLatency: true,
+      };
+      if (!this.options.width && this.width > 0 && this.height > 0) {
+        this.offscreenCanvas.width = this.width;
+        this.offscreenCanvas.height = this.height;
+      }
+      this.setupDecoder();
+      this.initialized = true;
+      return true;
+    }
 
     const name = (this.file as File)?.name || '';
     const ext = name.split('.').pop()?.toLowerCase() || '';
@@ -1850,6 +1970,7 @@ export class NativeCanvasSink {
         this.mp4 = new MP4Demuxer(this.file);
         const ok = await this.mp4.parse();
         if (ok && this.mp4.videoTracks.length > 0) {
+          parsedDemuxerCache.set(this.file, { mp4: this.mp4 });
           const vTrack = this.mp4.videoTracks[0];
           this.duration = this.mp4.duration || vTrack.duration;
           this.width = vTrack.width;
@@ -1857,12 +1978,16 @@ export class NativeCanvasSink {
           this.rotation = vTrack.rotation;
           let configCodec = vTrack.decoderConfig?.codec || vTrack.codec || 'avc1.640028';
           if (configCodec === 'avc1') configCodec = 'avc1.640028';
+          else if (configCodec === 'av01') configCodec = 'av01.0.08M.08';
+          else if (configCodec === 'vp09') configCodec = 'vp09.00.41.08';
+          else if (configCodec === 'hvc1' || configCodec === 'hev1') configCodec = 'hvc1.1.6.L123.B0';
 
           this.decoderConfig = {
             codec: configCodec,
             codedWidth: vTrack.width,
             codedHeight: vTrack.height,
             description: vTrack.decoderConfig?.description,
+            optimizeForLatency: true,
           };
           if (!this.options.width && this.width > 0 && this.height > 0) {
             this.offscreenCanvas.width = this.width;
@@ -1882,15 +2007,19 @@ export class NativeCanvasSink {
       this.ebml = new EBMLDemuxer(this.file);
       const ebmlOk = await this.ebml.parse();
       if (ebmlOk && this.ebml.videoTracks.length > 0) {
+        parsedDemuxerCache.set(this.file, { ebml: this.ebml });
         const vTrack = this.ebml.videoTracks[0];
         this.samples = await this.ebml.scanClusters();
         this.duration = this.ebml.duration || vTrack.duration;
         this.width = vTrack.width;
         this.height = vTrack.height;
-        this.decoderConfig = vTrack.decoderConfig || {
-          codec: vTrack.codec || 'vp8',
-          codedWidth: vTrack.width,
-          codedHeight: vTrack.height,
+        this.decoderConfig = {
+          ...(vTrack.decoderConfig || {
+            codec: vTrack.codec || 'vp8',
+            codedWidth: vTrack.width,
+            codedHeight: vTrack.height,
+          }),
+          optimizeForLatency: true,
         };
         if (!this.options.width && this.width > 0 && this.height > 0) {
           this.offscreenCanvas.width = this.width;
@@ -1905,6 +2034,21 @@ export class NativeCanvasSink {
     }
 
     return false;
+  }
+
+  private buildActiveDecoderConfig(): VideoDecoderConfig {
+    const base = this.decoderConfig!;
+    const cfg: VideoDecoderConfig = {
+      ...base,
+      optimizeForLatency: true,
+    };
+    if (this.omitDecoderDescription) {
+      delete cfg.description;
+    }
+    if (this.preferSoftwareDecoder) {
+      cfg.hardwareAcceleration = 'prefer-software';
+    }
+    return cfg;
   }
 
   private setupDecoder(): void {
@@ -1924,6 +2068,7 @@ export class NativeCanvasSink {
       this.lastDecodedKeyIdx = -1;
       this.lastDecodedSampleIdx = -1;
       this.inFlightChunks = 0;
+      this.hadDecoderError = false;
       this.decoder = new VideoDecoder({
         output: (frame: VideoFrame) => {
           this.inFlightChunks = Math.max(0, this.inFlightChunks - 1);
@@ -1939,7 +2084,7 @@ export class NativeCanvasSink {
               this.bestSeekTimestamp = ts;
               this.bestSeekDuration = dur;
               this.hasSeekFrame = true;
-              if (!this.hasDrawnSeekFrame || ts >= this.seekTargetTimestamp - 0.15 || diff <= 0.08) {
+              if (!this.hasDrawnSeekFrame || ts >= this.seekTargetTimestamp - 0.12 || diff <= 0.08) {
                 this.drawFrameToCanvas(frame);
                 this.hasDrawnSeekFrame = true;
               }
@@ -1985,9 +2130,13 @@ export class NativeCanvasSink {
             cb();
           }
         },
-        error: (err: any) => {
+        error: () => {
           this.inFlightChunks = 0;
-          console.warn('NativeCanvasSink VideoDecoder error:', err);
+          this.hadDecoderError = true;
+          this.preferSoftwareDecoder = true;
+          this.omitDecoderDescription = true;
+          this.lastDecodedKeyIdx = -1;
+          this.lastDecodedSampleIdx = -1;
           if (this.onFrameDecoded) {
             const cb = this.onFrameDecoded;
             this.onFrameDecoded = null;
@@ -1996,7 +2145,13 @@ export class NativeCanvasSink {
         },
       });
 
-      this.decoder.configure(this.decoderConfig);
+      try {
+        this.decoder.configure(this.buildActiveDecoderConfig());
+      } catch {
+        this.omitDecoderDescription = true;
+        this.preferSoftwareDecoder = true;
+        this.decoder.configure(this.buildActiveDecoderConfig());
+      }
       this.isDecoderConfigured = true;
     } catch (e) {
       console.warn('Failed to configure native VideoDecoder:', e);
@@ -2011,6 +2166,41 @@ export class NativeCanvasSink {
     }
     const slice = this.file.slice(sample.offset, sample.offset + sample.size);
     return new Uint8Array(await slice.arrayBuffer());
+  }
+
+  private async readSampleRangeBytes(startIdx: number, endIdx: number): Promise<Uint8Array[]> {
+    const count = endIdx - startIdx + 1;
+    if (count <= 0) return [];
+    if (count === 1) {
+      return [await this.readSampleBytes(this.samples[startIdx])];
+    }
+
+    // Check if we can read the entire contiguous range in a single Blob.slice() call
+    let minOffset = Infinity;
+    let maxEnd = 0;
+    for (let i = startIdx; i <= endIdx; i++) {
+      const s = this.samples[i];
+      if (s.offset < minOffset) minOffset = s.offset;
+      if (s.offset + s.size > maxEnd) maxEnd = s.offset + s.size;
+    }
+
+    const span = maxEnd - minOffset;
+    if (span > 0 && span <= 24 * 1024 * 1024 && !this.ebml) {
+      const rangeBuf = new Uint8Array(await this.file.slice(minOffset, maxEnd).arrayBuffer());
+      const out: Uint8Array[] = new Array(count);
+      for (let i = startIdx; i <= endIdx; i++) {
+        const s = this.samples[i];
+        const relStart = s.offset - minOffset;
+        out[i - startIdx] = rangeBuf.subarray(relStart, relStart + s.size);
+      }
+      return out;
+    }
+
+    const out: Uint8Array[] = new Array(count);
+    for (let i = startIdx; i <= endIdx; i++) {
+      out[i - startIdx] = await this.readSampleBytes(this.samples[i]);
+    }
+    return out;
   }
 
   public stopStream(): void {
@@ -2036,11 +2226,14 @@ export class NativeCanvasSink {
 
     const run = async (): Promise<WrappedCanvas | null> => {
       if (this.activeOperationId !== opId) return null;
+      await this.init();
+      if (this.activeOperationId !== opId) return null;
+
       if (!this.isDecoderConfigured || !this.decoder || this.samples.length === 0) {
         return null;
       }
 
-      if (this.decoder.state === 'closed') {
+      if (this.decoder.state === 'closed' || this.hadDecoderError) {
         this.setupDecoder();
         if (!this.decoder || (this.decoder as VideoDecoder).state === 'closed') return null;
       }
@@ -2085,9 +2278,9 @@ export class NativeCanvasSink {
         // If exact same sample range was already decoded, return cached canvas immediately
         if (
           this.lastDecodedKeyIdx === keyframeIdx &&
-          this.lastDecodedSampleIdx === decodeEndIdx &&
+          this.lastDecodedSampleIdx >= targetSampleIdx &&
           this.hasSeekFrame &&
-          (fastKeyframeMode || Math.abs(this.bestSeekTimestamp - targetTimestamp) < 0.06)
+          (fastKeyframeMode || Math.abs(this.bestSeekTimestamp - targetTimestamp) < 0.05)
         ) {
           return {
             canvas: this.offscreenCanvas,
@@ -2107,7 +2300,8 @@ export class NativeCanvasSink {
           this.lastDecodedKeyIdx === keyframeIdx &&
           this.lastDecodedSampleIdx >= keyframeIdx &&
           this.lastDecodedSampleIdx < decodeEndIdx &&
-          this.decoder.state === 'configured'
+          this.decoder.state === 'configured' &&
+          !this.hadDecoderError
         ) {
           // Incremental forward decode from previous position in the same GOP!
           startDecodeIdx = this.lastDecodedSampleIdx + 1;
@@ -2116,41 +2310,96 @@ export class NativeCanvasSink {
           this.bestSeekDiff = Infinity;
           this.hasSeekFrame = false;
           this.hasDrawnSeekFrame = false;
+          this.inFlightChunks = 0;
           if (this.decoder.state === 'configured') {
-            this.decoder.reset();
-            this.decoder.configure(this.decoderConfig!);
+            try {
+              this.decoder.reset();
+              this.decoder.configure(this.buildActiveDecoderConfig());
+            } catch {
+              this.setupDecoder();
+            }
           }
         }
+
+        const targetExpectedTs = this.samples[Math.min(targetSampleIdx, decodeEndIdx)].timestamp;
+        const payloads = await this.readSampleRangeBytes(startDecodeIdx, decodeEndIdx);
+        if (this.activeOperationId !== opId) return null;
 
         for (let i = startDecodeIdx; i <= decodeEndIdx; i++) {
           if (this.activeOperationId !== opId) return null;
           const sample = this.samples[i];
-          const data = await this.readSampleBytes(sample);
-          if (this.activeOperationId !== opId) return null;
-          if (data.length === 0) continue;
+          const data = payloads[i - startDecodeIdx];
+          if (!data || data.length === 0) continue;
 
-          if (this.decoder && this.decoder.state === 'configured') {
-            this.decoder.decode(new EncodedVideoChunk({
-              type: sample.isKeyframe ? 'key' : 'delta',
-              timestamp: Math.round(sample.timestamp * 1e6),
-              duration: Math.round(sample.duration * 1e6),
-              data,
-            }));
+          if (!this.decoder || this.decoder.state !== 'configured' || this.hadDecoderError) {
+            break;
+          }
+
+          this.inFlightChunks++;
+          this.decoder.decode(new EncodedVideoChunk({
+            type: sample.isKeyframe ? 'key' : 'delta',
+            timestamp: Math.round(sample.timestamp * 1e6),
+            duration: Math.round(sample.duration * 1e6),
+            data,
+          }));
+
+          // Yield briefly if hardware decode queue gets deep on a long GOP so we can abort immediately if superseded
+          if ((this.decoder.decodeQueueSize || 0) > 16) {
+            await new Promise<void>((resolve) => {
+              this.onFrameDecoded = resolve;
+              setTimeout(resolve, 8);
+            });
+            if (this.activeOperationId !== opId) return null;
           }
         }
 
         if (this.activeOperationId !== opId) return null;
 
-        // Flush with safety timeout so worker never hangs
-        if (this.decoder && this.decoder.state === 'configured') {
-          await Promise.race([
-            this.decoder.flush(),
-            new Promise<void>((r) => setTimeout(r, 1200)),
-          ]);
+        // Wait for VideoDecoder to emit up to targetExpectedTs WITHOUT calling flush() if possible,
+        // so the decoder retains reference frames for instant incremental seeks in the same GOP!
+        const waitStart = performance.now();
+        while (
+          this.activeOperationId === opId &&
+          !this.hadDecoderError &&
+          this.decoder &&
+          this.decoder.state === 'configured' &&
+          (!this.hasDrawnSeekFrame || (this.bestSeekTimestamp < targetExpectedTs - 0.04 && (this.decoder.decodeQueueSize > 0 || this.inFlightChunks > 0))) &&
+          performance.now() - waitStart < 180
+        ) {
+          await new Promise<void>((resolve) => {
+            this.onFrameDecoded = resolve;
+            setTimeout(resolve, 10);
+          });
         }
 
-        this.lastDecodedKeyIdx = keyframeIdx;
-        this.lastDecodedSampleIdx = decodeEndIdx;
+        if (this.activeOperationId !== opId) return null;
+
+        if (this.hasDrawnSeekFrame && Math.abs(this.bestSeekTimestamp - targetExpectedTs) <= 0.06) {
+          this.lastDecodedKeyIdx = keyframeIdx;
+          this.lastDecodedSampleIdx = decodeEndIdx;
+        } else if (this.decoder && this.decoder.state === 'configured' && !this.hadDecoderError) {
+          // Only flush if B-frame reorder buffer held the target frame back
+          let flushResolved = false;
+          await Promise.race([
+            this.decoder.flush().then(() => { flushResolved = true; }).catch(() => {}),
+            new Promise<void>((resolve) => {
+              this.onFrameDecoded = resolve;
+              setTimeout(resolve, 300);
+            }),
+          ]);
+          // W3C WebCodecs spec: flush() requires the next chunk to be a keyframe!
+          this.lastDecodedKeyIdx = -1;
+          this.lastDecodedSampleIdx = -1;
+          if (!flushResolved && this.decoder && this.decoder.state === 'configured') {
+            try {
+              this.decoder.reset();
+              this.decoder.configure(this.buildActiveDecoderConfig());
+            } catch {}
+          }
+        } else {
+          this.lastDecodedKeyIdx = -1;
+          this.lastDecodedSampleIdx = -1;
+        }
 
         if (this.hasSeekFrame && this.ctx) {
           return {
@@ -4532,6 +4781,10 @@ export class CanvasSink {
   constructor(trackOrFile: any, options: any = {}) {
     const file = trackOrFile?.file || (typeof trackOrFile?.getFile === 'function' ? trackOrFile.getFile() : trackOrFile);
     this.nativeSink = new NativeCanvasSink(file, options);
+  }
+
+  public async init(): Promise<boolean> {
+    return await this.nativeSink.init();
   }
 
   public async getCanvas(timestamp: number): Promise<any> {

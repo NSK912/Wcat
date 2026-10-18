@@ -142,6 +142,8 @@ self.onmessage = async (e: MessageEvent) => {
           }
         } catch (iterErr) {
           console.warn('[ThumbnailWorker] canvasesAtTimestamps partial fail:', iterErr);
+        } finally {
+          sink.close();
         }
 
         // Ensure we always return array of requested count

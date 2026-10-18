@@ -1326,12 +1326,15 @@ export const Timeline: React.FC<TimelineProps> = ({
             targetClip = match; // Topmost visible track provides video
           }
           if (!t.muted && match.file) {
-            activeAudioClips.push({
-              id: match.id,
-              file: match.file,
-              startTime: match.startTime,
-              sourceStartTime: match.sourceStartTime || 0
-            });
+            const matchType = match.mediaType || detectMediaType(match.file);
+            if (matchType !== 'image') {
+              activeAudioClips.push({
+                id: match.id,
+                file: match.file,
+                startTime: match.startTime,
+                sourceStartTime: match.sourceStartTime || 0
+              });
+            }
           }
         }
       }

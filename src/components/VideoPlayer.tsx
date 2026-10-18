@@ -106,6 +106,7 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
   });
 
   const isRenderingRef = useRef(false);
+  const pendingRenderTimeRef = useRef<number | null>(null);
   const lastRenderedTimeRef = useRef<number>(-1);
   const playheadTimeRef = useRef<number>(currentTime);
   const lastSelfReportedTimeRef = useRef<number>(currentTime);
@@ -142,23 +143,34 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
   const drawFrameAt = useCallback(async (timestamp: number) => {
     const session = sessionRef.current;
     const canvas = canvasRef.current;
-    if (!session || !canvas || isRenderingRef.current) return;
+    if (!session || !canvas) return;
+
+    if (isRenderingRef.current) {
+      pendingRenderTimeRef.current = timestamp;
+      return;
+    }
 
     isRenderingRef.current = true;
+    let nextTs: number | null = timestamp;
     try {
-      const bitmap = await session.renderFrame(timestamp);
-      if (bitmap) {
-        if (canvas.width === 0 || canvas.height === 0 || Math.abs(canvas.width - bitmap.width) > 2) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-        }
+      while (nextTs !== null && sessionRef.current === session) {
+        const targetTs = nextTs;
+        pendingRenderTimeRef.current = null;
+        const bitmap = await session.renderFrame(targetTs);
+        if (bitmap) {
+          if (canvas.width === 0 || canvas.height === 0 || Math.abs(canvas.width - bitmap.width) > 2) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+          }
 
-        const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
-        if (ctx) {
-          ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+          if (ctx) {
+            ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          }
+          bitmap.close();
+          lastRenderedTimeRef.current = targetTs;
         }
-        bitmap.close();
-        lastRenderedTimeRef.current = timestamp;
+        nextTs = pendingRenderTimeRef.current;
       }
     } catch {
       // Ignore frame decode failure gracefully
@@ -622,23 +634,46 @@ const AudioTrack: React.FC<{
   }, [currentTime, clip.sourceStartTime, clip.startTime, isPlaying]);
 
   useEffect(() => {
+    let cancelled = false;
     const audioEl = audioRef.current;
     if (audioEl) {
       if (isPlaying) {
         // Sync position ONCE right before calling play()
         const localTarget = Math.max(0, clip.sourceStartTime + (currentTime - clip.startTime));
-        if (Math.abs(audioEl.currentTime - localTarget) > 0.05) {
-          audioEl.currentTime = localTarget;
+        try {
+          if (Math.abs(audioEl.currentTime - localTarget) > 0.05) {
+            audioEl.currentTime = localTarget;
+          }
+        } catch {}
+        const playPromise = audioEl.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              if (cancelled && audioEl && !audioEl.paused) {
+                try {
+                  audioEl.pause();
+                } catch {}
+              }
+            })
+            .catch(() => {
+              // Ignore expected AbortError / NotSupportedError when pausing, seeking, or unmounting
+            });
         }
-        audioEl.play().catch((err) => console.warn('Audio play failed:', err));
       } else {
-        audioEl.pause();
+        try {
+          if (!audioEl.paused) {
+            audioEl.pause();
+          }
+        } catch {}
       }
     }
     return () => {
+      cancelled = true;
       if (audioEl) {
         try {
-          audioEl.pause();
+          if (!audioEl.paused) {
+            audioEl.pause();
+          }
         } catch {}
       }
     };
@@ -649,9 +684,10 @@ const AudioTrack: React.FC<{
     return () => {
       if (audioEl) {
         try {
-          audioEl.pause();
+          if (!audioEl.paused) {
+            audioEl.pause();
+          }
           audioEl.removeAttribute('src');
-          audioEl.load();
         } catch {}
       }
     };
@@ -1720,9 +1756,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 );
               })}
 
-              {/* Audio tracks ONLY for non-video audio clips (or hidden video tracks), never duplicating active video layers */}
+              {/* Audio tracks ONLY for non-visual audio clips (or hidden video tracks), never duplicating active visual layers */}
               {activeAudioClips
-                ?.filter((clip) => !activeLayers.some((l) => l.mediaType === 'video' && l.clip.id === clip.id))
+                ?.filter((clip) => !activeLayers.some((l) => l.clip.id === clip.id))
                 .map((clip, idx) => (
                   <AudioTrack
                     key={clip.id}

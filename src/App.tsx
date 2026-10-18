@@ -711,12 +711,19 @@ export default function App() {
       setSourceStartTime((prev) => (prev !== clipSourceStart ? clipSourceStart : prev));
       setClipEndTime((prev) => (prev !== clipEnd ? clipEnd : prev));
 
-      const aClips = audioClips.map((c) => ({
-        id: c.id,
-        url: getOrCreateFileUrl(c.file),
-        startTime: c.startTime,
-        sourceStartTime: c.sourceStartTime,
-      }));
+      const aClips = audioClips
+        .filter(
+          (c) =>
+            c.file &&
+            !c.file.type.startsWith('image/') &&
+            !/\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)
+        )
+        .map((c) => ({
+          id: c.id,
+          url: getOrCreateFileUrl(c.file),
+          startTime: c.startTime,
+          sourceStartTime: c.sourceStartTime,
+        }));
       setActiveAudioClips((prev) => {
         if (
           prev.length === aClips.length &&

@@ -134,7 +134,9 @@ function sendPlaybackRequest<T = any>(action: string, payload: any, sessionId?: 
 
     const timer = setTimeout(() => {
       pendingPlaybackRequests.delete(id);
-      console.warn(`[WebCodecsPlayback] Action "${action}" timed out (${timeoutMs}ms)`);
+      if (action === 'initSession') {
+        console.warn(`[WebCodecsPlayback] Action "${action}" timed out (${timeoutMs}ms)`);
+      }
       reject(new Error(`Playback operation "${action}" timed out`));
     }, timeoutMs);
 
@@ -308,7 +310,7 @@ export async function createWebCodecsSession(
     stopPlayback: () => {
       streamListeners.delete(sessionId);
       if (!isClosed) {
-        sendPlaybackRequest('stopPlayback', {}, sessionId, 1500).catch(() => {});
+        sendPlaybackRequest('stopPlayback', {}, sessionId, 4000).catch(() => {});
       }
     },
     renderFrame: async (timestamp: number) => {
@@ -318,7 +320,7 @@ export async function createWebCodecsSession(
           bitmap: ImageBitmap;
           timestamp: number;
           duration: number;
-        } | null>('renderFrame', { timestamp }, sessionId, 2000);
+        } | null>('renderFrame', { timestamp }, sessionId, 6000);
         return res ? res.bitmap : null;
       } catch (e) {
         return null;
@@ -328,7 +330,7 @@ export async function createWebCodecsSession(
       if (isClosed) return;
       isClosed = true;
       streamListeners.delete(sessionId);
-      sendPlaybackRequest('closeSession', {}, sessionId, 1500).catch(() => {});
+      sendPlaybackRequest('closeSession', {}, sessionId, 4000).catch(() => {});
     },
   };
 }

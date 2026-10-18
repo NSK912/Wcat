@@ -10,6 +10,7 @@ interface PlayerSession {
   rotation: number;
   fps: number;
   currentPlaybackId: number;
+  renderRequestId: number;
 }
 
 const sessions = new Map<string, PlayerSession>();
@@ -58,6 +59,7 @@ self.onmessage = async (e: MessageEvent) => {
             rotation: 0,
             fps: 0,
             currentPlaybackId: 0,
+            renderRequestId: 0,
           });
           self.postMessage({
             id,
@@ -105,6 +107,7 @@ self.onmessage = async (e: MessageEvent) => {
         }
 
         const canvasSink = new CanvasSink(videoTrack);
+        await canvasSink.init();
 
         sessions.set(sessionId, {
           input,
@@ -116,6 +119,7 @@ self.onmessage = async (e: MessageEvent) => {
           rotation,
           fps: 30,
           currentPlaybackId: 0,
+          renderRequestId: 0,
         });
 
         self.postMessage({
@@ -142,6 +146,7 @@ self.onmessage = async (e: MessageEvent) => {
 
         const { startTime = 0, playbackRate = 1, playbackId } = payload;
         session.currentPlaybackId = playbackId;
+        session.renderRequestId = (session.renderRequestId || 0) + 1;
         session.canvasSink.stopStream();
 
         self.postMessage({ id, success: true });
@@ -219,16 +224,23 @@ self.onmessage = async (e: MessageEvent) => {
 
         // Cancel any active stream when manually seeking/rendering single frame
         session.currentPlaybackId = (session.currentPlaybackId || 0) + 1;
+        const reqId = (session.renderRequestId || 0) + 1;
+        session.renderRequestId = reqId;
         session.canvasSink.stopStream();
 
         const { timestamp } = payload;
         const wrappedCanvas = await session.canvasSink.getCanvas(Math.max(0, timestamp));
-        if (!wrappedCanvas || !wrappedCanvas.canvas) {
+        if (session.renderRequestId !== reqId || !wrappedCanvas || !wrappedCanvas.canvas) {
           self.postMessage({ id, success: true, result: null });
           return;
         }
 
         const bitmap = await createImageBitmap(wrappedCanvas.canvas);
+        if (session.renderRequestId !== reqId) {
+          bitmap.close();
+          self.postMessage({ id, success: true, result: null });
+          return;
+        }
 
         (self as any).postMessage(
           {
@@ -249,6 +261,7 @@ self.onmessage = async (e: MessageEvent) => {
         const session = sessions.get(sessionId);
         if (session) {
           session.currentPlaybackId = (session.currentPlaybackId || 0) + 1;
+          session.renderRequestId = (session.renderRequestId || 0) + 1;
           session.canvasSink?.close();
           sessions.delete(sessionId);
         }
