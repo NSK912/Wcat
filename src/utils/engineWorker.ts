@@ -3378,17 +3378,21 @@ async function processImageToVideo(
     totalWritten = Math.max(totalWritten, end);
   });
 
+  const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
   const output = new Output({ format: outputFormat, target });
   const vSource = new VideoSampleSource({
     codec: targetVideoCodec,
     quality: targetQuality,
-    hardwareAcceleration: targetHwAccel
+    hardwareAcceleration: targetHwAccel,
+    latencyMode: speedConfig.latencyMode,
+    width: canvasWidth,
+    height: canvasHeight,
+    framerate: fps,
   });
   
-  output.addVideoTrack(vSource);
+  output.addVideoTrack(vSource, { width: canvasWidth, height: canvasHeight });
   await output.start();
 
-  const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
   const durationSecs = (settings.duration && settings.duration > 0) ? settings.duration : 5;
   const actualDuration = (settings.endTime > 0 && settings.endTime < durationSecs) ? settings.endTime : durationSecs;
   const frames = Math.ceil(actualDuration * fps);
@@ -3747,6 +3751,7 @@ export async function processWebCodecsEncodeStream(
       codec: targetVideoCodec,
       quality: targetQuality,
       hardwareAcceleration: targetHwAccel,
+      latencyMode: speedConfig.latencyMode,
       frameRate: (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : undefined,
       width: canvasWidth,
       height: canvasHeight,
@@ -4129,6 +4134,7 @@ export async function processWebCodecsMultiTrackTimeline(
 
   let sourceWidth = 1920;
   let sourceHeight = 1080;
+  let sourceFps = 30;
   let hasValidDims = false;
 
   for (const track of visibleTracks) {
@@ -4148,6 +4154,9 @@ export async function processWebCodecsMultiTrackTimeline(
           if (probeVTracks.length > 0) {
             sourceWidth = probeVTracks[0].displayWidth || probeVTracks[0].codedWidth || 1920;
             sourceHeight = probeVTracks[0].displayHeight || probeVTracks[0].codedHeight || 1080;
+            if (probeVTracks[0].trackInfo?.fps > 0) {
+              sourceFps = probeVTracks[0].trackInfo.fps;
+            }
             hasValidDims = true;
             break;
           }
@@ -4205,7 +4214,7 @@ export async function processWebCodecsMultiTrackTimeline(
     percentage: 1,
     statusText: `Multi-track Timeline Initialized (${targetVideoCodec.toUpperCase()} / ${targetAudioCodec.toUpperCase()})`,
     speedMBs: 0,
-    log: `[WebCodecs Pipeline] Timeline Video Codec: ${vidLog} | Audio Codec: ${audLog}`,
+    log: `[WebCodecs Pipeline] Timeline Video Codec: ${vidLog} | Audio Codec: ${audLog} | Target: ${canvasWidth}x${canvasHeight}`,
   });
 
   let outputFormat;
@@ -4221,7 +4230,9 @@ export async function processWebCodecsMultiTrackTimeline(
   let totalWritten = 0;
   target.on('write', ({ end }) => { totalWritten = Math.max(totalWritten, end); });
 
-  const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
+  const fps = (settings.fps && settings.fps > 0)
+    ? Math.min(240, Math.max(1, Math.round(settings.fps)))
+    : Math.min(240, Math.max(1, Math.round(sourceFps || 30)));
   const output = new Output({ format: outputFormat, target });
   const vSource = new VideoSampleSource({
     codec: targetVideoCodec,
@@ -4236,11 +4247,12 @@ export async function processWebCodecsMultiTrackTimeline(
 
   let aSource: AudioSampleSource | null = null;
   if (!settings.muteAudio) {
+    const targetAudioBitrate = settings.audioBitrate && settings.audioBitrate > 0 ? settings.audioBitrate * 1000 : 192000;
     aSource = new AudioSampleSource({
       codec: targetAudioCodec,
-      ...(settings.audioBitrate && settings.audioBitrate > 0 ? { bitrate: settings.audioBitrate * 1000 } : { quality: resolveQuality('high') }),
+      bitrate: targetAudioBitrate,
     });
-    output.addAudioTrack(aSource);
+    output.addAudioTrack(aSource, { bitrate: targetAudioBitrate });
   }
 
   await output.start();
@@ -4706,7 +4718,8 @@ export async function processWebCodecsConcatStream(
     canvasHeight = targetDims.height;
   }
 
-  const negotiated = await negotiateVideoCodec(preferredVideoCodec, canvasWidth, canvasHeight, targetQuality);
+  const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
+  const negotiated = await negotiateVideoCodec(preferredVideoCodec, canvasWidth, canvasHeight, targetQuality, speedConfig.hardwareAcceleration);
   const targetVideoCodec = negotiated.codec;
   const targetHwAccel = negotiated.hwAccel;
   const preferredAudioCodec: AudioCodec = (settings.audioCodec as AudioCodec) || 'aac';
@@ -4724,7 +4737,7 @@ export async function processWebCodecsConcatStream(
     percentage: 1,
     statusText: `Concat Initialized (${targetVideoCodec.toUpperCase()} / ${targetAudioCodec.toUpperCase()})`,
     speedMBs: 0,
-    log: `[WebCodecs Pipeline] Concat Video Codec: ${vidLog} | Audio Codec: ${audLog}`,
+    log: `[WebCodecs Pipeline] Concat Video Codec: ${vidLog} | Audio Codec: ${audLog} | Target: ${canvasWidth}x${canvasHeight}`,
   });
 
   const firstSeg = segments[0];
@@ -4742,22 +4755,26 @@ export async function processWebCodecsConcatStream(
     totalWritten = Math.max(totalWritten, end);
   });
   const output = new Output({ format, target });
+  const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
+  const targetAudioBitrate = settings.audioBitrate && settings.audioBitrate > 0 ? settings.audioBitrate * 1000 : 192000;
 
   // Create single continuous output tracks
   const vSource = new VideoSampleSource({
     codec: targetVideoCodec,
     quality: targetQuality,
-    hardwareAcceleration: targetHwAccel
+    hardwareAcceleration: targetHwAccel,
+    latencyMode: speedConfig.latencyMode,
+    width: canvasWidth,
+    height: canvasHeight,
+    framerate: fps,
   });
   const aSource = new AudioSampleSource({
     codec: targetAudioCodec,
-    ...(settings.audioBitrate && settings.audioBitrate > 0
-      ? { bitrate: settings.audioBitrate * 1000 }
-      : { quality: resolveQuality('high') }),
+    bitrate: targetAudioBitrate,
   });
 
-  output.addVideoTrack(vSource);
-  output.addAudioTrack(aSource);
+  output.addVideoTrack(vSource, { width: canvasWidth, height: canvasHeight });
+  output.addAudioTrack(aSource, { bitrate: targetAudioBitrate });
 
   await output.start();
 

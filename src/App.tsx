@@ -182,6 +182,8 @@ export default function App() {
   const holdStartTimeRef = useRef<number>(0);
   const hintTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const exportAbortControllerRef = useRef<AbortController | null>(null);
+  const settingsRef = useRef<EditSettings>(DEFAULT_SETTINGS);
+  settingsRef.current = settings;
 
   useEffect(() => {
     const handleResize = () => {
@@ -775,7 +777,11 @@ export default function App() {
   };
 
   const updateSettings = (newSettings: Partial<EditSettings>) => {
-    setSettings((prev) => ({ ...prev, ...newSettings }));
+    setSettings((prev) => {
+      const updated = { ...prev, ...newSettings };
+      settingsRef.current = updated;
+      return updated;
+    });
   };
 
   const handleReset = () => {
@@ -967,16 +973,17 @@ export default function App() {
 
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
 
+        const currentSettings = settingsRef.current;
         const hasVisualModifications =
-          Boolean(settings.cropAspect && settings.cropAspect !== 'original') ||
-          settings.filter !== 'none' ||
-          settings.brightness !== 1.0 ||
-          settings.contrast !== 1.0 ||
-          settings.rotation !== 0 ||
-          settings.flipH ||
-          settings.flipV ||
-          Boolean(settings.watermarkText?.trim()) ||
-          settings.muteAudio;
+          Boolean(currentSettings.cropAspect && currentSettings.cropAspect !== 'original') ||
+          currentSettings.filter !== 'none' ||
+          currentSettings.brightness !== 1.0 ||
+          currentSettings.contrast !== 1.0 ||
+          currentSettings.rotation !== 0 ||
+          currentSettings.flipH ||
+          currentSettings.flipV ||
+          Boolean(currentSettings.watermarkText?.trim()) ||
+          currentSettings.muteAudio;
 
         // When Encode Panel is closed (isEncodeMode is false), strictly use Lossless Fast Stream Copy
         const shouldUseEncodeMode = isEncodeMode ? true : hasImageClips;
@@ -986,8 +993,11 @@ export default function App() {
         // 🔴 ENCODE MODE: MULTI-TRACK CONCATENATION (WITH RE-ENCODING)
         // =====================================================================
         if (shouldUseEncodeMode) {
-          addLog(`[WebCodecs API] Hardware Accelerated Concatenation & Encoding Mode Initialized`);
-          result = await processWebCodecsConcatStream(tracks && tracks.length > 0 ? tracks : selectedFiles, settings, writable, (prog) => {
+          addLog(
+            `[WebCodecs API] Hardware Accelerated Concatenation & Encoding Mode Initialized\n` +
+            `[Encode Config] Video: ${(currentSettings.videoCodec || 'av1').toUpperCase()} | Res: ${currentSettings.resolution || '1080'}p | Quality: ${currentSettings.videoQuality || 'high'} | Speed: ${currentSettings.encodeSpeed || 'ultra-fast'} | FPS: ${currentSettings.fps ? `${currentSettings.fps} fps` : 'Auto'} | Audio: ${(currentSettings.audioCodec || 'opus').toUpperCase()} (${currentSettings.audioBitrate || 192} kbps)`
+          );
+          result = await processWebCodecsConcatStream(tracks && tracks.length > 0 ? tracks : selectedFiles, currentSettings, writable, (prog) => {
             setProcessingProgress(prog.percentage / 100);
             setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
             if (prog.log) addLog(prog.log);
@@ -1068,6 +1078,7 @@ export default function App() {
         // Trim mode or Single file
         setProcessingMessage('Streaming video processing...');
         const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
+        const currentSettings = settingsRef.current;
 
         let inputFile: File;
         if (selectedFiles.length > 0) {
@@ -1100,32 +1111,32 @@ export default function App() {
             ? singleTimelineClip.sourceEndTime
             : (clipTimelineDur > 0 ? clipTrimStart + clipTimelineDur : 0);
 
-        let currentStart = clipTrimStart > 0 ? clipTrimStart : (settings.startTime || 0);
+        let currentStart = clipTrimStart > 0 ? clipTrimStart : (currentSettings.startTime || 0);
         // Check if the user explicitly trimmed the video (either via timeline split/trim or settings)
         const isTimelineExplicitTrim =
           clipTrimStart > 0.05 ||
           (clipEndFromTimeline > 0 && currentFileDuration > 0 && clipEndFromTimeline < currentFileDuration - 0.1);
         const isSettingsExplicitTrim =
-          settings.endTime > 0 &&
+          currentSettings.endTime > 0 &&
           currentFileDuration > 0 &&
-          settings.endTime < currentFileDuration - 0.1 &&
-          (settings.duration > 0 && Math.abs(settings.endTime - settings.duration) > 0.1);
+          currentSettings.endTime < currentFileDuration - 0.1 &&
+          (currentSettings.duration > 0 && Math.abs(currentSettings.endTime - currentSettings.duration) > 0.1);
         const isUserExplicitTrim = isTimelineExplicitTrim || isSettingsExplicitTrim;
 
         const finalEndTime = isTimelineExplicitTrim
           ? (clipEndFromTimeline > currentStart ? clipEndFromTimeline : (currentFileDuration > 0 ? currentFileDuration : 0))
-          : (isSettingsExplicitTrim ? settings.endTime : (currentFileDuration > 0 ? currentFileDuration : 0));
+          : (isSettingsExplicitTrim ? currentSettings.endTime : (currentFileDuration > 0 ? currentFileDuration : 0));
         const isFullLengthRemux = currentStart === 0 && (!isUserExplicitTrim || finalEndTime === 0 || (currentFileDuration > 0 && finalEndTime >= currentFileDuration - 0.1));
         const hasVisualModifications =
-          Boolean(settings.cropAspect && settings.cropAspect !== 'original') ||
-          settings.filter !== 'none' ||
-          settings.brightness !== 1.0 ||
-          settings.contrast !== 1.0 ||
-          settings.rotation !== 0 ||
-          settings.flipH ||
-          settings.flipV ||
-          Boolean(settings.watermarkText?.trim()) ||
-          settings.muteAudio;
+          Boolean(currentSettings.cropAspect && currentSettings.cropAspect !== 'original') ||
+          currentSettings.filter !== 'none' ||
+          currentSettings.brightness !== 1.0 ||
+          currentSettings.contrast !== 1.0 ||
+          currentSettings.rotation !== 0 ||
+          currentSettings.flipH ||
+          currentSettings.flipV ||
+          Boolean(currentSettings.watermarkText?.trim()) ||
+          currentSettings.muteAudio;
 
         const isInputImage = inputFile.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(inputFile.name);
         // When Remux is requested, strictly force Remux Stream Copy (no re-encode)
@@ -1136,11 +1147,14 @@ export default function App() {
         // 🔴 ENCODE MODE: SINGLE-TRACK / TRIM (WITH RE-ENCODING)
         // =====================================================================
         if (shouldUseEncodeMode) {
-          const scaleInfo = (settings.cropAspect && settings.cropAspect !== 'original') ? `Scale: ${settings.cropAspect}, ` : '';
-          addLog(`[WebCodecs API] Hardware Accelerated Re-Encoding Mode Activated (${scaleInfo}Codec: ${(settings.videoCodec || 'av1').toUpperCase()}, Quality: ${settings.videoQuality || 'high'})`);
+          const scaleInfo = (currentSettings.cropAspect && currentSettings.cropAspect !== 'original') ? `Scale: ${currentSettings.cropAspect}, ` : '';
+          addLog(
+            `[WebCodecs API] Hardware Accelerated Re-Encoding Mode Activated\n` +
+            `[Encode Config] ${scaleInfo}Video: ${(currentSettings.videoCodec || 'av1').toUpperCase()} | Res: ${currentSettings.resolution || '1080'}p | Quality: ${currentSettings.videoQuality || 'high'} | Speed: ${currentSettings.encodeSpeed || 'ultra-fast'} | FPS: ${currentSettings.fps ? `${currentSettings.fps} fps` : 'Auto'} | Audio: ${(currentSettings.audioCodec || 'opus').toUpperCase()} (${currentSettings.audioBitrate || 192} kbps)`
+          );
           result = await processWebCodecsEncodeStream(
             inputFile,
-            settings,
+            currentSettings,
             writable,
             (prog) => {
               setProcessingProgress(prog.percentage / 100);

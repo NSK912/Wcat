@@ -2506,8 +2506,8 @@ export class WebMMuxer {
           ? d
           : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
       }
-      if (meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
-      if (meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
+      if (!this.options.width && meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
+      if (!this.options.height && meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
     }
     await this.ensureStarted();
 
@@ -2615,7 +2615,7 @@ function createBox(type: string, payload: Uint8Array): Uint8Array {
   return out;
 }
 
-function buildEsdsBox(audioSpecificConfig?: Uint8Array): Uint8Array {
+function buildEsdsBox(audioSpecificConfig?: Uint8Array, bitrate: number = 128000): Uint8Array {
   if (audioSpecificConfig && audioSpecificConfig.length > 6 && audioSpecificConfig[0] === 0 && audioSpecificConfig[4] === 0x03) {
     // Already a full esds box payload from MP4Demuxer
     return createBox('esds', audioSpecificConfig);
@@ -2627,6 +2627,7 @@ function buildEsdsBox(audioSpecificConfig?: Uint8Array): Uint8Array {
   const decConfigLen = 13 + 2 + ascLen;
   const esDescrLen = 3 + 2 + decConfigLen + 3;
   const payload = new Uint8Array(4 + 2 + esDescrLen);
+  const view = new DataView(payload.buffer);
   let p = 0;
   // version + flags = 0
   payload[p++] = 0; payload[p++] = 0; payload[p++] = 0; payload[p++] = 0;
@@ -2641,10 +2642,13 @@ function buildEsdsBox(audioSpecificConfig?: Uint8Array): Uint8Array {
   payload[p++] = 0x40; // objectTypeIndication = 0x40 (Audio ISO/IEC 14496-3)
   payload[p++] = 0x15; // streamType = 5 (AudioStream) << 2 | 1
   payload[p++] = 0x00; payload[p++] = 0x00; payload[p++] = 0x00; // bufferSizeDB
-  // maxBitrate = 128000 (0x0001f400)
-  payload[p++] = 0x00; payload[p++] = 0x01; payload[p++] = 0xf4; payload[p++] = 0x00;
-  // avgBitrate = 128000
-  payload[p++] = 0x00; payload[p++] = 0x01; payload[p++] = 0xf4; payload[p++] = 0x00;
+  const br = Math.max(32000, Math.round(bitrate || 128000));
+  // maxBitrate
+  view.setUint32(p, br);
+  p += 4;
+  // avgBitrate
+  view.setUint32(p, br);
+  p += 4;
   // DecSpecificInfoTag = 0x05
   payload[p++] = 0x05;
   payload[p++] = ascLen;
@@ -2657,11 +2661,36 @@ function buildEsdsBox(audioSpecificConfig?: Uint8Array): Uint8Array {
   return createBox('esds', payload);
 }
 
+function buildDOpsBox(channels: number = 2, sampleRate: number = 48000, description?: Uint8Array): Uint8Array {
+  // If WebCodecs provided an OpusHead (starts with 'OpusHead'), convert or extract preSkip
+  let preSkip = 312;
+  if (description && description.length >= 19) {
+    const magic = String.fromCharCode(...description.subarray(0, 8));
+    if (magic === 'OpusHead') {
+      const dv = new DataView(description.buffer, description.byteOffset, description.byteLength);
+      preSkip = dv.getUint16(10, true);
+    }
+  } else if (description && description.length >= 11 && description[0] === 0) {
+    // Already a dOps payload
+    return createBox('dOps', description);
+  }
+  const payload = new Uint8Array(11);
+  const view = new DataView(payload.buffer);
+  payload[0] = 0; // Version = 0
+  payload[1] = channels; // OutputChannelCount
+  view.setUint16(2, preSkip, false); // PreSkip (Big-Endian in ISOBMFF dOps!)
+  view.setUint32(4, sampleRate, false); // InputSampleRate (Big-Endian)
+  view.setInt16(8, 0, false); // OutputGain
+  payload[10] = 0; // ChannelMappingFamily = 0
+  return createBox('dOps', payload);
+}
+
 export interface MP4MuxerOptions {
   width?: number;
   height?: number;
   videoCodec?: string;
   audioCodec?: string;
+  audioBitrate?: number;
   sampleRate?: number;
   channels?: number;
   description?: Uint8Array;
@@ -2871,19 +2900,44 @@ export class MP4Muxer {
 
       const smhdBox = createBox('smhd', new Uint8Array(8));
 
-      const mp4aPayload = new Uint8Array(28);
-      const mp4aView = new DataView(mp4aPayload.buffer);
-      mp4aView.setUint16(6, 1); // data_reference_index = 1
-      mp4aView.setUint16(16, this.options.channels || 2);
-      mp4aView.setUint16(18, 16);
-      mp4aView.setUint32(24, (this.options.sampleRate || 48000) << 16);
+      const channels = this.options.channels || 2;
+      const sampleRate = this.options.sampleRate || 48000;
+      const aSamplePayload = new Uint8Array(28);
+      const aSampleView = new DataView(aSamplePayload.buffer);
+      aSampleView.setUint16(6, 1); // data_reference_index = 1
+      aSampleView.setUint16(16, channels); // channelcount at offset 16 (24 inside box)
+      aSampleView.setUint16(18, 16); // samplesize = 16 bits at offset 18 (26 inside box)
+      aSampleView.setUint32(24, sampleRate << 16); // samplerate 16.16 fixed-point at offset 24 (32 inside box)
 
-      const esdsBox = buildEsdsBox(this.options.audioDescription);
-      const mp4aBox = createBox('mp4a', new Uint8Array([...mp4aPayload, ...esdsBox]));
+      const ac = (this.options.audioCodec || 'aac').toLowerCase();
+      let audioBox: Uint8Array;
+      if (ac.includes('opus')) {
+        const dOpsBox = buildDOpsBox(channels, sampleRate, this.options.audioDescription);
+        audioBox = createBox('Opus', new Uint8Array([...aSamplePayload, ...dOpsBox]));
+      } else if (ac.includes('flac')) {
+        let dfLaBox = new Uint8Array(0);
+        if (this.options.audioDescription && this.options.audioDescription.length > 0) {
+          const desc = this.options.audioDescription;
+          // Strip 'fLaC' 4-byte marker if present
+          const metaBlock = (desc.length > 4 && desc[0] === 0x66 && desc[1] === 0x4c && desc[2] === 0x61 && desc[3] === 0x43)
+            ? desc.subarray(4)
+            : desc;
+          const dfLaPayload = new Uint8Array(4 + metaBlock.length);
+          dfLaPayload.set(metaBlock, 4);
+          dfLaPayload[4] |= 0x80; // Last-metadata-block flag
+          dfLaBox = createBox('dfLa', dfLaPayload);
+        }
+        audioBox = createBox('fLaC', new Uint8Array([...aSamplePayload, ...dfLaBox]));
+      } else if (ac.includes('pcm')) {
+        audioBox = createBox('sowt', aSamplePayload);
+      } else {
+        const esdsBox = buildEsdsBox(this.options.audioDescription, this.options.audioBitrate || 128000);
+        audioBox = createBox('mp4a', new Uint8Array([...aSamplePayload, ...esdsBox]));
+      }
 
-      const stsd2Payload = new Uint8Array(8 + mp4aBox.length);
+      const stsd2Payload = new Uint8Array(8 + audioBox.length);
       new DataView(stsd2Payload.buffer).setUint32(4, 1);
-      stsd2Payload.set(mp4aBox, 8);
+      stsd2Payload.set(audioBox, 8);
       const stsd2Box = createBox('stsd', stsd2Payload);
 
       const stbl2Box = createBox('stbl', new Uint8Array([...stsd2Box, ...sttsBox, ...stscBox, ...stszBox, ...stcoBox]));
@@ -2910,8 +2964,8 @@ export class MP4Muxer {
           ? d
           : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
       }
-      if (meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
-      if (meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
+      if (!this.options.width && meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
+      if (!this.options.height && meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
     }
 
     const data = new Uint8Array(chunk.byteLength);
@@ -2933,11 +2987,15 @@ export class MP4Muxer {
   }
 
   public async addAudioChunk(chunk: EncodedAudioChunk, meta?: any): Promise<void> {
-    if (meta?.decoderConfig?.description) {
-      const d = meta.decoderConfig.description;
-      this.options.audioDescription = d instanceof Uint8Array
-        ? d
-        : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+    if (meta?.decoderConfig) {
+      if (meta.decoderConfig.description) {
+        const d = meta.decoderConfig.description;
+        this.options.audioDescription = d instanceof Uint8Array
+          ? d
+          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+      }
+      if (meta.decoderConfig.sampleRate) this.options.sampleRate = meta.decoderConfig.sampleRate;
+      if (meta.decoderConfig.numberOfChannels) this.options.channels = meta.decoderConfig.numberOfChannels;
     }
     this.hasAudioTrack = true;
 
@@ -3161,6 +3219,9 @@ export async function canEncodeVideo(codec: string, config: any = {}): Promise<b
 }
 
 export async function canEncodeAudio(codec: string, config: any = {}): Promise<boolean> {
+  if (codec === 'pcm-s16' || codec === 'pcm' || codec === 'pcm-s16le') {
+    return true;
+  }
   if (typeof AudioEncoder === 'undefined' || typeof AudioEncoder.isConfigSupported !== 'function') {
     return false;
   }
@@ -3168,6 +3229,7 @@ export async function canEncodeAudio(codec: string, config: any = {}): Promise<b
     let standardCodec = codec;
     if (codec === 'aac') standardCodec = 'mp4a.40.2';
     else if (codec === 'opus') standardCodec = 'opus';
+    else if (codec === 'flac') standardCodec = 'flac';
 
     const testConfig: AudioEncoderConfig = {
       codec: standardCodec,
@@ -3274,6 +3336,37 @@ export class AudioSample {
   }
 }
 
+function calculateVideoBitrate(
+  width: number,
+  height: number,
+  fps: number,
+  quality?: Quality | QualityLevel | string,
+  codec?: string
+): number {
+  const qLevel = (quality && typeof quality === 'object' && 'level' in quality)
+    ? quality.level
+    : (quality || 'high');
+  let bpp = 0.10;
+  switch (qLevel) {
+    case 'very-low': bpp = 0.03; break;
+    case 'low': bpp = 0.05; break;
+    case 'medium': bpp = 0.09; break;
+    case 'high': bpp = 0.15; break;
+    case 'very-high': bpp = 0.25; break;
+    default:
+      if (typeof qLevel === 'number' && qLevel > 0) return qLevel;
+      bpp = 0.15;
+      break;
+  }
+  const c = (codec || 'avc').toLowerCase();
+  const codecEff = (c.includes('av1') || c.includes('av01') || c.includes('vp9') || c.includes('vp09') || c.includes('hevc') || c.includes('hvc1'))
+    ? 0.75
+    : 1.0;
+  const safeFps = Math.min(120, Math.max(15, fps || 30));
+  const rawBitrate = Math.round(width * height * safeFps * bpp * codecEff);
+  return Math.max(250_000, Math.min(120_000_000, rawBitrate));
+}
+
 export class VideoSampleSource {
   public encoder: VideoEncoder | null = null;
   public options: any;
@@ -3319,7 +3412,8 @@ export class VideoSampleSource {
       },
     });
 
-    const bitrate = this.options.bitrate || 4_000_000;
+    const fps = this.options.framerate || 30;
+    const bitrate = this.options.bitrate || calculateVideoBitrate(safeW, safeH, fps, this.options.quality, requestedCodec);
     const candidateCodecs = [
       standardCodec,
       resolveWebCodecsVideoCodecString('vp9', safeW, safeH),
@@ -3341,7 +3435,7 @@ export class VideoSampleSource {
             width: safeW,
             height: safeH,
             bitrate,
-            framerate: this.options.framerate || 30,
+            framerate: fps,
             hardwareAcceleration: hw,
             latencyMode: this.options.latencyMode || 'quality',
             ...(cStr.startsWith('avc1') ? { avc: { format: 'avc' } } : {}),
@@ -3434,23 +3528,36 @@ export class VideoSampleSource {
 export class AudioSampleSource {
   public encoder: AudioEncoder | null = null;
   public options: any;
+  public codec: string;
   public onEncodedChunk: ((chunk: EncodedAudioChunk, meta?: any) => Promise<void>) | null = null;
   public isConfigured = false;
+  private isPcmMode = false;
   private pendingOutput: Promise<void> = Promise.resolve();
 
   constructor(options: any = {}) {
     this.options = options;
+    this.codec = options.codec || 'opus';
   }
 
   public initEncoder(sampleRate: number = 48000, numberOfChannels: number = 2): void {
-    if (this.isConfigured || typeof AudioEncoder === 'undefined') return;
+    if (this.isConfigured) return;
 
-    let standardCodec = this.options.codec || 'mp4a.40.2';
+    const reqCodec = (this.options.codec || 'opus').toLowerCase();
+    if (reqCodec === 'pcm-s16' || reqCodec === 'pcm' || reqCodec === 'pcm-s16le') {
+      this.isPcmMode = true;
+      this.codec = 'pcm-s16';
+      this.options.codec = 'pcm-s16';
+      this.isConfigured = true;
+      return;
+    }
+
+    if (typeof AudioEncoder === 'undefined') return;
+
+    let standardCodec = reqCodec;
     if (standardCodec === 'aac') standardCodec = 'mp4a.40.2';
     else if (standardCodec === 'opus') standardCodec = 'opus';
     else if (standardCodec === 'flac') standardCodec = 'flac';
     else if (standardCodec === 'mp3') standardCodec = 'mp3';
-    else if (standardCodec === 'pcm-s16' || standardCodec === 'pcm') standardCodec = 'opus';
 
     this.encoder = new AudioEncoder({
       output: (chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => {
@@ -3476,23 +3583,40 @@ export class AudioSampleSource {
       },
     });
 
+    const targetBitrate = this.options.bitrate || 192_000;
+
     try {
       this.encoder.configure({
         codec: standardCodec,
         sampleRate,
         numberOfChannels,
-        bitrate: this.options.bitrate || 128_000,
+        bitrate: targetBitrate,
       });
-      this.isConfigured = true;
-    } catch {
+      if (this.encoder.state === 'configured') {
+        this.isConfigured = true;
+        return;
+      }
+    } catch {}
+
+    // Fallback order if primary codec rejected by browser AudioEncoder
+    const fallbackCodecs = [
+      { wc: 'opus', name: 'opus' },
+      { wc: 'mp4a.40.2', name: 'aac' },
+    ];
+    for (const fb of fallbackCodecs) {
       try {
         this.encoder.configure({
-          codec: 'opus',
+          codec: fb.wc,
           sampleRate: 48000,
           numberOfChannels: 2,
-          bitrate: 128_000,
+          bitrate: targetBitrate,
         });
-        this.isConfigured = true;
+        if (this.encoder.state === 'configured') {
+          this.codec = fb.name;
+          this.options.codec = fb.name;
+          this.isConfigured = true;
+          return;
+        }
       } catch (e2) {
         console.warn('AudioEncoder configure fallback failed:', e2);
       }
@@ -3500,9 +3624,52 @@ export class AudioSampleSource {
   }
 
   public async add(sample: AudioSample): Promise<void> {
-    if (!this.encoder) {
+    if (!this.isConfigured && !this.encoder) {
       this.initEncoder(sample.sampleRate, sample.numberOfChannels);
     }
+    if (!this.isConfigured) return;
+
+    if (this.isPcmMode) {
+      let floatData = sample.data;
+      if (!floatData && sample.audioData) {
+        const len = sample.audioData.numberOfFrames * sample.audioData.numberOfChannels;
+        floatData = new Float32Array(len);
+        try {
+          sample.audioData.copyTo(floatData, { planeIndex: 0 });
+        } catch {}
+      }
+      if (floatData && this.onEncodedChunk) {
+        const pcm16 = new Int16Array(floatData.length);
+        for (let i = 0; i < floatData.length; i++) {
+          const s = Math.max(-1, Math.min(1, floatData[i]));
+          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        const bytes = new Uint8Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength);
+        const tsMicros = Math.max(0, Math.round(sample.timestamp * 1e6));
+        const durMicros = Math.max(1000, Math.round((sample.duration || 0.021333) * 1e6));
+        const chunk: any = {
+          type: 'key',
+          timestamp: tsMicros,
+          duration: durMicros,
+          byteLength: bytes.byteLength,
+          data: bytes,
+          copyTo: (dest: Uint8Array) => dest.set(bytes),
+        };
+        const cb = this.onEncodedChunk;
+        this.pendingOutput = this.pendingOutput.then(() =>
+          cb(chunk, {
+            decoderConfig: {
+              codec: 'pcm-s16',
+              sampleRate: sample.sampleRate || 48000,
+              numberOfChannels: sample.numberOfChannels || 2,
+            },
+          })
+        );
+        await this.pendingOutput;
+      }
+      return;
+    }
+
     if (!this.encoder || this.encoder.state !== 'configured') return;
 
     if (sample.audioData) {
@@ -3628,6 +3795,7 @@ export class Output {
       : undefined;
     const initSampleRate = this.aOpts?.decoderConfig?.sampleRate || this.aSource?.options?.sampleRate || 48000;
     const initChannels = this.aOpts?.decoderConfig?.numberOfChannels || this.aSource?.options?.numberOfChannels || 2;
+    const initAudioBitrate = this.aOpts?.bitrate || this.aSource?.options?.bitrate || 192000;
 
     if (isWebM) {
       this.webmMuxer = new WebMMuxer({
@@ -3660,6 +3828,7 @@ export class Output {
         height: initH,
         videoCodec: this.vSource?.codec || this.vSource?.options?.codec || 'avc',
         audioCodec: this.aSource ? (this.aSource?.codec || this.aSource?.options?.codec || 'aac') : undefined,
+        audioBitrate: initAudioBitrate,
         sampleRate: initSampleRate,
         channels: initChannels,
         description: initVDesc,
@@ -4047,12 +4216,26 @@ export class Conversion {
       const file = input.getFile();
       const targetW = videoOpts.processedWidth || videoOpts.width || 1280;
       const targetH = videoOpts.processedHeight || videoOpts.height || 720;
-      const fps = videoOpts.frameRate || 30;
+
+      // Probe source FPS if user selected Auto FPS (frameRate undefined)
+      let sourceFps = 30;
+      try {
+        const vTracks = await input.getVideoTracks();
+        if (vTracks.length > 0 && vTracks[0].trackInfo?.fps > 0) {
+          sourceFps = vTracks[0].trackInfo.fps;
+        }
+      } catch {}
+
+      const explicitFps = typeof videoOpts.frameRate === 'number' && videoOpts.frameRate > 0
+        ? Math.min(240, Math.max(1, Math.round(videoOpts.frameRate)))
+        : undefined;
+      const fps = explicitFps || sourceFps || 30;
 
       const vSource = new VideoSampleSource({
         codec: videoOpts.codec || 'avc',
         quality: videoOpts.quality,
         hardwareAcceleration: videoOpts.hardwareAcceleration || 'prefer-hardware',
+        latencyMode: videoOpts.latencyMode || 'quality',
         framerate: fps,
         width: targetW,
         height: targetH,
@@ -4062,10 +4245,10 @@ export class Conversion {
       let aSource: AudioSampleSource | null = null;
       if (!audioOpts?.discard) {
         aSource = new AudioSampleSource({
-          codec: audioOpts?.codec || 'aac',
-          bitrate: audioOpts?.bitrate || 128_000,
+          codec: audioOpts?.codec || 'opus',
+          bitrate: audioOpts?.bitrate || 192_000,
         });
-        output.addAudioTrack(aSource);
+        output.addAudioTrack(aSource, { bitrate: audioOpts?.bitrate || 192_000 });
       }
 
       await output.start();
@@ -4136,25 +4319,49 @@ export class Conversion {
 
       if (sinkOk) {
         try {
+          let nextTargetOutTs = 0;
+          const targetFrameDur = 1 / fps;
+
           for await (const wrapped of sink.canvases(startTime)) {
             if (endTime !== undefined && wrapped.timestamp > endTime + 0.05) {
               break;
             }
             const outTs = Math.max(0, wrapped.timestamp - startTime);
-            const dur = wrapped.duration > 0 ? wrapped.duration : (1 / fps);
-            let sample = new VideoSample(wrapped.canvas, { timestamp: outTs, duration: dur });
+            const dur = wrapped.duration > 0 ? wrapped.duration : targetFrameDur;
 
-            if (typeof videoOpts.process === 'function') {
-              const processedCanvas = await videoOpts.process(sample);
-              if (processedCanvas) {
-                sample = new VideoSample(processedCanvas, { timestamp: outTs, duration: dur });
+            if (explicitFps) {
+              // Resample frames to match explicit user-selected FPS
+              if (outTs + dur < nextTargetOutTs - 0.002) {
+                continue;
               }
+              let sample = new VideoSample(wrapped.canvas, { timestamp: nextTargetOutTs, duration: targetFrameDur });
+              if (typeof videoOpts.process === 'function') {
+                const processedCanvas = await videoOpts.process(sample);
+                if (processedCanvas) {
+                  sample = new VideoSample(processedCanvas, { timestamp: nextTargetOutTs, duration: targetFrameDur });
+                }
+              }
+              // Emit 1 or more frames if source frame spans multiple target frame intervals
+              while (nextTargetOutTs <= outTs + dur - targetFrameDur * 0.5 || nextTargetOutTs <= outTs + 0.001) {
+                const frameSample = new VideoSample(sample.source, { timestamp: nextTargetOutTs, duration: targetFrameDur });
+                await vSource.add(frameSample);
+                nextTargetOutTs += targetFrameDur;
+                if (nextTargetOutTs > totalDur) break;
+              }
+              sample.close();
+              await encodeAudioUpTo(nextTargetOutTs);
+            } else {
+              let sample = new VideoSample(wrapped.canvas, { timestamp: outTs, duration: dur });
+              if (typeof videoOpts.process === 'function') {
+                const processedCanvas = await videoOpts.process(sample);
+                if (processedCanvas) {
+                  sample = new VideoSample(processedCanvas, { timestamp: outTs, duration: dur });
+                }
+              }
+              await vSource.add(sample);
+              sample.close();
+              await encodeAudioUpTo(outTs + dur);
             }
-
-            await vSource.add(sample);
-            sample.close();
-
-            await encodeAudioUpTo(outTs + dur);
 
             const prog = Math.min(0.98, Math.max(0.02, outTs / totalDur));
             this.onProgress(prog);
