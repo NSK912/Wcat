@@ -1080,21 +1080,36 @@ export default function App() {
           inputFile = new File([blob], `${sample.name}.mp4`, { type: 'video/mp4' });
         }
 
+        const singleTimelineClip = allVisibleClips.length === 1 ? allVisibleClips[0] : null;
+        if (singleTimelineClip?.file instanceof File) {
+          inputFile = singleTimelineClip.file;
+        }
+
         let currentFileDuration = duration;
         if (currentFileDuration === 0) {
           currentFileDuration = await getFileDuration(inputFile);
         }
 
-        let currentStart = settings.startTime || 0;
-        // Check if the user explicitly trimmed the video (rather than leaving it at default settings duration)
-        const isUserExplicitTrim =
+        const clipTrimStart = typeof singleTimelineClip?.trimStart === 'number' ? singleTimelineClip.trimStart : 0;
+        const clipDuration = typeof singleTimelineClip?.duration === 'number' && singleTimelineClip.duration > 0 ? singleTimelineClip.duration : 0;
+        const clipEndFromTimeline = clipDuration > 0 ? clipTrimStart + clipDuration : 0;
+
+        let currentStart = clipTrimStart > 0 ? clipTrimStart : (settings.startTime || 0);
+        // Check if the user explicitly trimmed the video (either via timeline split/trim or settings)
+        const isTimelineExplicitTrim =
+          clipTrimStart > 0.05 ||
+          (clipEndFromTimeline > 0 && currentFileDuration > 0 && clipEndFromTimeline < currentFileDuration - 0.1);
+        const isSettingsExplicitTrim =
           settings.endTime > 0 &&
           currentFileDuration > 0 &&
           settings.endTime < currentFileDuration - 0.1 &&
           (settings.duration > 0 && Math.abs(settings.endTime - settings.duration) > 0.1);
+        const isUserExplicitTrim = isTimelineExplicitTrim || isSettingsExplicitTrim;
 
-        const finalEndTime = isUserExplicitTrim ? settings.endTime : (currentFileDuration > 0 ? currentFileDuration : 0);
-        const isFullLengthRemux = currentStart === 0 && (!isUserExplicitTrim || finalEndTime === 0 || finalEndTime >= currentFileDuration - 0.1);
+        const finalEndTime = isTimelineExplicitTrim
+          ? (clipEndFromTimeline > currentStart ? clipEndFromTimeline : (currentFileDuration > 0 ? currentFileDuration : 0))
+          : (isSettingsExplicitTrim ? settings.endTime : (currentFileDuration > 0 ? currentFileDuration : 0));
+        const isFullLengthRemux = currentStart === 0 && (!isUserExplicitTrim || finalEndTime === 0 || (currentFileDuration > 0 && finalEndTime >= currentFileDuration - 0.1));
         const hasVisualModifications =
           Boolean(settings.cropAspect && settings.cropAspect !== 'original') ||
           settings.filter !== 'none' ||

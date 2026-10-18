@@ -904,6 +904,7 @@ export class EBMLDemuxer {
   public videoTracks: VideoTrackInfo[] = [];
   public audioTracks: AudioTrackInfo[] = [];
   private videoSamples: MediaSample[] = [];
+  private audioSamples: MediaSample[] = [];
   private segmentPayloadOffset: number = 0;
   private firstClusterOffset: number = 0;
   private headerStripMap: Map<number, Uint8Array> = new Map();
@@ -1286,14 +1287,19 @@ export class EBMLDemuxer {
     blockPayloadSize: number,
     clusterTimecode: number,
     videoTrackNum: number,
+    audioTrackNum: number,
     isSimpleBlock: boolean,
     hasReferenceBlock: boolean,
     defaultFrameDur: number,
-    samples: MediaSample[]
+    videoSamples: MediaSample[],
+    audioSamples: MediaSample[]
   ): void {
     if (blockPayloadStart + 4 > chunkBuf.length || blockPayloadSize <= 4) return;
     const tVint = readVint(chunkBuf, blockPayloadStart);
-    if (!tVint || tVint.value !== videoTrackNum) return;
+    if (!tVint) return;
+    const isVideo = tVint.value === videoTrackNum;
+    const isAudio = audioTrackNum > 0 && tVint.value === audioTrackNum;
+    if (!isVideo && !isAudio) return;
 
     const headerBaseLen = tVint.length + 3;
     if (blockPayloadSize <= headerBaseLen || blockPayloadStart + headerBaseLen > chunkBuf.length) return;
@@ -1302,7 +1308,7 @@ export class EBMLDemuxer {
     const timecodeRel = (chunkBuf[timeOffset] << 8) | chunkBuf[timeOffset + 1];
     const signedRel = (timecodeRel & 0x8000) ? timecodeRel - 0x10000 : timecodeRel;
     const flags = chunkBuf[timeOffset + 2];
-    const isKey = isSimpleBlock ? (flags & 0x80) !== 0 : !hasReferenceBlock;
+    const isKey = isAudio ? true : (isSimpleBlock ? (flags & 0x80) !== 0 : !hasReferenceBlock);
     const lacing = (flags & 0x06) >> 1;
 
     let headerExtra = 0;
@@ -1358,13 +1364,14 @@ export class EBMLDemuxer {
     if (payloadSize <= 0) return;
 
     const timeSec = Math.max(0, ((clusterTimecode + signedRel) * this.timecodeScale) / 1e9);
+    const targetList = isVideo ? videoSamples : audioSamples;
 
-    samples.push({
-      index: samples.length,
-      trackId: videoTrackNum,
+    targetList.push({
+      index: targetList.length,
+      trackId: tVint.value,
       timestamp: timeSec,
       dts: timeSec,
-      duration: defaultFrameDur,
+      duration: isVideo ? defaultFrameDur : 0.02,
       isKeyframe: isKey,
       offset: payloadOffset,
       size: payloadSize,
@@ -1375,8 +1382,11 @@ export class EBMLDemuxer {
     if (this.videoSamples.length > 0) return this.videoSamples;
 
     const samples: MediaSample[] = [];
+    const aSamples: MediaSample[] = [];
     const vTrack = this.videoTracks[0];
+    const aTrack = this.audioTracks[0];
     const videoTrackNum = vTrack?.id || 1;
+    const audioTrackNum = aTrack?.id || -1;
     const defaultFrameDur = 1 / (vTrack?.fps || 30);
 
     let filePos = this.firstClusterOffset > 0
@@ -1439,10 +1449,12 @@ export class EBMLDemuxer {
             el.size,
             clusterTimecode,
             videoTrackNum,
+            audioTrackNum,
             true,
             false,
             defaultFrameDur,
-            samples
+            samples,
+            aSamples
           );
           p += el.totalHeaderLen + el.size;
           continue;
@@ -1485,10 +1497,12 @@ export class EBMLDemuxer {
               foundBlockSize,
               clusterTimecode,
               videoTrackNum,
+              audioTrackNum,
               false,
               hasReferenceBlock,
               blockDur,
-              samples
+              samples,
+              aSamples
             );
           }
           p += el.totalHeaderLen + el.size;
@@ -1527,8 +1541,24 @@ export class EBMLDemuxer {
       }
     }
 
+    for (let i = 0; i < aSamples.length; i++) {
+      if (i + 1 < aSamples.length) {
+        const d = aSamples[i + 1].timestamp - aSamples[i].timestamp;
+        if (d > 0 && d < 1.0) aSamples[i].duration = d;
+      }
+    }
+
     this.videoSamples = samples;
+    this.audioSamples = aSamples;
     return samples;
+  }
+
+  public getVideoSamples(): MediaSample[] {
+    return this.videoSamples;
+  }
+
+  public getAudioSamples(): MediaSample[] {
+    return this.audioSamples;
   }
 
   public async readSampleData(sample: MediaSample): Promise<Uint8Array> {
@@ -2337,6 +2367,9 @@ export interface WebMMuxerOptions {
   audioCodec?: string;
   sampleRate?: number;
   channels?: number;
+  videoDescription?: Uint8Array;
+  audioDescription?: Uint8Array;
+  isMkv?: boolean;
   onChunk: (chunk: StreamTargetChunk) => Promise<void> | void;
 }
 
@@ -2346,13 +2379,22 @@ export class WebMMuxer {
   private currentClusterBlocks: Uint8Array[] = [];
   private totalBytes = 0;
   private durationSec = 0;
+  private isHeaderSent = false;
 
   constructor(options: WebMMuxerOptions) {
     this.options = options;
   }
 
   public async start(): Promise<void> {
-    const docType = encodeElement('4282', encodeString('webm'));
+    // Lazy header emission in ensureStarted() once codec metadata/dimensions are finalized
+  }
+
+  private async ensureStarted(): Promise<void> {
+    if (this.isHeaderSent) return;
+    this.isHeaderSent = true;
+
+    const docTypeStr = this.options.isMkv ? 'matroska' : 'webm';
+    const docType = encodeElement('4282', encodeString(docTypeStr));
     const docTypeVer = encodeElement('4287', encodeUint(4));
     const docTypeReadVer = encodeElement('4285', encodeUint(2));
     const ebmlHdr = encodeElement('1a45dfa3', new Uint8Array([...docType, ...docTypeVer, ...docTypeReadVer]));
@@ -2377,14 +2419,18 @@ export class WebMMuxer {
       const c = (this.options.videoCodec || '').toLowerCase();
       if (c.includes('vp8')) codecIdStr = 'V_VP8';
       else if (c.includes('av1') || c.includes('av01')) codecIdStr = 'V_AV1';
+      else if (c.includes('hevc') || c.includes('hvc1') || c.includes('hev1') || c.includes('265')) codecIdStr = 'V_MPEGH/ISO/HEVC';
       else if (c.includes('avc') || c.includes('264')) codecIdStr = 'V_MPEG4/ISO/AVC';
 
       const codecId = encodeElement('86', encodeString(codecIdStr));
+      const codecPrivateEl = (this.options.videoDescription && this.options.videoDescription.byteLength > 0)
+        ? encodeElement('63a2', this.options.videoDescription)
+        : new Uint8Array(0);
       const pixelW = encodeElement('b0', encodeUint(this.options.width));
       const pixelH = encodeElement('ba', encodeUint(this.options.height));
       const videoSettings = encodeElement('e0', new Uint8Array([...pixelW, ...pixelH]));
 
-      const vEntry = encodeElement('ae', new Uint8Array([...trackNum, ...trackUid, ...trackType, ...codecId, ...videoSettings]));
+      const vEntry = encodeElement('ae', new Uint8Array([...trackNum, ...trackUid, ...trackType, ...codecId, ...codecPrivateEl, ...videoSettings]));
       trackEntries.push(...vEntry);
     }
 
@@ -2392,13 +2438,46 @@ export class WebMMuxer {
       const trackNum = encodeElement('d7', encodeUint(2));
       const trackUid = encodeElement('73c5', encodeUint(2));
       const trackType = encodeElement('83', encodeUint(2));
-      const codecId = encodeElement('86', encodeString('A_OPUS'));
 
-      const sRate = encodeElement('b5', encodeFloat(this.options.sampleRate || 48000));
-      const chans = encodeElement('9f', encodeUint(this.options.channels || 2));
+      let aCodecIdStr = 'A_OPUS';
+      const ac = (this.options.audioCodec || '').toLowerCase();
+      if (ac.includes('aac') || ac.includes('mp4a')) aCodecIdStr = 'A_AAC';
+      else if (ac.includes('vorbis')) aCodecIdStr = 'A_VORBIS';
+      else if (ac.includes('flac')) aCodecIdStr = 'A_FLAC';
+      else if (ac.includes('mp3')) aCodecIdStr = 'A_MPEG/L3';
+      else if (ac.includes('pcm')) aCodecIdStr = 'A_PCM/INT/LIT';
+
+      const codecId = encodeElement('86', encodeString(aCodecIdStr));
+      const sr = this.options.sampleRate || 48000;
+      const ch = this.options.channels || 2;
+
+      let aPrivBytes: Uint8Array | undefined = this.options.audioDescription;
+      if (!aPrivBytes || aPrivBytes.byteLength === 0) {
+        if (aCodecIdStr === 'A_OPUS') {
+          const opusHead = new Uint8Array(19);
+          opusHead.set(encodeString('OpusHead'), 0);
+          opusHead[8] = 1;
+          opusHead[9] = ch;
+          opusHead[10] = 0x38;
+          opusHead[11] = 0x01;
+          new DataView(opusHead.buffer).setUint32(12, sr, true);
+          opusHead[16] = 0;
+          opusHead[17] = 0;
+          opusHead[18] = 0;
+          aPrivBytes = opusHead;
+        } else if (aCodecIdStr === 'A_AAC') {
+          aPrivBytes = new Uint8Array([0x11, 0x90]);
+        }
+      }
+      const aCodecPrivEl = (aPrivBytes && aPrivBytes.byteLength > 0)
+        ? encodeElement('63a2', aPrivBytes)
+        : new Uint8Array(0);
+
+      const sRate = encodeElement('b5', encodeFloat(sr));
+      const chans = encodeElement('9f', encodeUint(ch));
       const audioSettings = encodeElement('e1', new Uint8Array([...sRate, ...chans]));
 
-      const aEntry = encodeElement('ae', new Uint8Array([...trackNum, ...trackUid, ...trackType, ...codecId, ...audioSettings]));
+      const aEntry = encodeElement('ae', new Uint8Array([...trackNum, ...trackUid, ...trackType, ...codecId, ...aCodecPrivEl, ...audioSettings]));
       trackEntries.push(...aEntry);
     }
 
@@ -2407,8 +2486,20 @@ export class WebMMuxer {
     await this.emitChunk(initData);
   }
 
-  public async addVideoChunk(chunk: EncodedVideoChunk): Promise<void> {
-    const timeMs = Math.round(chunk.timestamp / 1000);
+  public async addVideoChunk(chunk: EncodedVideoChunk, meta?: any): Promise<void> {
+    if (meta?.decoderConfig) {
+      if (meta.decoderConfig.description) {
+        const d = meta.decoderConfig.description;
+        this.options.videoDescription = d instanceof Uint8Array
+          ? d
+          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+      }
+      if (meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
+      if (meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
+    }
+    await this.ensureStarted();
+
+    const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
     this.durationSec = Math.max(this.durationSec, chunk.timestamp / 1e6);
 
     const data = new Uint8Array(chunk.byteLength);
@@ -2417,8 +2508,16 @@ export class WebMMuxer {
     await this.addBlock(1, timeMs, chunk.type === 'key', data);
   }
 
-  public async addAudioChunk(chunk: EncodedAudioChunk): Promise<void> {
-    const timeMs = Math.round(chunk.timestamp / 1000);
+  public async addAudioChunk(chunk: EncodedAudioChunk, meta?: any): Promise<void> {
+    if (meta?.decoderConfig?.description) {
+      const d = meta.decoderConfig.description;
+      this.options.audioDescription = d instanceof Uint8Array
+        ? d
+        : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+    }
+    await this.ensureStarted();
+
+    const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
     this.durationSec = Math.max(this.durationSec, chunk.timestamp / 1e6);
 
     const data = new Uint8Array(chunk.byteLength);
@@ -2428,7 +2527,12 @@ export class WebMMuxer {
   }
 
   private async addBlock(trackNum: number, timeMs: number, isKey: boolean, data: Uint8Array): Promise<void> {
-    if (this.currentClusterTimecode < 0 || (isKey && trackNum === 1 && timeMs - this.currentClusterTimecode >= 1000) || timeMs - this.currentClusterTimecode >= 2000) {
+    if (
+      this.currentClusterTimecode < 0 ||
+      timeMs < this.currentClusterTimecode ||
+      (isKey && trackNum === 1 && timeMs - this.currentClusterTimecode >= 1000) ||
+      timeMs - this.currentClusterTimecode >= 2000
+    ) {
       await this.flushCluster();
       this.currentClusterTimecode = timeMs;
     }
@@ -2478,6 +2582,7 @@ export class WebMMuxer {
   }
 
   public async finalize(): Promise<void> {
+    await this.ensureStarted();
     await this.flushCluster();
   }
 }
@@ -2498,6 +2603,48 @@ function createBox(type: string, payload: Uint8Array): Uint8Array {
   return out;
 }
 
+function buildEsdsBox(audioSpecificConfig?: Uint8Array): Uint8Array {
+  if (audioSpecificConfig && audioSpecificConfig.length > 6 && audioSpecificConfig[0] === 0 && audioSpecificConfig[4] === 0x03) {
+    // Already a full esds box payload from MP4Demuxer
+    return createBox('esds', audioSpecificConfig);
+  }
+  const asc = (audioSpecificConfig && audioSpecificConfig.length >= 2)
+    ? audioSpecificConfig
+    : new Uint8Array([0x11, 0x90]); // 48000Hz 2ch AAC-LC
+  const ascLen = asc.length;
+  const decConfigLen = 13 + 2 + ascLen;
+  const esDescrLen = 3 + 2 + decConfigLen + 3;
+  const payload = new Uint8Array(4 + 2 + esDescrLen);
+  let p = 0;
+  // version + flags = 0
+  payload[p++] = 0; payload[p++] = 0; payload[p++] = 0; payload[p++] = 0;
+  // ES_DescrTag = 0x03
+  payload[p++] = 0x03;
+  payload[p++] = esDescrLen;
+  payload[p++] = 0x00; payload[p++] = 0x02; // ES_ID = 2
+  payload[p++] = 0x00; // flags
+  // DecoderConfigDescrTag = 0x04
+  payload[p++] = 0x04;
+  payload[p++] = decConfigLen;
+  payload[p++] = 0x40; // objectTypeIndication = 0x40 (Audio ISO/IEC 14496-3)
+  payload[p++] = 0x15; // streamType = 5 (AudioStream) << 2 | 1
+  payload[p++] = 0x00; payload[p++] = 0x00; payload[p++] = 0x00; // bufferSizeDB
+  // maxBitrate = 128000 (0x0001f400)
+  payload[p++] = 0x00; payload[p++] = 0x01; payload[p++] = 0xf4; payload[p++] = 0x00;
+  // avgBitrate = 128000
+  payload[p++] = 0x00; payload[p++] = 0x01; payload[p++] = 0xf4; payload[p++] = 0x00;
+  // DecSpecificInfoTag = 0x05
+  payload[p++] = 0x05;
+  payload[p++] = ascLen;
+  payload.set(asc, p);
+  p += ascLen;
+  // SLConfigDescrTag = 0x06
+  payload[p++] = 0x06;
+  payload[p++] = 0x01;
+  payload[p++] = 0x02;
+  return createBox('esds', payload);
+}
+
 export interface MP4MuxerOptions {
   width?: number;
   height?: number;
@@ -2506,6 +2653,7 @@ export interface MP4MuxerOptions {
   sampleRate?: number;
   channels?: number;
   description?: Uint8Array;
+  audioDescription?: Uint8Array;
   onChunk: (chunk: StreamTargetChunk) => Promise<void> | void;
 }
 
@@ -2523,14 +2671,23 @@ export class MP4Muxer {
   private queuedVideo: QueuedSample[] = [];
   private queuedAudio: QueuedSample[] = [];
   private isHeaderSent = false;
+  private hasAudioTrack = false;
 
   constructor(options: MP4MuxerOptions) {
     this.options = options;
+    this.hasAudioTrack = Boolean(options.audioCodec);
   }
 
   public async start(): Promise<void> {
+    // Lazy header emission in ensureStarted() once codec description (avcC/hvcC/av1C) and dimensions are known
+  }
+
+  private async ensureStarted(): Promise<void> {
     if (this.isHeaderSent) return;
     this.isHeaderSent = true;
+    if (this.queuedAudio.length > 0) {
+      this.hasAudioTrack = true;
+    }
 
     const ftypPayload = new Uint8Array([
       0x69, 0x73, 0x6f, 0x6d,
@@ -2551,7 +2708,7 @@ export class MP4Muxer {
     mvhdView.setUint32(36, 0x00010000);
     mvhdView.setUint32(52, 0x00010000);
     mvhdView.setUint32(68, 0x40000000);
-    mvhdView.setUint32(76, 3);
+    mvhdView.setUint32(96, this.hasAudioTrack ? 3 : 2);
     const mvhdBox = createBox('mvhd', mvhdPayload);
 
     const trex1Payload = new Uint8Array(24);
@@ -2560,15 +2717,19 @@ export class MP4Muxer {
     trex1View.setUint32(8, 1);
     const trex1Box = createBox('trex', trex1Payload);
 
-    const trex2Payload = new Uint8Array(24);
-    const trex2View = new DataView(trex2Payload.buffer);
-    trex2View.setUint32(4, 2);
-    trex2View.setUint32(8, 1);
-    const trex2Box = createBox('trex', trex2Payload);
-
-    const mvexPayload = new Uint8Array(trex1Box.length + trex2Box.length);
-    mvexPayload.set(trex1Box, 0);
-    mvexPayload.set(trex2Box, trex1Box.length);
+    let mvexPayload: Uint8Array;
+    if (this.hasAudioTrack) {
+      const trex2Payload = new Uint8Array(24);
+      const trex2View = new DataView(trex2Payload.buffer);
+      trex2View.setUint32(4, 2);
+      trex2View.setUint32(8, 1);
+      const trex2Box = createBox('trex', trex2Payload);
+      mvexPayload = new Uint8Array(trex1Box.length + trex2Box.length);
+      mvexPayload.set(trex1Box, 0);
+      mvexPayload.set(trex2Box, trex1Box.length);
+    } else {
+      mvexPayload = trex1Box;
+    }
     const mvexBox = createBox('mvex', mvexPayload);
 
     const w = this.options.width || 1280;
@@ -2608,28 +2769,53 @@ export class MP4Muxer {
     const drefBox = createBox('dref', drefPayload);
     const dinfBox = createBox('dinf', drefBox);
 
-    const avc1Payload = new Uint8Array(78);
-    const avc1View = new DataView(avc1Payload.buffer);
-    avc1View.setUint16(6, 1);
-    avc1View.setUint16(24, w);
-    avc1View.setUint16(26, h);
-    avc1View.setUint32(28, 0x00480000);
-    avc1View.setUint32(32, 0x00480000);
-    avc1View.setUint16(40, 1);
-    avc1View.setUint16(74, 24);
-    avc1View.setInt16(76, -1);
+    const vSamplePayload = new Uint8Array(78);
+    const vSampleView = new DataView(vSamplePayload.buffer);
+    vSampleView.setUint16(6, 1);
+    vSampleView.setUint16(24, w);
+    vSampleView.setUint16(26, h);
+    vSampleView.setUint32(28, 0x00480000);
+    vSampleView.setUint32(32, 0x00480000);
+    vSampleView.setUint16(40, 1);
+    vSampleView.setUint16(74, 24);
+    vSampleView.setInt16(76, -1);
 
-    let avcCBox = new Uint8Array(0);
-    if (this.options.description && this.options.description.length > 0) {
-      avcCBox = createBox('avcC', this.options.description);
+    const vc = (this.options.videoCodec || 'avc').toLowerCase();
+    let sampleEntryTag = 'avc1';
+    let configBox = new Uint8Array(0);
+
+    if (vc.includes('hevc') || vc.includes('hvc1') || vc.includes('hev1') || vc.includes('265')) {
+      sampleEntryTag = 'hvc1';
+      if (this.options.description && this.options.description.length > 0) {
+        configBox = createBox('hvcC', this.options.description);
+      }
+    } else if (vc.includes('av1') || vc.includes('av01')) {
+      sampleEntryTag = 'av01';
+      if (this.options.description && this.options.description.length > 0) {
+        configBox = createBox('av1C', this.options.description);
+      } else {
+        configBox = createBox('av1C', new Uint8Array([0x81, 0x04, 0x0c, 0x00]));
+      }
+    } else if (vc.includes('vp9') || vc.includes('vp09')) {
+      sampleEntryTag = 'vp09';
+      if (this.options.description && this.options.description.length > 0) {
+        configBox = createBox('vpcC', this.options.description);
+      } else {
+        configBox = createBox('vpcC', new Uint8Array([0x01, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x80, 0x01, 0x01, 0x01, 0x00, 0x00]));
+      }
     } else {
-      avcCBox = createBox('avcC', new Uint8Array([0x01, 0x64, 0x00, 0x1f, 0xff, 0xe1, 0x00, 0x00, 0x00]));
+      sampleEntryTag = 'avc1';
+      if (this.options.description && this.options.description.length > 0) {
+        configBox = createBox('avcC', this.options.description);
+      } else {
+        configBox = createBox('avcC', new Uint8Array([0x01, 0x64, 0x00, 0x1f, 0xff, 0xe1, 0x00, 0x00, 0x00]));
+      }
     }
 
-    const avc1Box = createBox('avc1', new Uint8Array([...avc1Payload, ...avcCBox]));
-    const stsdPayload = new Uint8Array(8 + avc1Box.length);
+    const vSampleBox = createBox(sampleEntryTag, new Uint8Array([...vSamplePayload, ...configBox]));
+    const stsdPayload = new Uint8Array(8 + vSampleBox.length);
     new DataView(stsdPayload.buffer).setUint32(4, 1);
-    stsdPayload.set(avc1Box, 8);
+    stsdPayload.set(vSampleBox, 8);
     const stsdBox = createBox('stsd', stsdPayload);
 
     const sttsBox = createBox('stts', new Uint8Array(8));
@@ -2645,7 +2831,56 @@ export class MP4Muxer {
     const mdiaBox = createBox('mdia', mdiaPayload);
 
     const trak1Box = createBox('trak', new Uint8Array([...tkhdBox, ...mdiaBox]));
-    const moovPayload = new Uint8Array([...mvhdBox, ...trak1Box, ...mvexBox]);
+
+    let trak2Box = new Uint8Array(0);
+    if (this.hasAudioTrack) {
+      const tkhd2Payload = new Uint8Array(84);
+      const tkhd2View = new DataView(tkhd2Payload.buffer);
+      tkhd2View.setUint32(0, 0x00000007);
+      tkhd2View.setUint32(12, 2); // track_ID = 2
+      tkhd2View.setUint16(32, 0x0100); // volume = 1.0
+      tkhd2View.setUint32(36, 0x00010000);
+      tkhd2View.setUint32(52, 0x00010000);
+      tkhd2View.setUint32(68, 0x40000000);
+      const tkhd2Box = createBox('tkhd', tkhd2Payload);
+
+      const mdhd2Payload = new Uint8Array(24);
+      new DataView(mdhd2Payload.buffer).setUint32(12, 1000); // timescale = 1000ms
+      const mdhd2Box = createBox('mdhd', mdhd2Payload);
+
+      const hdlr2Payload = new Uint8Array([
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0x73, 0x6f, 0x75, 0x6e, // 'soun'
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0x53, 0x6f, 0x75, 0x6e, 0x64, 0x48, 0x61, 0x6e, 0x64, 0x6c, 0x65, 0x72, 0
+      ]);
+      const hdlr2Box = createBox('hdlr', hdlr2Payload);
+
+      const smhdBox = createBox('smhd', new Uint8Array(8));
+
+      const mp4aPayload = new Uint8Array(28);
+      const mp4aView = new DataView(mp4aPayload.buffer);
+      mp4aView.setUint16(6, 1); // data_reference_index = 1
+      mp4aView.setUint16(16, this.options.channels || 2);
+      mp4aView.setUint16(18, 16);
+      mp4aView.setUint32(24, (this.options.sampleRate || 48000) << 16);
+
+      const esdsBox = buildEsdsBox(this.options.audioDescription);
+      const mp4aBox = createBox('mp4a', new Uint8Array([...mp4aPayload, ...esdsBox]));
+
+      const stsd2Payload = new Uint8Array(8 + mp4aBox.length);
+      new DataView(stsd2Payload.buffer).setUint32(4, 1);
+      stsd2Payload.set(mp4aBox, 8);
+      const stsd2Box = createBox('stsd', stsd2Payload);
+
+      const stbl2Box = createBox('stbl', new Uint8Array([...stsd2Box, ...sttsBox, ...stscBox, ...stszBox, ...stcoBox]));
+      const minf2Box = createBox('minf', new Uint8Array([...smhdBox, ...dinfBox, ...stbl2Box]));
+      const mdia2Box = createBox('mdia', new Uint8Array([...mdhd2Box, ...hdlr2Box, ...minf2Box]));
+      trak2Box = createBox('trak', new Uint8Array([...tkhd2Box, ...mdia2Box]));
+    }
+
+    const moovPayload = new Uint8Array([...mvhdBox, ...trak1Box, ...trak2Box, ...mvexBox]);
     const moovBox = createBox('moov', moovPayload);
 
     const initData = new Uint8Array(ftypBox.length + moovBox.length);
@@ -2655,13 +2890,22 @@ export class MP4Muxer {
     await this.emitChunk(initData);
   }
 
-  public async addVideoChunk(chunk: EncodedVideoChunk): Promise<void> {
-    if (!this.isHeaderSent) await this.start();
+  public async addVideoChunk(chunk: EncodedVideoChunk, meta?: any): Promise<void> {
+    if (meta?.decoderConfig) {
+      if (meta.decoderConfig.description) {
+        const d = meta.decoderConfig.description;
+        this.options.description = d instanceof Uint8Array
+          ? d
+          : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+      }
+      if (meta.decoderConfig.codedWidth) this.options.width = meta.decoderConfig.codedWidth;
+      if (meta.decoderConfig.codedHeight) this.options.height = meta.decoderConfig.codedHeight;
+    }
 
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
 
-    const timeMs = Math.round(chunk.timestamp / 1000);
+    const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
     const durMs = Math.max(1, Math.round((chunk.duration || 33333) / 1000));
 
     this.queuedVideo.push({
@@ -2676,13 +2920,19 @@ export class MP4Muxer {
     }
   }
 
-  public async addAudioChunk(chunk: EncodedAudioChunk): Promise<void> {
-    if (!this.isHeaderSent) await this.start();
+  public async addAudioChunk(chunk: EncodedAudioChunk, meta?: any): Promise<void> {
+    if (meta?.decoderConfig?.description) {
+      const d = meta.decoderConfig.description;
+      this.options.audioDescription = d instanceof Uint8Array
+        ? d
+        : new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer, d.byteOffset || 0, d.byteLength);
+    }
+    this.hasAudioTrack = true;
 
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
 
-    const timeMs = Math.round(chunk.timestamp / 1000);
+    const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
     const durMs = Math.max(1, Math.round((chunk.duration || 21333) / 1000));
 
     this.queuedAudio.push({
@@ -2691,13 +2941,14 @@ export class MP4Muxer {
       durationMs: durMs,
       isKey: true,
     });
+
+    if (this.queuedAudio.length >= 60 && this.isHeaderSent) {
+      await this.flushAudioFragment();
+    }
   }
 
-  private async flushFragment(): Promise<void> {
-    if (this.queuedVideo.length === 0) return;
-
-    const samples = this.queuedVideo;
-    this.queuedVideo = [];
+  private async emitTrackFragment(trackId: number, samples: QueuedSample[]): Promise<void> {
+    if (samples.length === 0) return;
 
     let mdatDataSize = 0;
     for (const s of samples) mdatDataSize += s.data.length;
@@ -2709,11 +2960,11 @@ export class MP4Muxer {
     const tfhdPayload = new Uint8Array(8);
     const tfhdView = new DataView(tfhdPayload.buffer);
     tfhdView.setUint32(0, 0x020000);
-    tfhdView.setUint32(4, 1);
+    tfhdView.setUint32(4, trackId);
     const tfhdBox = createBox('tfhd', tfhdPayload);
 
     const tfdtPayload = new Uint8Array(8);
-    new DataView(tfdtPayload.buffer).setUint32(4, samples[0].timestampMs);
+    new DataView(tfdtPayload.buffer).setUint32(4, Math.max(0, samples[0].timestampMs));
     const tfdtBox = createBox('tfdt', tfdtPayload);
 
     const trunHeaderSize = 16;
@@ -2760,6 +3011,30 @@ export class MP4Muxer {
     await this.emitChunk(fragment);
   }
 
+  private async flushAudioFragment(): Promise<void> {
+    if (this.queuedAudio.length === 0) return;
+    await this.ensureStarted();
+    const aSamples = this.queuedAudio;
+    this.queuedAudio = [];
+    await this.emitTrackFragment(2, aSamples);
+  }
+
+  private async flushFragment(): Promise<void> {
+    if (this.queuedVideo.length === 0 && this.queuedAudio.length === 0) return;
+    await this.ensureStarted();
+
+    if (this.queuedVideo.length > 0) {
+      const vSamples = this.queuedVideo;
+      this.queuedVideo = [];
+      await this.emitTrackFragment(1, vSamples);
+    }
+    if (this.queuedAudio.length > 0) {
+      const aSamples = this.queuedAudio;
+      this.queuedAudio = [];
+      await this.emitTrackFragment(2, aSamples);
+    }
+  }
+
   private async emitChunk(data: Uint8Array): Promise<void> {
     const pos = this.totalBytes;
     this.totalBytes += data.byteLength;
@@ -2770,7 +3045,7 @@ export class MP4Muxer {
   }
 
   public async finalize(): Promise<void> {
-    if (!this.isHeaderSent) await this.start();
+    await this.ensureStarted();
     await this.flushFragment();
   }
 }
@@ -2969,8 +3244,10 @@ export class AudioSample {
 export class VideoSampleSource {
   public encoder: VideoEncoder | null = null;
   public options: any;
-  public onEncodedChunk: ((chunk: EncodedVideoChunk) => Promise<void>) | null = null;
+  public onEncodedChunk: ((chunk: EncodedVideoChunk, meta?: any) => Promise<void>) | null = null;
   public isConfigured = false;
+  private pendingOutput: Promise<void> = Promise.resolve();
+  private frameCounter = 0;
 
   constructor(options: any = {}) {
     this.options = options;
@@ -2979,16 +3256,33 @@ export class VideoSampleSource {
   public initEncoder(width: number, height: number): void {
     if (this.isConfigured || typeof VideoEncoder === 'undefined') return;
 
+    const safeW = Math.max(16, width - (width % 2));
+    const safeH = Math.max(16, height - (height % 2));
+
     let standardCodec = this.options.codec || 'avc1.640028';
     if (standardCodec === 'avc') standardCodec = 'avc1.640028';
+    else if (standardCodec === 'hevc') standardCodec = 'hvc1.1.6.L93.B0';
     else if (standardCodec === 'vp9') standardCodec = 'vp09.00.10.08';
     else if (standardCodec === 'vp8') standardCodec = 'vp8';
     else if (standardCodec === 'av1') standardCodec = 'av01.0.04M.08';
 
     this.encoder = new VideoEncoder({
-      output: async (chunk: EncodedVideoChunk) => {
+      output: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        const clonedChunk: any = {
+          type: chunk.type,
+          timestamp: chunk.timestamp,
+          duration: chunk.duration || 33333,
+          byteLength: data.byteLength,
+          data,
+          copyTo: (dest: Uint8Array) => dest.set(data),
+        };
         if (this.onEncodedChunk) {
-          await this.onEncodedChunk(chunk);
+          const cb = this.onEncodedChunk;
+          this.pendingOutput = this.pendingOutput.then(() => cb(clonedChunk, meta)).catch((err) => {
+            console.warn('Error writing encoded video chunk:', err);
+          });
         }
       },
       error: (e) => {
@@ -2997,28 +3291,40 @@ export class VideoSampleSource {
     });
 
     const bitrate = this.options.bitrate || 4_000_000;
-    this.encoder.configure({
+    const baseConfig: VideoEncoderConfig = {
       codec: standardCodec,
-      width,
-      height,
+      width: safeW,
+      height: safeH,
       bitrate,
       framerate: this.options.framerate || 30,
       hardwareAcceleration: this.options.hardwareAcceleration || 'prefer-hardware',
       latencyMode: this.options.latencyMode || 'quality',
-    });
-    this.isConfigured = true;
+      ...(standardCodec.startsWith('avc1') ? { avc: { format: 'avc' } } : {}),
+    };
+
+    try {
+      this.encoder.configure(baseConfig);
+      this.isConfigured = true;
+    } catch {
+      try {
+        this.encoder.configure({ ...baseConfig, hardwareAcceleration: 'no-preference' });
+        this.isConfigured = true;
+      } catch (e2) {
+        console.warn('VideoEncoder fallback configure failed:', e2);
+      }
+    }
   }
 
   public async add(sample: VideoSample): Promise<void> {
     if (!this.encoder) {
-      const w = (sample.source as any).width || 1280;
-      const h = (sample.source as any).height || 720;
+      const w = this.options.width || (sample.source as any).width || sample.displayWidth || 1280;
+      const h = this.options.height || (sample.source as any).height || sample.displayHeight || 720;
       this.initEncoder(w, h);
     }
-    if (!this.encoder) return;
+    if (!this.encoder || this.encoder.state !== 'configured') return;
 
-    const tsMicros = Math.round(sample.timestamp * 1e6);
-    const durMicros = sample.duration ? Math.round(sample.duration * 1e6) : 33333;
+    const tsMicros = Math.max(0, Math.round(sample.timestamp * 1e6));
+    const durMicros = sample.duration ? Math.max(1000, Math.round(sample.duration * 1e6)) : 33333;
 
     let frame: VideoFrame;
     if (sample.source instanceof VideoFrame) {
@@ -3030,8 +3336,11 @@ export class VideoSampleSource {
       });
     }
 
+    const isKeyFrame = this.frameCounter % 60 === 0;
+    this.frameCounter++;
+
     try {
-      this.encoder.encode(frame);
+      this.encoder.encode(frame, { keyFrame: isKeyFrame });
     } finally {
       if (frame !== sample.source) {
         frame.close();
@@ -3041,8 +3350,13 @@ export class VideoSampleSource {
 
   public async flush(): Promise<void> {
     if (this.encoder && this.encoder.state === 'configured') {
-      await this.encoder.flush();
+      try {
+        await this.encoder.flush();
+      } catch (e) {
+        console.warn('VideoEncoder flush warning:', e);
+      }
     }
+    await this.pendingOutput;
   }
 
   public close(): void {
@@ -3058,8 +3372,9 @@ export class VideoSampleSource {
 export class AudioSampleSource {
   public encoder: AudioEncoder | null = null;
   public options: any;
-  public onEncodedChunk: ((chunk: EncodedAudioChunk) => Promise<void>) | null = null;
+  public onEncodedChunk: ((chunk: EncodedAudioChunk, meta?: any) => Promise<void>) | null = null;
   public isConfigured = false;
+  private pendingOutput: Promise<void> = Promise.resolve();
 
   constructor(options: any = {}) {
     this.options = options;
@@ -3071,11 +3386,27 @@ export class AudioSampleSource {
     let standardCodec = this.options.codec || 'mp4a.40.2';
     if (standardCodec === 'aac') standardCodec = 'mp4a.40.2';
     else if (standardCodec === 'opus') standardCodec = 'opus';
+    else if (standardCodec === 'flac') standardCodec = 'flac';
+    else if (standardCodec === 'mp3') standardCodec = 'mp3';
+    else if (standardCodec === 'pcm-s16' || standardCodec === 'pcm') standardCodec = 'opus';
 
     this.encoder = new AudioEncoder({
-      output: async (chunk: EncodedAudioChunk) => {
+      output: (chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        const clonedChunk: any = {
+          type: chunk.type,
+          timestamp: chunk.timestamp,
+          duration: chunk.duration || 21333,
+          byteLength: data.byteLength,
+          data,
+          copyTo: (dest: Uint8Array) => dest.set(data),
+        };
         if (this.onEncodedChunk) {
-          await this.onEncodedChunk(chunk);
+          const cb = this.onEncodedChunk;
+          this.pendingOutput = this.pendingOutput.then(() => cb(clonedChunk, meta)).catch((err) => {
+            console.warn('Error writing encoded audio chunk:', err);
+          });
         }
       },
       error: (e) => {
@@ -3083,20 +3414,34 @@ export class AudioSampleSource {
       },
     });
 
-    this.encoder.configure({
-      codec: standardCodec,
-      sampleRate,
-      numberOfChannels,
-      bitrate: this.options.bitrate || 128_000,
-    });
-    this.isConfigured = true;
+    try {
+      this.encoder.configure({
+        codec: standardCodec,
+        sampleRate,
+        numberOfChannels,
+        bitrate: this.options.bitrate || 128_000,
+      });
+      this.isConfigured = true;
+    } catch {
+      try {
+        this.encoder.configure({
+          codec: 'opus',
+          sampleRate: 48000,
+          numberOfChannels: 2,
+          bitrate: 128_000,
+        });
+        this.isConfigured = true;
+      } catch (e2) {
+        console.warn('AudioEncoder configure fallback failed:', e2);
+      }
+    }
   }
 
   public async add(sample: AudioSample): Promise<void> {
     if (!this.encoder) {
       this.initEncoder(sample.sampleRate, sample.numberOfChannels);
     }
-    if (!this.encoder) return;
+    if (!this.encoder || this.encoder.state !== 'configured') return;
 
     if (sample.audioData) {
       this.encoder.encode(sample.audioData);
@@ -3106,7 +3451,7 @@ export class AudioSampleSource {
         sampleRate: sample.sampleRate,
         numberOfFrames: sample.numberOfFrames,
         numberOfChannels: sample.numberOfChannels,
-        timestamp: Math.round(sample.timestamp * 1e6),
+        timestamp: Math.max(0, Math.round(sample.timestamp * 1e6)),
         data: sample.data,
       });
       try {
@@ -3119,8 +3464,13 @@ export class AudioSampleSource {
 
   public async flush(): Promise<void> {
     if (this.encoder && this.encoder.state === 'configured') {
-      await this.encoder.flush();
+      try {
+        await this.encoder.flush();
+      } catch (e) {
+        console.warn('AudioEncoder flush warning:', e);
+      }
     }
+    await this.pendingOutput;
   }
 
   public close(): void {
@@ -3143,12 +3493,16 @@ export class VideoSampleSink {
     const file = this.track.getFile();
     const sink = new NativeCanvasSink(file);
     await sink.init();
-    for await (const wrapped of sink.canvases(_startTime)) {
-      if (_endTime !== undefined && wrapped.timestamp > _endTime) break;
-      yield new VideoSample(wrapped.canvas, {
-        timestamp: wrapped.timestamp,
-        duration: wrapped.duration,
-      });
+    try {
+      for await (const wrapped of sink.canvases(_startTime)) {
+        if (_endTime !== undefined && wrapped.timestamp > _endTime) break;
+        yield new VideoSample(wrapped.canvas, {
+          timestamp: wrapped.timestamp,
+          duration: wrapped.duration,
+        });
+      }
+    } finally {
+      sink.close();
     }
   }
 }
@@ -3172,7 +3526,9 @@ export class Output {
   public format: any;
   public target: StreamTarget | BufferTarget;
   private vSource: any = null;
+  private vOpts: any = null;
   private aSource: any = null;
+  private aOpts: any = null;
   private webmMuxer: WebMMuxer | null = null;
   private mp4Muxer: MP4Muxer | null = null;
 
@@ -3181,58 +3537,83 @@ export class Output {
     this.target = options.target;
   }
 
-  public addVideoTrack(vSource: any, _opts?: any): void {
+  public addVideoTrack(vSource: any, opts?: any): void {
     this.vSource = vSource;
+    this.vOpts = opts;
   }
 
-  public addAudioTrack(aSource: any, _opts?: any): void {
+  public addAudioTrack(aSource: any, opts?: any): void {
     this.aSource = aSource;
+    this.aOpts = opts;
   }
 
   public async start(): Promise<void> {
     const isWebM = this.format instanceof WebMOutputFormat || this.format instanceof MkvOutputFormat;
+    const isMkv = this.format instanceof MkvOutputFormat;
     const onChunk = async (chunk: StreamTargetChunk) => {
       await this.target.write(chunk);
     };
 
+    const initW = this.vOpts?.width || this.vOpts?.decoderConfig?.codedWidth || this.vSource?.options?.width || 1280;
+    const initH = this.vOpts?.height || this.vOpts?.decoderConfig?.codedHeight || this.vSource?.options?.height || 720;
+    const vDescRaw = this.vOpts?.decoderConfig?.description;
+    const initVDesc = vDescRaw
+      ? (vDescRaw instanceof Uint8Array ? vDescRaw : new Uint8Array(vDescRaw instanceof ArrayBuffer ? vDescRaw : vDescRaw.buffer, vDescRaw.byteOffset || 0, vDescRaw.byteLength))
+      : undefined;
+    const aDescRaw = this.aOpts?.decoderConfig?.description;
+    const initADesc = aDescRaw
+      ? (aDescRaw instanceof Uint8Array ? aDescRaw : new Uint8Array(aDescRaw instanceof ArrayBuffer ? aDescRaw : aDescRaw.buffer, aDescRaw.byteOffset || 0, aDescRaw.byteLength))
+      : undefined;
+    const initSampleRate = this.aOpts?.decoderConfig?.sampleRate || this.aSource?.options?.sampleRate || 48000;
+    const initChannels = this.aOpts?.decoderConfig?.numberOfChannels || this.aSource?.options?.numberOfChannels || 2;
+
     if (isWebM) {
       this.webmMuxer = new WebMMuxer({
-        width: 1280,
-        height: 720,
-        videoCodec: this.vSource?.options?.codec || 'vp9',
-        audioCodec: this.aSource?.options?.codec || 'opus',
+        width: initW,
+        height: initH,
+        videoCodec: this.vSource?.codec || this.vSource?.options?.codec || 'vp9',
+        audioCodec: this.aSource ? (this.aSource?.codec || this.aSource?.options?.codec || 'opus') : undefined,
+        sampleRate: initSampleRate,
+        channels: initChannels,
+        videoDescription: initVDesc,
+        audioDescription: initADesc,
+        isMkv,
         onChunk,
       });
       await this.webmMuxer.start();
 
       if (this.vSource && 'onEncodedChunk' in this.vSource) {
-        this.vSource.onEncodedChunk = async (chunk: any) => {
-          await this.webmMuxer!.addVideoChunk(chunk);
+        this.vSource.onEncodedChunk = async (chunk: any, meta?: any) => {
+          await this.webmMuxer!.addVideoChunk(chunk, meta);
         };
       }
       if (this.aSource && 'onEncodedChunk' in this.aSource) {
-        this.aSource.onEncodedChunk = async (chunk: any) => {
-          await this.webmMuxer!.addAudioChunk(chunk);
+        this.aSource.onEncodedChunk = async (chunk: any, meta?: any) => {
+          await this.webmMuxer!.addAudioChunk(chunk, meta);
         };
       }
     } else {
       this.mp4Muxer = new MP4Muxer({
-        width: 1280,
-        height: 720,
-        videoCodec: this.vSource?.options?.codec || 'avc',
-        audioCodec: this.aSource?.options?.codec || 'aac',
+        width: initW,
+        height: initH,
+        videoCodec: this.vSource?.codec || this.vSource?.options?.codec || 'avc',
+        audioCodec: this.aSource ? (this.aSource?.codec || this.aSource?.options?.codec || 'aac') : undefined,
+        sampleRate: initSampleRate,
+        channels: initChannels,
+        description: initVDesc,
+        audioDescription: initADesc,
         onChunk,
       });
       await this.mp4Muxer.start();
 
       if (this.vSource && 'onEncodedChunk' in this.vSource) {
-        this.vSource.onEncodedChunk = async (chunk: any) => {
-          await this.mp4Muxer!.addVideoChunk(chunk);
+        this.vSource.onEncodedChunk = async (chunk: any, meta?: any) => {
+          await this.mp4Muxer!.addVideoChunk(chunk, meta);
         };
       }
       if (this.aSource && 'onEncodedChunk' in this.aSource) {
-        this.aSource.onEncodedChunk = async (chunk: any) => {
-          await this.mp4Muxer!.addAudioChunk(chunk);
+        this.aSource.onEncodedChunk = async (chunk: any, meta?: any) => {
+          await this.mp4Muxer!.addAudioChunk(chunk, meta);
         };
       }
     }
@@ -3347,6 +3728,10 @@ export class Input {
     this.file = options.source instanceof BlobSource ? options.source.blob : options.source;
   }
 
+  public getFile(): File | Blob {
+    return this.file;
+  }
+
   private async ensureProbed(): Promise<any> {
     if (!this.metadata) {
       this.metadata = await probeMediaMetadata(this.file);
@@ -3436,27 +3821,59 @@ export class EncodedPacket {
 
 export class EncodedVideoPacketSource {
   public codec: string;
+  public options: any;
+  public onEncodedChunk: ((chunk: any, meta?: any) => Promise<void>) | null = null;
+
   constructor(codec: string) {
     this.codec = codec;
+    this.options = { codec };
   }
 
-  public async add(_packet: any, _opts?: any): Promise<void> {
-    // Process packet in stream
+  public async add(packet: EncodedPacket, opts?: any): Promise<void> {
+    if (!this.onEncodedChunk || !packet || !packet.data) return;
+    const data = packet.data instanceof Uint8Array ? packet.data : new Uint8Array(packet.data);
+    const chunk: any = {
+      type: packet.type || 'key',
+      timestamp: Math.max(0, Math.round((packet.timestamp || 0) * 1e6)),
+      duration: Math.max(1000, Math.round((packet.duration || 0.033) * 1e6)),
+      byteLength: data.byteLength,
+      data,
+      copyTo: (dest: Uint8Array) => dest.set(data),
+    };
+    const meta = opts?.decoderConfig ? { decoderConfig: opts.decoderConfig } : undefined;
+    await this.onEncodedChunk(chunk, meta);
   }
 
+  public async flush(): Promise<void> {}
   public async close(): Promise<void> {}
 }
 
 export class EncodedAudioPacketSource {
   public codec: string;
+  public options: any;
+  public onEncodedChunk: ((chunk: any, meta?: any) => Promise<void>) | null = null;
+
   constructor(codec: string) {
     this.codec = codec;
+    this.options = { codec };
   }
 
-  public async add(_packet: any, _opts?: any): Promise<void> {
-    // Process packet in stream
+  public async add(packet: EncodedPacket, opts?: any): Promise<void> {
+    if (!this.onEncodedChunk || !packet || !packet.data) return;
+    const data = packet.data instanceof Uint8Array ? packet.data : new Uint8Array(packet.data);
+    const chunk: any = {
+      type: packet.type || 'key',
+      timestamp: Math.max(0, Math.round((packet.timestamp || 0) * 1e6)),
+      duration: Math.max(1000, Math.round((packet.duration || 0.021) * 1e6)),
+      byteLength: data.byteLength,
+      data,
+      copyTo: (dest: Uint8Array) => dest.set(data),
+    };
+    const meta = opts?.decoderConfig ? { decoderConfig: opts.decoderConfig } : undefined;
+    await this.onEncodedChunk(chunk, meta);
   }
 
+  public async flush(): Promise<void> {}
   public async close(): Promise<void> {}
 }
 
@@ -3466,20 +3883,373 @@ export class EncodedPacketSink {
     this.track = track;
   }
   public packets(): AsyncIterable<EncodedPacket> {
+    const track = this.track;
     return {
       [Symbol.asyncIterator]: async function* () {
-        // empty iterator fallback
-      }
+        if (!track || typeof track.getFile !== 'function') return;
+        const file: File | Blob = track.getFile();
+        const isAudio = track.trackInfo?.type === 'audio' || track instanceof InputAudioTrack;
+
+        const name = (file as File)?.name || '';
+        const ext = name.split('.').pop()?.toLowerCase() || '';
+        let headBuf = new Uint8Array(0);
+        try {
+          headBuf = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+        } catch {}
+
+        const isEBML = headBuf.length >= 4 && headBuf[0] === 0x1a && headBuf[1] === 0x45 && headBuf[2] === 0xdf && headBuf[3] === 0xa3;
+        const isMp4 = (headBuf.length >= 8 && (
+          (headBuf[4] === 0x66 && headBuf[5] === 0x74 && headBuf[6] === 0x79 && headBuf[7] === 0x70) ||
+          (headBuf[4] === 0x6d && headBuf[5] === 0x6f && headBuf[6] === 0x6f && headBuf[7] === 0x76) ||
+          (headBuf[4] === 0x66 && headBuf[5] === 0x72 && headBuf[6] === 0x65 && headBuf[7] === 0x65) ||
+          (headBuf[4] === 0x6d && headBuf[5] === 0x64 && headBuf[6] === 0x61 && headBuf[7] === 0x74)
+        )) || ['mp4', 'm4v', 'mov', '3gp'].includes(ext);
+
+        if (isMp4 && !isEBML) {
+          const mp4 = new MP4Demuxer(file);
+          const ok = await mp4.parse();
+          if (ok) {
+            const samples = isAudio ? mp4.getAudioSamples() : mp4.getVideoSamples();
+            for (let i = 0; i < samples.length; i++) {
+              const s = samples[i];
+              const data = await mp4.readSampleData(s);
+              if (data.byteLength > 0) {
+                yield new EncodedPacket(
+                  data,
+                  s.isKeyframe ? 'key' : 'delta',
+                  s.timestamp,
+                  s.duration,
+                  s.index,
+                  data.byteLength
+                );
+              }
+            }
+            return;
+          }
+        }
+
+        const ebml = new EBMLDemuxer(file);
+        const ebmlOk = await ebml.parse();
+        if (ebmlOk) {
+          await ebml.scanClusters();
+          const samples = isAudio ? ebml.getAudioSamples() : ebml.getVideoSamples();
+          for (let i = 0; i < samples.length; i++) {
+            const s = samples[i];
+            const data = await ebml.readSampleData(s);
+            if (data.byteLength > 0) {
+              yield new EncodedPacket(
+                data,
+                s.isKeyframe ? 'key' : 'delta',
+                s.timestamp,
+                s.duration,
+                s.index,
+                data.byteLength
+              );
+            }
+          }
+        }
+      },
     };
   }
 }
 
 export class Conversion {
-  public static async init(_opts: any): Promise<Conversion> {
-    return new Conversion();
-  }
+  public options: any;
   public onProgress: (prog: number) => void = () => {};
+
+  constructor(options: any) {
+    this.options = options;
+  }
+
+  public static async init(opts: any): Promise<Conversion> {
+    return new Conversion(opts);
+  }
+
   public async execute(): Promise<void> {
+    const input: Input = this.options?.input;
+    const output: Output = this.options?.output;
+    if (!input || !output) {
+      throw new Error('Conversion requires both input and output');
+    }
+
+    const trim = this.options?.trim;
+    const videoOpts = this.options?.video;
+    const audioOpts = this.options?.audio;
+    const startTime = typeof trim?.start === 'number' && trim.start > 0 ? trim.start : 0;
+    const endTime = typeof trim?.end === 'number' && trim.end > 0 ? trim.end : undefined;
+
+    // =========================================================================
+    // Mode 1: WebCodecs Transcode (Decode -> Filter/Scale -> Encode -> Mux)
+    // =========================================================================
+    if (videoOpts?.forceTranscode) {
+      const file = input.getFile();
+      const targetW = videoOpts.processedWidth || videoOpts.width || 1280;
+      const targetH = videoOpts.processedHeight || videoOpts.height || 720;
+      const fps = videoOpts.frameRate || 30;
+
+      const vSource = new VideoSampleSource({
+        codec: videoOpts.codec || 'avc',
+        quality: videoOpts.quality,
+        hardwareAcceleration: videoOpts.hardwareAcceleration || 'prefer-hardware',
+        framerate: fps,
+        width: targetW,
+        height: targetH,
+      });
+      output.addVideoTrack(vSource, { width: targetW, height: targetH });
+
+      let aSource: AudioSampleSource | null = null;
+      if (!audioOpts?.discard) {
+        aSource = new AudioSampleSource({
+          codec: audioOpts?.codec || 'aac',
+          bitrate: audioOpts?.bitrate || 128_000,
+        });
+        output.addAudioTrack(aSource);
+      }
+
+      await output.start();
+
+      // Pre-decode audio buffer in browser if audio track is enabled
+      let decodedAudioBuf: AudioBuffer | null = null;
+      if (aSource && typeof window !== 'undefined') {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          try {
+            const ctx = new AudioCtx();
+            const ab = await file.arrayBuffer();
+            decodedAudioBuf = await ctx.decodeAudioData(ab);
+            ctx.close().catch(() => {});
+          } catch {}
+        }
+      }
+
+      const sink = new NativeCanvasSink(file, {
+        width: typeof videoOpts.process === 'function' ? undefined : targetW,
+        height: typeof videoOpts.process === 'function' ? undefined : targetH,
+        fit: videoOpts.fit || 'cover',
+      });
+      const sinkOk = await sink.init();
+      const sourceDur = sink.duration || (await input.getDurationFromMetadata()) || 10;
+      const actualEnd = endTime !== undefined ? Math.min(endTime, sourceDur > 0 ? sourceDur : endTime) : sourceDur;
+      const totalDur = Math.max(0.1, actualEnd - startTime);
+
+      let currentAudioTime = 0;
+      const audioFrameSize = 1024;
+      const audioSampleRate = 48000;
+      const audioFrameDur = audioFrameSize / audioSampleRate;
+
+      const encodeAudioUpTo = async (targetOutTime: number) => {
+        if (!aSource || !decodedAudioBuf) return;
+        const srcRate = decodedAudioBuf.sampleRate;
+        const srcChans = decodedAudioBuf.numberOfChannels;
+        const left = decodedAudioBuf.getChannelData(0);
+        const right = srcChans > 1 ? decodedAudioBuf.getChannelData(1) : left;
+        const totalSrcFrames = decodedAudioBuf.length;
+
+        while (currentAudioTime < targetOutTime - 0.0005) {
+          const srcSec = startTime + currentAudioTime;
+          if (srcSec >= decodedAudioBuf.duration) break;
+          const srcStartFrame = Math.round(srcSec * srcRate);
+          const pcm = new Float32Array(audioFrameSize * 2);
+          for (let i = 0; i < audioFrameSize; i++) {
+            const exact = srcStartFrame + (i / audioSampleRate) * srcRate;
+            const f0 = Math.floor(exact);
+            if (f0 >= 0 && f0 < totalSrcFrames) {
+              pcm[i * 2] = left[f0];
+              pcm[i * 2 + 1] = right[f0];
+            }
+          }
+          const aSample = new AudioSample({
+            format: 'f32',
+            sampleRate: audioSampleRate,
+            numberOfChannels: 2,
+            timestamp: currentAudioTime,
+            duration: audioFrameDur,
+            data: pcm,
+          });
+          await aSource.add(aSample);
+          aSample.close();
+          currentAudioTime += audioFrameDur;
+        }
+      };
+
+      if (sinkOk) {
+        try {
+          for await (const wrapped of sink.canvases(startTime)) {
+            if (endTime !== undefined && wrapped.timestamp > endTime + 0.05) {
+              break;
+            }
+            const outTs = Math.max(0, wrapped.timestamp - startTime);
+            const dur = wrapped.duration > 0 ? wrapped.duration : (1 / fps);
+            let sample = new VideoSample(wrapped.canvas, { timestamp: outTs, duration: dur });
+
+            if (typeof videoOpts.process === 'function') {
+              const processedCanvas = await videoOpts.process(sample);
+              if (processedCanvas) {
+                sample = new VideoSample(processedCanvas, { timestamp: outTs, duration: dur });
+              }
+            }
+
+            await vSource.add(sample);
+            sample.close();
+
+            await encodeAudioUpTo(outTs + dur);
+
+            const prog = Math.min(0.98, Math.max(0.02, outTs / totalDur));
+            this.onProgress(prog);
+          }
+        } finally {
+          sink.close();
+        }
+      }
+
+      await encodeAudioUpTo(totalDur);
+      await output.finalize();
+      this.onProgress(1.0);
+      return;
+    }
+
+    // =========================================================================
+    // Mode 2: Lossless Stream Copy (Remux / Trim without Re-Encoding)
+    // =========================================================================
+    const vTracks = await input.getVideoTracks();
+    const aTracks = await input.getAudioTracks();
+
+    let vSource: EncodedVideoPacketSource | null = null;
+    let aSource: EncodedAudioPacketSource | null = null;
+    let vDecConfig: any = null;
+    let aDecConfig: any = null;
+
+    if (vTracks.length > 0) {
+      const vCodec = (await vTracks[0].getCodec()) || 'avc';
+      vDecConfig = await vTracks[0].getDecoderConfig();
+      vSource = new EncodedVideoPacketSource(vCodec);
+      output.addVideoTrack(vSource, {
+        decoderConfig: vDecConfig ?? undefined,
+        width: vTracks[0].displayWidth,
+        height: vTracks[0].displayHeight,
+      });
+    }
+
+    if (aTracks.length > 0 && !audioOpts?.discard) {
+      const aCodec = (await aTracks[0].getCodec()) || 'aac';
+      aDecConfig = await aTracks[0].getDecoderConfig();
+      aSource = new EncodedAudioPacketSource(aCodec);
+      output.addAudioTrack(aSource, {
+        decoderConfig: aDecConfig ?? undefined,
+      });
+    }
+
+    if (!vSource && !aSource) {
+      throw new Error('No compatible video or audio tracks found for stream copy');
+    }
+
+    await output.start();
+
+    const vSink = vSource && vTracks.length > 0 ? new EncodedPacketSink(vTracks[0]) : null;
+    const aSink = aSource && aTracks.length > 0 ? new EncodedPacketSink(aTracks[0]) : null;
+
+    const vIter = vSink ? vSink.packets()[Symbol.asyncIterator]() : null;
+    const aIter = aSink ? aSink.packets()[Symbol.asyncIterator]() : null;
+
+    let nextV = vIter ? await vIter.next() : { done: true, value: undefined };
+    let nextA = aIter ? await aIter.next() : { done: true, value: undefined };
+
+    let isFirstV = true;
+    let isFirstA = true;
+    let minVTs: number | null = null;
+    let minATs: number | null = null;
+    let lastVTs = -0.001;
+    let lastATs = -0.001;
+    let packetCount = 0;
+
+    const sourceDur = (await input.getDurationFromMetadata()) || 10;
+    const totalDur = Math.max(0.1, (endTime ?? sourceDur) - startTime);
+
+    while (!nextV.done || !nextA.done) {
+      const rawVTime = !nextV.done && nextV.value ? nextV.value.timestamp : Infinity;
+      const rawATime = !nextA.done && nextA.value ? nextA.value.timestamp : Infinity;
+
+      if (rawVTime <= rawATime && !nextV.done && nextV.value) {
+        const pkt = nextV.value;
+        if (pkt.timestamp < startTime) {
+          nextV = await vIter!.next();
+          continue;
+        }
+        if (endTime !== undefined && pkt.timestamp > endTime) {
+          nextV = { done: true, value: undefined };
+          continue;
+        }
+
+        if (minVTs === null) minVTs = pkt.timestamp;
+        const pTime = Math.max(lastVTs + 0.0001, Math.max(0, pkt.timestamp - minVTs));
+        lastVTs = pTime;
+
+        const shifted = new EncodedPacket(
+          pkt.data,
+          isFirstV ? 'key' : pkt.type,
+          pTime,
+          pkt.duration,
+          pkt.sequenceNumber,
+          pkt.byteLength,
+          pkt.sideData
+        );
+
+        if (isFirstV && vDecConfig) {
+          await vSource!.add(shifted, { decoderConfig: vDecConfig });
+          isFirstV = false;
+        } else {
+          await vSource!.add(shifted);
+        }
+
+        packetCount++;
+        if (packetCount % 30 === 0) {
+          this.onProgress(Math.min(0.98, Math.max(0.02, pTime / totalDur)));
+        }
+
+        nextV = await vIter!.next();
+      } else if (!nextA.done && nextA.value) {
+        const pkt = nextA.value;
+        if (pkt.timestamp < startTime) {
+          nextA = await aIter!.next();
+          continue;
+        }
+        if (endTime !== undefined && pkt.timestamp > endTime) {
+          nextA = { done: true, value: undefined };
+          continue;
+        }
+
+        if (minATs === null) minATs = pkt.timestamp;
+        const pTime = Math.max(lastATs + 0.0001, Math.max(0, pkt.timestamp - minATs));
+        lastATs = pTime;
+
+        const shifted = new EncodedPacket(
+          pkt.data,
+          isFirstA ? 'key' : 'delta',
+          pTime,
+          pkt.duration,
+          pkt.sequenceNumber,
+          pkt.byteLength,
+          pkt.sideData
+        );
+
+        if (isFirstA && aDecConfig) {
+          await aSource!.add(shifted, { decoderConfig: aDecConfig });
+          isFirstA = false;
+        } else {
+          await aSource!.add(shifted);
+        }
+
+        packetCount++;
+        nextA = await aIter!.next();
+      }
+    }
+
+    if (packetCount === 0) {
+      throw new Error('No media packets found in specified range');
+    }
+
+    await output.finalize();
     this.onProgress(1.0);
   }
 }
+

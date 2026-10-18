@@ -1834,30 +1834,32 @@ async function processNativeEBMLConcatStream(
         videoTrackNum = getVideoTrackNumber(firstMeta.segmentTracks);
     }
 
-    if (writable) {
-        await writable.write(firstMeta.ebmlHeader);
-        totalBytesWritten += firstMeta.ebmlHeader.length;
-        
-        // We write Segment ID with Unknown Size (0x01FFFFFFFFFFFFFF)
-        const segId = new Uint8Array([0x18, 0x53, 0x80, 0x67]);
-        const segSize = new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
-        await writable.write(segId);
-        await writable.write(segSize);
-        totalBytesWritten += segId.length + segSize.length;
+    const memChunks: Uint8Array[] = [];
+    const writeBytes = async (data: Uint8Array) => {
+      if (writable) {
+        await writable.write(data);
+      } else {
+        memChunks.push(data.slice());
+      }
+      totalBytesWritten += data.length;
+    };
 
-        segmentDataOffset = totalBytesWritten;
+    await writeBytes(firstMeta.ebmlHeader);
 
-        seekHeadOffset = totalBytesWritten;
-        const dummySeekHead = buildSeekHead(0);
-        await writable.write(dummySeekHead);
-        totalBytesWritten += dummySeekHead.length;
+    // We write Segment ID with Unknown Size (0x01FFFFFFFFFFFFFF)
+    const segId = new Uint8Array([0x18, 0x53, 0x80, 0x67]);
+    const segSize = new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    await writeBytes(segId);
+    await writeBytes(segSize);
 
-        await writable.write(patchedSegmentInfo);
-        totalBytesWritten += patchedSegmentInfo.length;
+    segmentDataOffset = totalBytesWritten;
 
-        await writable.write(firstMeta.segmentTracks);
-        totalBytesWritten += firstMeta.segmentTracks.length;
-    }
+    seekHeadOffset = totalBytesWritten;
+    const dummySeekHead = buildSeekHead(0);
+    await writeBytes(dummySeekHead);
+
+    await writeBytes(patchedSegmentInfo);
+    await writeBytes(firstMeta.segmentTracks);
 
     let globalTimecodeOffset = 0;
     const CHUNK_SIZE = 1024 * 1024; // 1MB chunks for streaming
@@ -1876,54 +1878,47 @@ async function processNativeEBMLConcatStream(
             const clusterMaxTc = await getClusterMaxFrameTimecode(file, cluster);
             if (clusterMaxTc > fileMaxFrameTc) fileMaxFrameTc = clusterMaxTc;
 
-            // Stream Cluster to output, patching the timecode
-            if (writable) {
-                cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
-                
-                // Encode new Timecode value dynamically to avoid byte overflow
-                const newTcValBuf = encodeUint(newTc);
-                const newTcSizeVint = encodeVintSize(newTcValBuf.length);
-                const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
+            cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
+            
+            // Encode new Timecode value dynamically to avoid byte overflow
+            const newTcValBuf = encodeUint(newTc);
+            const newTcSizeVint = encodeVintSize(newTcValBuf.length);
+            const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-                // Calculate the new Cluster Size
-                const sizeDiff = newTcElementLength - cluster.timecodeLength;
-                const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
+            // Calculate the new Cluster Size
+            const sizeDiff = newTcElementLength - cluster.timecodeLength;
+            const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
 
-                // Write patched Cluster Header
-                const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
-                const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
-                await writable.write(clusterId);
-                await writable.write(clusterSizeVint);
-                totalBytesWritten += clusterId.length + clusterSizeVint.length;
+            // Write patched Cluster Header
+            const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
+            const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
+            await writeBytes(clusterId);
+            await writeBytes(clusterSizeVint);
 
-                // Write from after cluster header up to timecode offset
-                const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
-                if (preTcSize > 0) {
-                    const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
-                    await writable.write(preTcBuf);
-                    totalBytesWritten += preTcBuf.length;
-                }
+            // Write from after cluster header up to timecode offset
+            const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
+            if (preTcSize > 0) {
+                const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
+                await writeBytes(preTcBuf);
+            }
 
-                // Write the new Timecode element
-                await writable.write(new Uint8Array([0xE7]));
-                await writable.write(newTcSizeVint);
-                await writable.write(newTcValBuf);
-                totalBytesWritten += 1 + newTcSizeVint.length + newTcValBuf.length;
+            // Write the new Timecode element
+            await writeBytes(new Uint8Array([0xE7]));
+            await writeBytes(newTcSizeVint);
+            await writeBytes(newTcValBuf);
 
-                // Stream the rest of the cluster
-                const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
-                const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
-                
-                let streamPos = restOffset;
-                const streamEnd = restOffset + restSize;
-                
-                while (streamPos < streamEnd) {
-                    const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
-                    const chunk = await readSlice(file, streamPos, toRead);
-                    await writable.write(chunk);
-                    totalBytesWritten += chunk.length;
-                    streamPos += chunk.length;
-                }
+            // Stream the rest of the cluster
+            const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
+            const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
+            
+            let streamPos = restOffset;
+            const streamEnd = restOffset + restSize;
+            
+            while (streamPos < streamEnd) {
+                const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
+                const chunk = await readSlice(file, streamPos, toRead);
+                await writeBytes(chunk);
+                streamPos += chunk.length;
             }
             
             // Update Progress
@@ -1940,30 +1935,38 @@ async function processNativeEBMLConcatStream(
         }
     }
 
-    if (writable && cuePoints.length > 0) {
+    if (cuePoints.length > 0) {
         onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
         const cuesOffset = totalBytesWritten - segmentDataOffset;
         const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
-        await writable.write(cuesBuffer);
-        totalBytesWritten += cuesBuffer.length;
+        await writeBytes(cuesBuffer);
         
-        try {
-            const actualSeekHead = buildSeekHead(cuesOffset);
-            await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+        if (writable) {
+            try {
+                const actualSeekHead = buildSeekHead(cuesOffset);
+                await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
 
-            const totalSegmentSize = totalBytesWritten - segmentDataOffset;
-            const actualSegmentSize = writeVint(totalSegmentSize, 8);
-            await writable.write({ type: 'write', position: firstMeta.ebmlHeader.length + 4, data: actualSegmentSize });
-        } catch (seekErr) {
-            console.warn("SeekHead or SegmentSize update failed:", seekErr);
+                const totalSegmentSize = totalBytesWritten - segmentDataOffset;
+                const actualSegmentSize = writeVint(totalSegmentSize, 8);
+                await writable.write({ type: 'write', position: firstMeta.ebmlHeader.length + 4, data: actualSegmentSize });
+            } catch (seekErr) {
+                console.warn("SeekHead or SegmentSize update failed:", seekErr);
+            }
         }
     }
 
+    let blobUrl: string | undefined;
+    if (!writable && memChunks.length > 0) {
+      const isMkv = files[0].name.toLowerCase().endsWith('.mkv');
+      const blob = new Blob(memChunks, { type: isMkv ? 'video/x-matroska' : 'video/webm' });
+      blobUrl = URL.createObjectURL(blob);
+    }
+
     onProgress({ percentage: 100, statusText: 'Success! (Standard Engine)', speedMBs: 0 });
-    return { success: true, totalBytesWritten };
+    return { success: totalBytesWritten > 0, totalBytesWritten, blobUrl };
   } catch (error) {
     console.error("Concat Stream Error:", error);
-    return { success: false };
+    throw error;
   }
 }
 
@@ -2029,16 +2032,20 @@ async function executeNativeEBMLTrimStream(
      let segmentDataOffset = 0;
      const cuePoints: { time: number, offset: number }[] = [];
 
-     let startMs = startTime * 1000;
-     let endMs = endTime * 1000;
-     
-     if (startMs >= meta.fileDurationMs) {
-         startMs = Math.max(0, meta.fileDurationMs - 100);
+     let startMs = Math.max(0, startTime * 1000);
+     const maxClusterMs = meta.clusters.length > 0 ? meta.clusters[meta.clusters.length - 1].timecode + 5000 : 0;
+     const effectiveFileDurMs = meta.fileDurationMs > 0 ? meta.fileDurationMs : maxClusterMs;
+     let endMs = endTime > 0 ? endTime * 1000 : effectiveFileDurMs;
+
+     if (effectiveFileDurMs > 0) {
+         if (startMs >= effectiveFileDurMs) {
+             startMs = Math.max(0, effectiveFileDurMs - 100);
+         }
+         if (endMs <= 0 || endMs > effectiveFileDurMs) {
+             endMs = effectiveFileDurMs;
+         }
      }
-     if (endMs > meta.fileDurationMs) {
-         endMs = meta.fileDurationMs;
-     }
-     if (startMs >= endMs) {
+     if (endMs > 0 && startMs >= endMs) {
          startMs = Math.max(0, endMs - 100);
      }
      const CHUNK_SIZE = 1024 * 1024;
@@ -2046,7 +2053,7 @@ async function executeNativeEBMLTrimStream(
      // Patch the Duration in SegmentInfo for Standard Compliance
      const patchedSegmentInfo = new Uint8Array(meta.segmentInfo);
      const infoHdr = readElementHeader(patchedSegmentInfo, 0);
-     if (infoHdr) {
+     if (infoHdr && endMs > startMs) {
          let pos = infoHdr.totalHeaderLen;
          while (pos < patchedSegmentInfo.length) {
             const el = readElementHeader(patchedSegmentInfo, pos);
@@ -2065,30 +2072,31 @@ async function executeNativeEBMLTrimStream(
 
      let seekHeadOffset = 0;
      let videoTrackNum = getVideoTrackNumber(meta.segmentTracks);
+     const memChunks: Uint8Array[] = [];
+     const writeBytes = async (data: Uint8Array) => {
+        if (writable) {
+           await writable.write(data);
+        } else {
+           memChunks.push(data.slice());
+        }
+        totalBytesWritten += data.length;
+     };
 
-     if (writable) {
-        await writable.write(meta.ebmlHeader);
-        totalBytesWritten += meta.ebmlHeader.length;
-        
-        const segId = new Uint8Array([0x18, 0x53, 0x80, 0x67]);
-        const segSize = new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
-        await writable.write(segId);
-        await writable.write(segSize);
-        totalBytesWritten += segId.length + segSize.length;
-        
-        segmentDataOffset = totalBytesWritten;
+     await writeBytes(meta.ebmlHeader);
+     
+     const segId = new Uint8Array([0x18, 0x53, 0x80, 0x67]);
+     const segSize = new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+     await writeBytes(segId);
+     await writeBytes(segSize);
+     
+     segmentDataOffset = totalBytesWritten;
 
-        seekHeadOffset = totalBytesWritten;
-        const dummySeekHead = buildSeekHead(0);
-        await writable.write(dummySeekHead);
-        totalBytesWritten += dummySeekHead.length;
+     seekHeadOffset = totalBytesWritten;
+     const dummySeekHead = buildSeekHead(0);
+     await writeBytes(dummySeekHead);
 
-        await writable.write(patchedSegmentInfo);
-        totalBytesWritten += patchedSegmentInfo.length;
-
-        await writable.write(meta.segmentTracks);
-        totalBytesWritten += meta.segmentTracks.length;
-     }
+     await writeBytes(patchedSegmentInfo);
+     await writeBytes(meta.segmentTracks);
 
      let firstIncludedTimecode = -1;
 
@@ -2096,7 +2104,7 @@ async function executeNativeEBMLTrimStream(
          const cluster = meta.clusters[cIdx];
          
          // Standard compliant exact filtering
-         if (cluster.timecode > endMs) break; 
+         if (endMs > 0 && cluster.timecode > endMs) break; 
          
          const clusterMaxTc = await getClusterMaxFrameTimecode(file, cluster);
          if (clusterMaxTc < startMs) continue; // Before start time
@@ -2108,81 +2116,83 @@ async function executeNativeEBMLTrimStream(
          const newTc = cluster.timecode - firstIncludedTimecode;
          if (newTc < 0) continue; // Safety check
 
-         if (writable) {
-             cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
-             // Encode new Timecode value dynamically to avoid byte overflow
-             const newTcValBuf = encodeUint(newTc);
-             const newTcSizeVint = encodeVintSize(newTcValBuf.length);
-             const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
+         cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
+         // Encode new Timecode value dynamically to avoid byte overflow
+         const newTcValBuf = encodeUint(newTc);
+         const newTcSizeVint = encodeVintSize(newTcValBuf.length);
+         const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-             // Calculate the new Cluster Size
-             const sizeDiff = newTcElementLength - cluster.timecodeLength;
-             const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
+         // Calculate the new Cluster Size
+         const sizeDiff = newTcElementLength - cluster.timecodeLength;
+         const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
 
-             // Write patched Cluster Header
-             const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
-             const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
-             await writable.write(clusterId);
-             await writable.write(clusterSizeVint);
-             totalBytesWritten += clusterId.length + clusterSizeVint.length;
+         // Write patched Cluster Header
+         const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
+         const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
+         await writeBytes(clusterId);
+         await writeBytes(clusterSizeVint);
 
-             // Write from after cluster header up to timecode offset
-             const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
-             if (preTcSize > 0) {
-                 const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
-                 await writable.write(preTcBuf);
-                 totalBytesWritten += preTcBuf.length;
-             }
+         // Write from after cluster header up to timecode offset
+         const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
+         if (preTcSize > 0) {
+             const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
+             await writeBytes(preTcBuf);
+         }
 
-             // Write the new Timecode element
-             await writable.write(new Uint8Array([0xE7]));
-             await writable.write(newTcSizeVint);
-             await writable.write(newTcValBuf);
-             totalBytesWritten += 1 + newTcSizeVint.length + newTcValBuf.length;
+         // Write the new Timecode element
+         await writeBytes(new Uint8Array([0xE7]));
+         await writeBytes(newTcSizeVint);
+         await writeBytes(newTcValBuf);
 
-             const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
-             const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
-             
-             let streamPos = restOffset;
-             const streamEnd = restOffset + restSize;
-             
-             while (streamPos < streamEnd) {
-                 const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
-                 const chunk = await readSlice(file, streamPos, toRead);
-                 await writable.write(chunk);
-                 totalBytesWritten += chunk.length;
-                 streamPos += chunk.length;
-             }
+         const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
+         const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
+         
+         let streamPos = restOffset;
+         const streamEnd = restOffset + restSize;
+         
+         while (streamPos < streamEnd) {
+             const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
+             const chunk = await readSlice(file, streamPos, toRead);
+             await writeBytes(chunk);
+             streamPos += chunk.length;
          }
 
          const prog = (cIdx / meta.clusters.length) * 100;
          onProgress({ percentage: prog, statusText: 'Trimming and streaming video (Standard Engine)...', speedMBs: 0 });
      }
 
-     if (writable && cuePoints.length > 0) {
+     if (cuePoints.length > 0) {
          onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
          const cuesOffset = totalBytesWritten - segmentDataOffset;
          const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
-         await writable.write(cuesBuffer);
-         totalBytesWritten += cuesBuffer.length;
+         await writeBytes(cuesBuffer);
          
-         try {
-             const actualSeekHead = buildSeekHead(cuesOffset);
-             await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+         if (writable) {
+             try {
+                 const actualSeekHead = buildSeekHead(cuesOffset);
+                 await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
 
-             const totalSegmentSize = totalBytesWritten - segmentDataOffset;
-             const actualSegmentSize = writeVint(totalSegmentSize, 8);
-             await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
-         } catch (seekErr) {
-             console.warn("SeekHead update failed:", seekErr);
+                 const totalSegmentSize = totalBytesWritten - segmentDataOffset;
+                 const actualSegmentSize = writeVint(totalSegmentSize, 8);
+                 await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
+             } catch (seekErr) {
+                 console.warn("SeekHead update failed:", seekErr);
+             }
          }
      }
 
+     let blobUrl: string | undefined;
+     if (!writable && memChunks.length > 0) {
+         const isMkv = file.name.toLowerCase().endsWith('.mkv');
+         const blob = new Blob(memChunks, { type: isMkv ? 'video/x-matroska' : 'video/webm' });
+         blobUrl = URL.createObjectURL(blob);
+     }
+
      onProgress({ percentage: 100, statusText: 'Trimming successful! (Standard Engine)', speedMBs: 0 });
-     return { success: true, totalBytesWritten };
+     return { success: totalBytesWritten > 0, totalBytesWritten, blobUrl };
   } catch (err) {
      console.error("Trim Stream Error:", err);
-     return { success: false };
+     throw err;
   }
 }
 
@@ -2196,6 +2206,23 @@ export async function processNativeRemuxStream(
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
   try {
      const format = await detectMediaFormat(file);
+
+     if (format === 'webm' || format === 'mkv') {
+       onProgress({
+         percentage: 2,
+         statusText: `Using Native Zero-RAM EBML Engine for ${format.toUpperCase()} remux...`,
+         speedMBs: 0,
+         log: `[ENGINE] Selected Native Zero-RAM EBML Remux & Cues Repair Engine for ${format.toUpperCase()} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`
+       });
+       try {
+         const res = await executeNativeEBMLRemuxStream(file, writable, onProgress);
+         if (res.success && (res.totalBytesWritten || 0) > 0) {
+           return res;
+         }
+       } catch (nativeErr) {
+         console.warn("Native EBML remux failed, falling back to Mediabunny:", nativeErr);
+       }
+     }
 
      onProgress({
        percentage: 2,
@@ -2228,7 +2255,7 @@ async function executeNativeEBMLRemuxStream(
      // Patch the Duration in SegmentInfo for Standard Compliance
      const patchedSegmentInfo = new Uint8Array(meta.segmentInfo);
      const infoHdr = readElementHeader(patchedSegmentInfo, 0);
-     if (infoHdr) {
+     if (infoHdr && meta.fileDurationMs > 0) {
          let pos = infoHdr.totalHeaderLen;
          while (pos < patchedSegmentInfo.length) {
             const el = readElementHeader(patchedSegmentInfo, pos);
@@ -2245,30 +2272,31 @@ async function executeNativeEBMLRemuxStream(
 
      let seekHeadOffset = 0;
      let videoTrackNum = getVideoTrackNumber(meta.segmentTracks);
+     const memChunks: Uint8Array[] = [];
+     const writeBytes = async (data: Uint8Array) => {
+        if (writable) {
+           await writable.write(data);
+        } else {
+           memChunks.push(data.slice());
+        }
+        totalBytesWritten += data.length;
+     };
 
-     if (writable) {
-        await writable.write(meta.ebmlHeader);
-        totalBytesWritten += meta.ebmlHeader.length;
-        
-        const segId = new Uint8Array([0x18, 0x53, 0x80, 0x67]);
-        const segSize = new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
-        await writable.write(segId);
-        await writable.write(segSize);
-        totalBytesWritten += segId.length + segSize.length;
-        
-        segmentDataOffset = totalBytesWritten;
+     await writeBytes(meta.ebmlHeader);
+     
+     const segId = new Uint8Array([0x18, 0x53, 0x80, 0x67]);
+     const segSize = new Uint8Array([0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+     await writeBytes(segId);
+     await writeBytes(segSize);
+     
+     segmentDataOffset = totalBytesWritten;
 
-        seekHeadOffset = totalBytesWritten;
-        const dummySeekHead = buildSeekHead(0);
-        await writable.write(dummySeekHead);
-        totalBytesWritten += dummySeekHead.length;
+     seekHeadOffset = totalBytesWritten;
+     const dummySeekHead = buildSeekHead(0);
+     await writeBytes(dummySeekHead);
 
-        await writable.write(patchedSegmentInfo);
-        totalBytesWritten += patchedSegmentInfo.length;
-
-        await writable.write(meta.segmentTracks);
-        totalBytesWritten += meta.segmentTracks.length;
-     }
+     await writeBytes(patchedSegmentInfo);
+     await writeBytes(meta.segmentTracks);
 
      let firstIncludedTimecode = -1;
 
@@ -2282,81 +2310,83 @@ async function executeNativeEBMLRemuxStream(
          const newTc = cluster.timecode - firstIncludedTimecode;
          if (newTc < 0) continue; // Safety check
 
-         if (writable) {
-             cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
-             // Encode new Timecode value dynamically to avoid byte overflow
-             const newTcValBuf = encodeUint(newTc);
-             const newTcSizeVint = encodeVintSize(newTcValBuf.length);
-             const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
+         cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
+         // Encode new Timecode value dynamically to avoid byte overflow
+         const newTcValBuf = encodeUint(newTc);
+         const newTcSizeVint = encodeVintSize(newTcValBuf.length);
+         const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-             // Calculate the new Cluster Size
-             const sizeDiff = newTcElementLength - cluster.timecodeLength;
-             const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
+         // Calculate the new Cluster Size
+         const sizeDiff = newTcElementLength - cluster.timecodeLength;
+         const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
 
-             // Write patched Cluster Header
-             const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
-             const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
-             await writable.write(clusterId);
-             await writable.write(clusterSizeVint);
-             totalBytesWritten += clusterId.length + clusterSizeVint.length;
+         // Write patched Cluster Header
+         const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
+         const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
+         await writeBytes(clusterId);
+         await writeBytes(clusterSizeVint);
 
-             // Write from after cluster header up to timecode offset
-             const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
-             if (preTcSize > 0) {
-                 const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
-                 await writable.write(preTcBuf);
-                 totalBytesWritten += preTcBuf.length;
-             }
+         // Write from after cluster header up to timecode offset
+         const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
+         if (preTcSize > 0) {
+             const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
+             await writeBytes(preTcBuf);
+         }
 
-             // Write the new Timecode element
-             await writable.write(new Uint8Array([0xE7]));
-             await writable.write(newTcSizeVint);
-             await writable.write(newTcValBuf);
-             totalBytesWritten += 1 + newTcSizeVint.length + newTcValBuf.length;
+         // Write the new Timecode element
+         await writeBytes(new Uint8Array([0xE7]));
+         await writeBytes(newTcSizeVint);
+         await writeBytes(newTcValBuf);
 
-             const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
-             const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
-             
-             let streamPos = restOffset;
-             const streamEnd = restOffset + restSize;
-             
-             while (streamPos < streamEnd) {
-                 const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
-                 const chunk = await readSlice(file, streamPos, toRead);
-                 await writable.write(chunk);
-                 totalBytesWritten += chunk.length;
-                 streamPos += chunk.length;
-             }
+         const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
+         const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
+         
+         let streamPos = restOffset;
+         const streamEnd = restOffset + restSize;
+         
+         while (streamPos < streamEnd) {
+             const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
+             const chunk = await readSlice(file, streamPos, toRead);
+             await writeBytes(chunk);
+             streamPos += chunk.length;
          }
 
          const prog = (cIdx / meta.clusters.length) * 100;
          onProgress({ percentage: prog, statusText: 'Remuxing file structure (Standard Remux)...', speedMBs: 0 });
      }
 
-     if (writable && cuePoints.length > 0) {
+     if (cuePoints.length > 0) {
          onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
          const cuesOffset = totalBytesWritten - segmentDataOffset;
          const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
-         await writable.write(cuesBuffer);
-         totalBytesWritten += cuesBuffer.length;
+         await writeBytes(cuesBuffer);
          
-         try {
-             const actualSeekHead = buildSeekHead(cuesOffset);
-             await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
+         if (writable) {
+             try {
+                 const actualSeekHead = buildSeekHead(cuesOffset);
+                 await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
 
-             const totalSegmentSize = totalBytesWritten - segmentDataOffset;
-             const actualSegmentSize = writeVint(totalSegmentSize, 8);
-             await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
-         } catch (seekErr) {
-             console.warn("SeekHead update failed:", seekErr);
+                 const totalSegmentSize = totalBytesWritten - segmentDataOffset;
+                 const actualSegmentSize = writeVint(totalSegmentSize, 8);
+                 await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
+             } catch (seekErr) {
+                 console.warn("SeekHead update failed:", seekErr);
+             }
          }
      }
 
+     let blobUrl: string | undefined;
+     if (!writable && memChunks.length > 0) {
+         const isMkv = file.name.toLowerCase().endsWith('.mkv');
+         const blob = new Blob(memChunks, { type: isMkv ? 'video/x-matroska' : 'video/webm' });
+         blobUrl = URL.createObjectURL(blob);
+     }
+
      onProgress({ percentage: 100, statusText: 'Remuxing successful! (Standard Remux)', speedMBs: 0 });
-     return { success: true, totalBytesWritten };
+     return { success: totalBytesWritten > 0, totalBytesWritten, blobUrl };
   } catch (err) {
      console.error("Remux Stream Error:", err);
-     return { success: false };
+     throw err;
   }
 }
 
