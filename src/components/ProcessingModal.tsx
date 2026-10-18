@@ -71,7 +71,7 @@ export const ProcessingModal: React.FC<ProcessingModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = isError ? `mediabunny_error_log_${Date.now()}.txt` : `process_log_${Date.now()}.txt`;
+    a.download = isError ? `error_log_${Date.now()}.txt` : `process_log_${Date.now()}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

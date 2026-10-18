@@ -15,7 +15,7 @@ import {
   EncodedPacketSink,
   EncodedPacket,
   type StreamTargetChunk
-} from 'mediabunny';
+} from './nativeMedia';
 
 /**
  * Detect media container format by extension and magic bytes (MP4 ISOBMFF vs WebM/MKV EBML)
@@ -62,16 +62,16 @@ function createMediabunnyTarget(writable: FileSystemWritableFileStream | null): 
       if (writable && typeof writable.write === 'function') {
         try {
           if (typeof chunk.position === 'number') {
-            await writable.write({ type: 'write', position: chunk.position, data: chunk.data });
+            await (writable as any).write({ type: 'write', position: chunk.position, data: chunk.data });
           } else {
-            await writable.write(chunk.data || chunk);
+            await (writable as any).write(chunk.data || chunk);
           }
         } catch (err) {
           try {
             if (typeof (writable as any).seek === 'function' && typeof chunk.position === 'number') {
               await (writable as any).seek(chunk.position);
             }
-            await writable.write(chunk.data || chunk);
+            await (writable as any).write(chunk.data || chunk);
           } catch (innerErr) {
             console.error('Writable write failure:', innerErr);
             throw innerErr;
@@ -88,7 +88,7 @@ function createMediabunnyTarget(writable: FileSystemWritableFileStream | null): 
 }
 
 /**
- * Determines output format instance for mediabunny based on filename or format
+ * Determines output format instance based on filename or format
  */
 function getOutputFormatForFile(filename: string): Mp4OutputFormat | WebMOutputFormat | MkvOutputFormat {
   const ext = filename.split('.').pop()?.toLowerCase() || 'mp4';

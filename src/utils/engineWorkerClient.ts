@@ -1,4 +1,4 @@
-import { StreamTargetChunk } from 'mediabunny';
+import { StreamTargetChunk } from './nativeMedia';
 
 let worker: Worker | null = null;
 const activeRequests = new Map<string, {

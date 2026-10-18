@@ -1,4 +1,4 @@
-import { Input, BlobSource, ALL_FORMATS, CanvasSink, InputVideoTrack } from 'mediabunny';
+import { Input, BlobSource, ALL_FORMATS, CanvasSink, InputVideoTrack } from '../utils/nativeMedia';
 
 interface PlayerSession {
   input: Input | null;

@@ -1,4 +1,4 @@
-import { Input, BlobSource, ALL_FORMATS, CanvasSink } from 'mediabunny';
+import { Input, BlobSource, ALL_FORMATS, CanvasSink } from '../utils/nativeMedia';
 
 self.onmessage = async (e: MessageEvent) => {
   const { id, action, payload } = e.data;

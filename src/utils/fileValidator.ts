@@ -1,4 +1,4 @@
-import { Input, BlobSource, ALL_FORMATS } from 'mediabunny';
+import { probeMediaMetadata } from './nativeMedia';
 
 export interface FileValidationResult {
   valid: boolean;
@@ -79,29 +79,18 @@ export async function validateMediaFile(file: File): Promise<FileValidationResul
     return { valid: false, error: `Failed to read file data: ${err?.message || 'unknown error'}` };
   }
 
-  // 4. Mediabunny Demuxer probe with strict 3-second timeout
-  const mediabunnyPromise = (async () => {
+  // 4. Proprietary Native Demuxer probe with strict 3-second timeout
+  const nativeProbePromise = (async () => {
     try {
-      const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
-      const vTracks = await input.getVideoTracks();
-      if (vTracks && vTracks.length > 0) {
-        const dur = await vTracks[0].computeDuration();
-        if (dur && Number.isFinite(dur) && dur > 0) {
-          return { valid: true, duration: dur };
-        }
+      const meta = await probeMediaMetadata(file);
+      if (meta.duration && Number.isFinite(meta.duration) && meta.duration > 0) {
+        return { valid: true, duration: meta.duration };
       }
-      const aTracks = await input.getAudioTracks();
-      if (aTracks && aTracks.length > 0) {
-        const dur = await aTracks[0].computeDuration();
-        if (dur && Number.isFinite(dur) && dur > 0) {
-          return { valid: true, duration: dur };
-        }
-      }
-      return { valid: true, duration: 0 };
+      return { valid: true, duration: meta.duration || 0 };
     } catch (e: any) {
       return { valid: false, error: `File decoding failed: ${e?.message || 'media data is corrupted'}` };
     }
   })();
 
-  return await mediabunnyPromise;
+  return await nativeProbePromise;
 }

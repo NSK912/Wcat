@@ -38,7 +38,7 @@ import {
   Redo2,
 } from 'lucide-react';
 import { formatTime } from '../utils/sampleVideos';
-import { Input, BlobSource, ALL_FORMATS } from 'mediabunny';
+import { probeMediaMetadata } from '../utils/nativeMedia';
 import { probeVideoSafe, generateThumbnailsSafe } from '../utils/webcodecsPlayerClient';
 import wcatSeekPng from '../../assets/Wcat seek.png';
 import wcatSeekSvg from '../../public/wcat-seek.svg';
@@ -526,24 +526,15 @@ export const Timeline: React.FC<TimelineProps> = ({
       });
     };
 
-    // 1. Fast Mediabunny Demuxer probe (100% accurate for MKV, MP4, WebM, TS, AVI)
+    // 1. Fast Native Demuxer probe (100% accurate for MKV, MP4, WebM, TS, AVI)
     let probedDur = 0;
     try {
-      const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
-      const vTracks = await input.getVideoTracks();
-      if (vTracks.length > 0) {
-        const d = await vTracks[0].computeDuration();
-        if (d && Number.isFinite(d) && d > 0) probedDur = d;
-      }
-      if (!probedDur) {
-        const aTracks = await input.getAudioTracks();
-        if (aTracks.length > 0) {
-          const d = await aTracks[0].computeDuration();
-          if (d && Number.isFinite(d) && d > 0) probedDur = d;
-        }
+      const meta = await probeMediaMetadata(file);
+      if (meta.duration && Number.isFinite(meta.duration) && meta.duration > 0) {
+        probedDur = meta.duration;
       }
     } catch (e) {
-      console.warn('Mediabunny duration extraction in Timeline:', e);
+      console.warn('Native duration extraction in Timeline:', e);
     }
 
     if (probedDur > 0) {

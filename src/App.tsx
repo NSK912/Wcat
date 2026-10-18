@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { EditSettings, ActiveTab, SampleVideo, TimelineTrackData, TimelineClip, ClipTransform } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
-import { Input, BlobSource, ALL_FORMATS } from 'mediabunny';
+import { probeMediaMetadata } from './utils/nativeMedia';
 import { processNativeConcatStream, processNativeTrimStream, processNativeRemuxStream } from './utils/WEngine';
 import {
   processWebCodecsEncodeStream,
@@ -83,43 +83,14 @@ const getFileDuration = async (file: File): Promise<number> => {
     return 5;
   }
 
-  // 1. Try Mediabunny demuxer metadata first (instantaneous & non-blocking)
+  // 1. Try proprietary native metadata probe first (instantaneous & non-blocking)
   try {
-    const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
-    const metaDur = await input.getDurationFromMetadata();
-    if (metaDur && Number.isFinite(metaDur) && metaDur > 0) {
-      return metaDur;
-    }
-
-    const vTracks = await input.getVideoTracks();
-    if (vTracks.length > 0) {
-      const vMeta = await vTracks[0].getDurationFromMetadata();
-      if (vMeta && Number.isFinite(vMeta) && vMeta > 0) {
-        return vMeta;
-      }
-      // Never scan full 30GB file with computeDuration - only for small files (<100MB)
-      if (file.size < 100 * 1024 * 1024) {
-        const dur = await vTracks[0].computeDuration();
-        if (dur && Number.isFinite(dur) && dur > 0) {
-          return dur;
-        }
-      }
-    }
-    const aTracks = await input.getAudioTracks();
-    if (aTracks.length > 0) {
-      const aMeta = await aTracks[0].getDurationFromMetadata();
-      if (aMeta && Number.isFinite(aMeta) && aMeta > 0) {
-        return aMeta;
-      }
-      if (file.size < 100 * 1024 * 1024) {
-        const dur = await aTracks[0].computeDuration();
-        if (dur && Number.isFinite(dur) && dur > 0) {
-          return dur;
-        }
-      }
+    const meta = await probeMediaMetadata(file);
+    if (meta.duration && Number.isFinite(meta.duration) && meta.duration > 0) {
+      return meta.duration;
     }
   } catch (e) {
-    console.warn('Mediabunny direct probe failed:', e);
+    console.warn('Native metadata probe failed:', e);
   }
 
   // 2. Safe HTML5 video/audio metadata detection with strict 2-second timeout

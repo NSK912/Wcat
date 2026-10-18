@@ -23,7 +23,7 @@ import {
   type VideoCodec,
   type AudioCodec,
   type QualityLevel,
-} from 'mediabunny';
+} from './nativeMedia';
 import { EditSettings, ClipTransform, TimelineTrackData, TimelineClip } from '../types';
 import { HardwareBlurEngine } from './HardwareBlur';
 
@@ -764,7 +764,7 @@ function createWebCodecsTarget(writable: FileSystemWritableFileStream | null): S
             await (writable as any).seek(chunk.position);
             await writable.write(chunk.data);
           } else {
-            await writable.write(chunk);
+            await (writable as any).write(chunk);
           }
         } catch {
           try {
