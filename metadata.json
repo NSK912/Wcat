@@ -1,0 +1,6 @@
+{
+  "name": "Wcat",
+  "description": "A browser-based video editing application powered by FFmpeg WASM for trimming, cutting, filtering, merging, and exporting videos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
