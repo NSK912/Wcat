@@ -1,6 +1,0 @@
-{
-  "name": "seedplanet",
-  "description": "A planet-seeding simulation game with procedural terrain, adaptive environments, hierarchical finger and knuckle rigging, physics, and devgame character customization.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
