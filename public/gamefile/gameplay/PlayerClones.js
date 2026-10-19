@@ -714,8 +714,8 @@
     for (let i = 0; i < cState.inventory.length; i++) {
       const it = cState.inventory[i];
       if (!it) continue;
-      // Keep working tools (AXE, PICKAXE) and weapons/ammo (WOODEN_ARM_CANNON, ARROW) equipped
-      if (it.name === "AXE" || it.name === "PICKAXE" || it.name === "WOODEN_ARM_CANNON" || it.name === "ARM_CANNON" || it.name === "ARROW") continue;
+      // Keep working tools (AXE, PICKAXE) and weapons/ammo (WOODEN_ARM_CANNON, ARROW, IRON_BULLET) equipped
+      if (it.name === "AXE" || it.name === "PICKAXE" || it.name === "WOODEN_ARM_CANNON" || it.name === "ARM_CANNON" || it.name === "ARROW" || it.name === "IRON_BULLET") continue;
 
       const itemName = it.name;
       const count = it.count || 1;
@@ -1693,7 +1693,7 @@
           }
           
           const hasCannon = getCloneItemCount(cState, "WOODEN_ARM_CANNON") > 0 || getCloneItemCount(cState, "ARM_CANNON") > 0;
-          const arrowCount = getCloneItemCount(cState, "ARROW");
+          const arrowCount = getCloneItemCount(cState, "ARROW") + getCloneItemCount(cState, "IRON_BULLET");
           if (hasCannon && arrowCount > 0) {
             cState.equippedTool = "WOODEN_ARM_CANNON";
             cState.faceText = "(🪵🦾‿🦾)";
@@ -1717,7 +1717,11 @@
 
             if (cState.actionSwingTimer >= 0.75) {
               cState.actionSwingTimer = 0.0;
-              removeCloneItem(cState, "ARROW", 1);
+              if (getCloneItemCount(cState, "ARROW") > 0) {
+                removeCloneItem(cState, "ARROW", 1);
+              } else {
+                removeCloneItem(cState, "IRON_BULLET", 1);
+              }
               if (typeof playPlaceSound === "function") playPlaceSound();
 
               // Spawn arrow projectile from clone towards animal

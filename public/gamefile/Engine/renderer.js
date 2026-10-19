@@ -236,9 +236,11 @@
                      finalColor = vColor * diffuseVal * 1.2 + vec3(0.1, 0.2, 0.05);
                  }
 
-                 // Glowing Ore (แร่เรืองแสง) - เรืองแสงสว่างด้วยสีดั้งเดิมของตัวเอง (Cyan / Teal) ไม่ฟอกขาว
+                 // Glowing Ore & Obsidian Pad (White Core & Gold Accents Glow)
                  bool isGlowingOre = (abs(vColor.r - 0.22) < 0.08 && abs(vColor.g - 0.95) < 0.08 && abs(vColor.b - 0.88) < 0.08);
-                 if (isGlowingOre) {
+                 bool isWhiteGlow = (abs(vColor.r - 0.98) < 0.03 && abs(vColor.g - 0.98) < 0.03 && abs(vColor.b - 1.0) < 0.03);
+                 bool isGoldGlow = (abs(vColor.r - 0.95) < 0.04 && abs(vColor.g - 0.78) < 0.04 && abs(vColor.b - 0.23) < 0.04);
+                 if (isGlowingOre || isWhiteGlow) {
                      float pulse = 0.94 + 0.12 * sin(uTime * 3.0 + vWorldPos.x * 2.8 + vWorldPos.y * 2.8 + vWorldPos.z * 2.8);
                      float rimFactor = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.5);
                      float crystalGlint = pow(max(dot(normal, halfDir), 0.0), 32.0) * 0.4;
@@ -246,6 +248,14 @@
                      vec3 rimGlow = vColor * (rimFactor * 0.35);
                      vec3 glintColor = vColor * crystalGlint;
                      finalColor = clamp(glowColor * 1.15 + rimGlow + glintColor, 0.0, 1.0);
+                 } else if (isGoldGlow) {
+                     // Ratio-locked 24K Gold Glow: keeps G/R ratio strictly at ~0.82 so it never shifts to yellow (G/R > 0.9) or orange (G/R < 0.7)
+                     float pulse = 0.96 + 0.04 * sin(uTime * 2.8 + vWorldPos.x * 2.5 + vWorldPos.y * 2.5 + vWorldPos.z * 2.5);
+                     float rimFactor = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.2);
+                     float goldGlint = pow(max(dot(normal, halfDir), 0.0), 28.0) * 0.45;
+                     float lum = clamp(0.88 + 0.07 * diffuseVal + 0.05 * rimFactor, 0.86, 1.0) * pulse;
+                     vec3 baseGold = vec3(0.95, 0.78, 0.23) * lum;
+                     finalColor = mix(baseGold, vec3(1.0, 0.90, 0.48), clamp(goldGlint, 0.0, 0.42));
                  }
 
                 // Apply Water Volume Tint & Fog
@@ -4447,8 +4457,9 @@ window.cloud3DProgram = cloud3DProgram;
                 } else {
                     const arrRef = findArrowInInventory();
                     if (arrRef) {
+                        const ammoName = arrRef.item ? arrRef.item.name : null;
                         consumeArrow(arrRef);
-                        shootArrowProjectile(isCannon ? drawPower * 1.3 : drawPower);
+                        shootArrowProjectile(isCannon ? drawPower * 1.3 : drawPower, ammoName);
                         if (typeof playBowShootSound === "function") {
                             playBowShootSound();
                         }
@@ -4841,10 +4852,12 @@ window.cloud3DProgram = cloud3DProgram;
 
         if (!_cachedInvOverlay) _cachedInvOverlay = document.getElementById("inventoryOverlay");
         if (!_cachedChestOverlay) _cachedChestOverlay = document.getElementById("chestOverlay");
+        const _cachedWarpOverlay = document.getElementById("warpOverlay");
         const isInvOpen = _cachedInvOverlay?.classList.contains("open");
         const isCstOpen = _cachedChestOverlay?.classList.contains("open");
+        const isWrpOpen = _cachedWarpOverlay?.classList.contains("open");
         const isFreeCamActive = (cameraMode === "freecam" || (typeof window.cameraMode !== "undefined" && window.cameraMode === "freecam"));
-        const isUIOpen = isInvOpen || isCstOpen || isFreeCamActive;
+        const isUIOpen = isInvOpen || isCstOpen || isWrpOpen || isFreeCamActive;
 
         // Keyboard input
         if (!isUIOpen && (keysPressed[currentKeyBindings.forward] || keysPressed["ArrowUp"]))
@@ -6887,7 +6900,8 @@ window.cloud3DProgram = cloud3DProgram;
               "wood_floor", "thin_wood_floor", "stone_floor", "wood_stairs", "folding_ladder",
               "campfire", "wood_boat", "wood_wheel", "electric_engine", "boat_wing",
               "wood_wall", "wood_window", "wood_door", "wood_roof", "wood_chest",
-              "meganeura_item", "isopod_item", "robot_stand", "robot_cockpit",
+              "meganeura_item", "isopod_item", "obsidian_pad_warp_item", "obsidian_compass_pad_item",
+              "robot_stand", "robot_cockpit",
               "robot_left_arm", "robot_right_arm", "robot_left_leg", "robot_right_leg"
             ];
             const maxDemolishReach = 0.50 * (playerScale / 0.1);
@@ -6968,7 +6982,7 @@ window.cloud3DProgram = cloud3DProgram;
                   item.position[1] + n[1] * 0.15,
                   item.position[2] + n[2] * 0.15
                 ];
-              } else if (item.type.includes("floor")) {
+              } else if (item.type.includes("floor") || item.type === "obsidian_pad_warp_item" || item.type === "obsidian_compass_pad_item") {
                 itemCenter = [
                   item.position[0] + n[0] * 0.02,
                   item.position[1] + n[1] * 0.02,
@@ -6981,7 +6995,7 @@ window.cloud3DProgram = cloud3DProgram;
                 meshRadius = 0.85;
               } else if (item.type.includes("wall") || item.type.includes("window") || item.type.includes("door")) {
                 meshRadius = 0.26;
-              } else if (item.type.includes("floor") || item.type.includes("roof") || item.type.includes("stairs") || item.type.includes("ladder")) {
+              } else if (item.type.includes("floor") || item.type === "obsidian_pad_warp_item" || item.type === "obsidian_compass_pad_item" || item.type.includes("roof") || item.type.includes("stairs") || item.type.includes("ladder")) {
                 meshRadius = 0.26;
               } else if (item.type === "wood_chest") {
                 meshRadius = 0.18;
@@ -7606,7 +7620,7 @@ if (prompt._lastHTML !== _newHtml_2) {
 
               for (let item of nearbyCandidates) {
                 if (!item.active) continue;
-                if (item.type === "wood_stairs" || item.type === "folding_ladder" || item.type === "wood_floor" || item.type === "thin_wood_floor" || item.type === "stone_floor" || item.type === "campfire" || item.type === "wood_boat" || item.type === "boat" || (typeof item.type === "string" && item.type.toLowerCase().includes("boat")) || item.type === "wood_wheel" || item.type === "electric_engine" || item.type === "boat_wing" || item.type === "wood_wall" || item.type === "wood_window" || item.type === "wood_door" || item.type === "wood_chest" || item.type === "axe" || item.type === "pickaxe" || item.type.startsWith("robot_")) continue;
+                if (item.type === "wood_stairs" || item.type === "folding_ladder" || item.type === "wood_floor" || item.type === "thin_wood_floor" || item.type === "stone_floor" || item.type === "obsidian_pad_warp_item" || item.type === "obsidian_compass_pad_item" || item.type === "campfire" || item.type === "wood_boat" || item.type === "boat" || (typeof item.type === "string" && item.type.toLowerCase().includes("boat")) || item.type === "wood_wheel" || item.type === "electric_engine" || item.type === "boat_wing" || item.type === "wood_wall" || item.type === "wood_window" || item.type === "wood_door" || item.type === "wood_chest" || item.type === "axe" || item.type === "pickaxe" || item.type.startsWith("robot_")) continue;
                 
                 const reachInfo = isTargetWithinReach(item.position, actionReachDistance);
                 if (reachInfo.valid) {
@@ -8298,9 +8312,9 @@ if (prompt._lastText !== _newText_2) {
           let minDistSq = Infinity;
           if (amphibians && amphibians.length > 0) {
             for (let npc of amphibians) {
-              if ((npc.type === 'meganeura' || npc.type === 'isopod') && !npc.ragdollEnabled) continue;
-              if (npc.type !== 'meganeura' && npc.type !== 'isopod' && npc.type !== 'human' && !isDevMode) continue;
-              if (npc.type !== 'meganeura' && npc.type !== 'isopod' && npc.ragdollEnabled) continue;
+              if ((npc.type === 'meganeura' || npc.type === 'isopod' || npc.type === 'obsidian_cube') && !npc.ragdollEnabled) continue;
+              if (npc.type !== 'meganeura' && npc.type !== 'isopod' && npc.type !== 'obsidian_cube' && npc.type !== 'human' && !isDevMode) continue;
+              if (npc.type !== 'meganeura' && npc.type !== 'isopod' && npc.type !== 'obsidian_cube' && npc.ragdollEnabled) continue;
 
               const pos = npc.ragdollPos || npc.position;
               if (!pos) continue;
@@ -8359,6 +8373,21 @@ if (npcPrompt._lastHTML !== _newHtml_9) {
 if (npcPrompt._lastHTML !== _newHtml_10) {
     npcPrompt.innerHTML = _newHtml_10;
     npcPrompt._lastHTML = _newHtml_10;
+}
+              } else if (closestNPCLocal.type === 'obsidian_cube') {
+                const _newHtml_obsidian = `
+                  <span style="display: inline-flex; align-items: center; gap: 4px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="display: inline-block;">
+                      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                      <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                      <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                    </svg>
+                    <span>[${keyText}] เก็บศิลาออบซิเดียน (Pick up Obsidian Cube)</span>
+                  </span>
+                `;
+if (npcPrompt._lastHTML !== _newHtml_obsidian) {
+    npcPrompt.innerHTML = _newHtml_obsidian;
+    npcPrompt._lastHTML = _newHtml_obsidian;
 }
               } else {
                 const _newHtml_11 = `

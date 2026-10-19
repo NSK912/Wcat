@@ -129,7 +129,7 @@ document.body.insertAdjacentHTML("afterbegin", `<div
           <!-- Version Info -->
           <div style="color: #64748b; font-size: 12px; font-weight: 500; font-family: 'Google Sans', sans-serif; margin-left: 8px;">
             <span style="font-weight: 700; margin-right: 4px;">NSK App</span>
-            ver 2.0.9
+            ver 2.0.10
           </div>
         </div>
       </div>
@@ -1261,6 +1261,34 @@ document.body.insertAdjacentHTML("afterbegin", `<div
           <!-- Player Inventory Grid in Chest UI -->
           <div class="inventory-grid" id="chestPlayerInventoryGrid">
             <!-- สร้างช่องเก็บของกระเป๋าเดินทางในหน้านี้ผ่าน JavaScript -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- หน้าต่างวาร์ป (Warp UI Overlay - ใช้โครงสร้าง UI ชุดเดียวกับกระเป๋าและกล่อง) -->
+    <div class="inventory-overlay" id="warpOverlay">
+      <div class="inventory-panel game-ui" style="width: 448px; max-width: 95vw;">
+        <div style="display: flex; flex-direction: column; width: 100%; flex-shrink: 0;">
+          <!-- Warp UI Header -->
+          <div class="inventory-header">
+            <div class="inventory-tabs">
+              <h2 class="active">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: block;">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
+                </svg>
+                <span data-i18n="warp_ui_title">Obsidian Flux</span>
+              </h2>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center; height: 100%;">
+              <button class="close-btn game-ui" id="warpClose">✕</button>
+            </div>
+          </div>
+
+          <!-- Warp Pad Grid (แสดง Obsidian Pad ตามลำดับที่มีการวาง) -->
+          <div class="inventory-grid" id="warpGrid">
+            <!-- สร้างช่องเลือกแท่นวาร์ป Obsidian Pad 20 ช่องผ่าน JavaScript -->
           </div>
         </div>
       </div>
@@ -2633,7 +2661,10 @@ window.addEventListener("keyup", (e) => {
           if (!gameStarted) return;
           if (!inventoryKeyPressed) {
             inventoryKeyPressed = true;
-            if (currentOpenChest) {
+            const warpOverlayEl = document.getElementById("warpOverlay");
+            if (warpOverlayEl && warpOverlayEl.classList.contains("open")) {
+              if (typeof closeWarpUI === "function") closeWarpUI();
+            } else if (currentOpenChest) {
               closeChest();
             } else {
               toggleInventory();
@@ -3800,10 +3831,17 @@ window.addEventListener("keyup", (e) => {
           } else if (!isUsingItem || (activeItem && (activeItem.name === "BOW" || activeItem.name === "WOODEN_ARM_CANNON" || activeItem.name === "ARM_CANNON") && arrowShotInCurrentAnim && useAnimTimer <= (bowHoldArmTimer - bowSpamClickDelay))) {
              if (selectedActionSlotIndex !== -1 && actionSlotsItems[selectedActionSlotIndex]) {
                const item = actionSlotsItems[selectedActionSlotIndex];
-               if (isAltAction && item.name !== "SHOVEL" && item.name !== "PICKAXE") {
-                   // Do nothing for other items on right click for now
-               } else {
+               if (isAltAction) {
+                 if (item.name === "WOODEN_ARM_CANNON" || item.name === "ARM_CANNON") {
+                   if (typeof switchCannonAmmo === "function") switchCannonAmmo();
+                   else if (typeof window.switchCannonAmmo === "function") window.switchCannonAmmo();
+                 } else if (item.name !== "SHOVEL" && item.name !== "PICKAXE") {
+                   // Do nothing for other items on right click
+                 } else {
                    useItem(item, selectedActionSlotIndex, "action", isAltAction);
+                 }
+               } else {
+                 useItem(item, selectedActionSlotIndex, "action", isAltAction);
                }
              } else if (isAltAction) {
                // Empty hand right click: do nothing (terrain modification disabled)

@@ -288,6 +288,57 @@
         color: #dfb76c;
         transform: translateY(-2px);
       }
+
+      @keyframes ammoBadgePop {
+        0% {
+          transform: scale(0.3) rotate(-10deg);
+          opacity: 0;
+        }
+        50% {
+          transform: scale(1.15) rotate(2deg);
+          opacity: 1;
+        }
+        100% {
+          transform: scale(1) rotate(0deg);
+          opacity: 1;
+        }
+      }
+
+      .ammo-3d-popup-badge {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: radial-gradient(circle, rgba(15, 25, 40, 0.95) 0%, rgba(5, 10, 20, 0.9) 100%);
+        border: 1.5px solid #00f0ff;
+        box-shadow: 0 0 12px rgba(0, 240, 255, 0.8), inset 0 0 8px rgba(0, 240, 255, 0.3);
+        z-index: 25;
+        pointer-events: none;
+        border-radius: 4px;
+        animation: ammoBadgePop 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+      }
+
+      .gun-ammo-corner-badge {
+        position: absolute;
+        bottom: 8px;
+        right: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: rgba(10, 20, 30, 0.9);
+        border: 1px solid rgba(0, 240, 255, 0.7);
+        box-shadow: 0 0 6px rgba(0, 240, 255, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 12;
+        pointer-events: none;
+      }
       .touch-btn {
         position: relative;
         width: 56px;

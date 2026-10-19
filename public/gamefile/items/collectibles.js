@@ -2005,7 +2005,7 @@ function buildCollectibles(count, seed) {
         const isInventoryOpen = document.getElementById("inventoryOverlay")?.classList.contains("open");
         if (isPlacingFloor && !isInventoryOpen) {
           const placingItemName = floorPlacementInfo && floorPlacementInfo.item ? floorPlacementInfo.item.name : "";
-          const typeToPlace = placingItemName.startsWith("ROBOT_") ? placingItemName.toLowerCase() : (placingItemName === "STONE_FLOOR" ? "stone_floor" : (placingItemName === "WOOD_STAIRS" ? "wood_stairs" : (placingItemName === "FOLDING_LADDER" ? "folding_ladder" : (placingItemName === "CAMPFIRE" ? "campfire" : (placingItemName === "WOOD_BOAT" ? "wood_boat" : (placingItemName === "ELECTRIC_ENGINE" ? "electric_engine" : (placingItemName === "BOAT_WING" ? "boat_wing" : (placingItemName === "WOOD_WHEEL" ? "wood_wheel" : (placingItemName === "WOOD_WALL" ? "wood_wall" : (placingItemName === "WOOD_WINDOW" ? "wood_window" : (placingItemName === "WOOD_DOOR" ? "wood_door" : (placingItemName === "WOOD_ROOF" ? "wood_roof" : (placingItemName === "WOOD_CHEST" ? "wood_chest" : (placingItemName === "MEGANEURA" ? "meganeura_item" : (placingItemName === "ISOPOD" ? "isopod_item" : (placingItemName === "THIN_WOOD_FLOOR" ? "thin_wood_floor" : "wood_floor"))))))))))))))));
+          const typeToPlace = placingItemName.startsWith("ROBOT_") ? placingItemName.toLowerCase() : (placingItemName === "STONE_FLOOR" ? "stone_floor" : (placingItemName === "WOOD_STAIRS" ? "wood_stairs" : (placingItemName === "FOLDING_LADDER" ? "folding_ladder" : (placingItemName === "CAMPFIRE" ? "campfire" : (placingItemName === "WOOD_BOAT" ? "wood_boat" : (placingItemName === "ELECTRIC_ENGINE" ? "electric_engine" : (placingItemName === "BOAT_WING" ? "boat_wing" : (placingItemName === "WOOD_WHEEL" ? "wood_wheel" : (placingItemName === "WOOD_WALL" ? "wood_wall" : (placingItemName === "WOOD_WINDOW" ? "wood_window" : (placingItemName === "WOOD_DOOR" ? "wood_door" : (placingItemName === "WOOD_ROOF" ? "wood_roof" : (placingItemName === "WOOD_CHEST" ? "wood_chest" : (placingItemName === "MEGANEURA" ? "meganeura_item" : (placingItemName === "ISOPOD" ? "isopod_item" : (placingItemName === "OBSIDIAN_PAD_WARP" || placingItemName === "OBSIDIAN_COMPASS_PAD" ? "obsidian_pad_warp_item" : (placingItemName === "THIN_WOOD_FLOOR" ? "thin_wood_floor" : "wood_floor")))))))))))))))));
 
           if (!floorPreviewCollectible || floorPreviewCollectible.type !== typeToPlace) {
             // Remove mismatched preview if it exists
@@ -2029,7 +2029,7 @@ function buildCollectibles(count, seed) {
             };
             collectibles.push(floorPreviewCollectible);
             floorPreviewCollectible = collectibles[collectibles.length - 1];
-            if (typeToPlace === "wood_wall" || typeToPlace === "wood_window" || typeToPlace === "wood_door" || typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace === "wood_boat" || typeToPlace === "wood_wheel" || typeToPlace === "electric_engine" || typeToPlace === "boat_wing" || typeToPlace.startsWith("robot_")) {
+            if (typeToPlace === "wood_wall" || typeToPlace === "wood_window" || typeToPlace === "wood_door" || typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item" || typeToPlace === "wood_boat" || typeToPlace === "wood_wheel" || typeToPlace === "electric_engine" || typeToPlace === "boat_wing" || typeToPlace.startsWith("robot_")) {
               floorPreviewCollectible.layer = COLLISION_LAYERS.WOOD_WALL;
             } else if (typeToPlace === "wood_floor" || typeToPlace === "thin_wood_floor" || typeToPlace === "wood_roof" || typeToPlace === "folding_ladder") {
               floorPreviewCollectible.layer = COLLISION_LAYERS.WOOD_FLOOR;
@@ -2179,6 +2179,7 @@ function buildCollectibles(count, seed) {
           if (typeToPlace === "robot_cockpit") bob = 0.14;
           else if (typeToPlace === "robot_left_leg" || typeToPlace === "robot_right_leg") bob = 0.14;
           else if (typeToPlace === "robot_stand") bob = 0.0;
+          else if (typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item") bob = 0.002;
           else if (typeToPlace.startsWith("robot_")) bob = 0.35;
 
           let targetPos = [
@@ -4123,7 +4124,7 @@ function buildCollectibles(count, seed) {
                 }
               }
             }
-          } else if (typeToPlace === "wood_wall" || typeToPlace === "wood_window" || typeToPlace === "wood_door" || typeToPlace === "thin_wood_floor" || typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item") {
+          } else if (typeToPlace === "wood_wall" || typeToPlace === "wood_window" || typeToPlace === "wood_door" || typeToPlace === "thin_wood_floor" || typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item") {
             // Direct wall snap for wood_window and wood_door
             if (typeToPlace === "wood_window" || typeToPlace === "wood_door") {
               let nearestWall = null;
@@ -4217,7 +4218,7 @@ function buildCollectibles(count, seed) {
                     let gridZ = Math.round(localZ / 0.15);
 
                     // Prevent center and corner placement for walls to avoid overlapping side-by-side, unless placing on thin_wood_floor which allows center placement, or if placing thin_wood_floor itself.
-                    if (typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace.startsWith("robot_")) {
+                    if (typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item" || typeToPlace.startsWith("robot_")) {
                         floorPreviewCollectible.isValidPlacement = true;
                         floorPreviewCollectible.size = 0.25;
 
@@ -4230,6 +4231,7 @@ function buildCollectibles(count, seed) {
                         if (typeToPlace === "robot_cockpit") floatOffset = 0.14;
                         else if (typeToPlace === "robot_left_leg" || typeToPlace === "robot_right_leg") floatOffset = 0.14;
                         else if (typeToPlace === "robot_stand") floatOffset = 0.0;
+                        else if (typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item") floatOffset = 0.002;
                         else if (typeToPlace.startsWith("robot_")) floatOffset = 0.35;
                         targetPos = [
                             sP[0] + sR[0] * (gridX * 0.15) + sF[0] * (gridZ * 0.15) + sN[0] * (floorHH / 2 + floatOffset),
@@ -4527,7 +4529,7 @@ function buildCollectibles(count, seed) {
                     }
             }
           } else {
-                    if (typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace.startsWith("robot_")) {
+                    if (typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item" || typeToPlace.startsWith("robot_")) {
                         floorPreviewCollectible.isValidPlacement = !isUnderWater && (slopeVal < 0.6);
                         floorPreviewCollectible.size = 0.25;
                         pN = [pnx, pny, pnz];
@@ -4540,7 +4542,7 @@ function buildCollectibles(count, seed) {
             }
           } else {
                 // No wood floor found nearby or too far
-                if (typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace.startsWith("robot_")) {
+                if (typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item" || typeToPlace.startsWith("robot_")) {
                     floorPreviewCollectible.isValidPlacement = !isUnderWater && (slopeVal < 0.6);
                     floorPreviewCollectible.size = 0.25;
                     pN = [pnx, pny, pnz];
@@ -4573,6 +4575,15 @@ function buildCollectibles(count, seed) {
             floorPreviewCollectible.F[2] = pF[2];
           }
 
+          if (typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item") {
+            const maxPads = (typeof window !== "undefined" && typeof window.MAX_OBSIDIAN_PADS === "number") ? window.MAX_OBSIDIAN_PADS : 5;
+            if (typeof window !== "undefined" && typeof window.getPlacedObsidianPadsInOrder === "function") {
+              if (window.getPlacedObsidianPadsInOrder().length >= maxPads) {
+                floorPreviewCollectible.isValidPlacement = false;
+              }
+            }
+          }
+
           if (floorPreviewCollectible.isValidPlacement === false) {
               floorPreviewCollectible.color = [0.8, 0.2, 0.2]; // red if invalid
           } else {
@@ -4583,6 +4594,8 @@ function buildCollectibles(count, seed) {
         } else {
           // If NOT placing or inventory is open, hide/remove preview
           if (floorPreviewCollectible) {
+            const idx = collectibles.indexOf(floorPreviewCollectible);
+            if (idx !== -1) collectibles.splice(idx, 1);
             floorPreviewCollectible = null;
             refreshCollectiblesVBO('preview');
           }
@@ -4831,8 +4844,9 @@ function buildCollectibles(count, seed) {
 
                      if (distSq <= hitRadius * hitRadius) {
                          c.animPhaseActive = false;
-                         // Arrow Immunity Check: Arrows cannot damage obsidian_cube
-                         const isImmuneToArrows = (npc.type === "obsidian_cube") || (npc.immuneToArrows) || (window.NpcRegistry && window.NpcRegistry[npc.type] && window.NpcRegistry[npc.type].immuneToArrows);
+                         const isIronBullet = (c.ammoType === "IRON_BULLET");
+                         // Arrow Immunity Check: Arrows cannot damage obsidian_cube, but Spherical Iron Bullet CAN damage obsidian_cube!
+                         const isImmuneToArrows = (!isIronBullet) && ((npc.type === "obsidian_cube") || (npc.immuneToArrows) || (window.NpcRegistry && window.NpcRegistry[npc.type] && window.NpcRegistry[npc.type].immuneToArrows));
                          if (isImmuneToArrows) {
                              if (typeof showNotice === "function") {
                                  showNotice("🛡️ ลูกธนูเด้งสะท้อน! ศิลาออบซิเดียนทนทานต่อธนู 100% (Immune to arrows!)");
@@ -4844,8 +4858,8 @@ function buildCollectibles(count, seed) {
                              break;
                          }
 
-                         // User requirement: Arrow damage reduces only 1 HP!
-                         const damage = 1;
+                         // Spherical Iron Bullet deals 3 HP damage, Arrow deals 1 HP!
+                         const damage = isIronBullet ? 3 : 1;
                          if (npc.hp === undefined) {
                              const regHp = (window.NpcRegistry && window.NpcRegistry[npc.type]) ? window.NpcRegistry[npc.type].maxHp : 1;
                              npc.hp = regHp;
@@ -4858,7 +4872,7 @@ function buildCollectibles(count, seed) {
                              for (let i = 0; i < npc.maxHp; i++) {
                                  hpHearts += i < npc.hp ? "🔴" : "⚪";
                              }
-                             const weaponName = (c.isCannonShot || c.sourceWeapon === "WOODEN_ARM_CANNON") ? "🪵🦾 ปืนไม้ติดแขน" : "🏹 ลูกธนู";
+                             const weaponName = isObsidianBall ? "⚫ ลูกบอลออบซิเดียน" : (isIronBullet ? "⚪ กระสุนเหล็กทรงกลม" : ((c.isCannonShot || c.sourceWeapon === "WOODEN_ARM_CANNON") ? "🪵🦾 ปืนไม้ติดแขน" : "🏹 ลูกธนู"));
                              showNotice("🎯 " + weaponName + " ยิงเข้าเป้า! ลดดาเมจ -" + damage + " " + hpHearts + " [HP: " + npc.hp + "/" + npc.maxHp + "]");
                              
                              if (npc.hp <= 0) {
@@ -4866,7 +4880,8 @@ function buildCollectibles(count, seed) {
                                  showNotice("💀 กำจัดเป้าหมายสำเร็จ! (Target eliminated!)");
                              }
                          } else {
-                             showNotice("🎯 ลูกธนูปักโดนร่างเป้าหมาย!");
+                             const weaponName = isObsidianBall ? "ลูกบอลออบซิเดียน" : (isIronBullet ? "กระสุนเหล็ก" : "ลูกธนู");
+                             showNotice("🎯 " + weaponName + "ปักโดนร่างเป้าหมาย!");
                          }
                          
                          if (npc.ragdollEnabled && npc.ragdollVel) {
@@ -5773,6 +5788,29 @@ function buildCollectibles(count, seed) {
           usage_en: "Used as food ingredient and crafting material.",
           maxStack: 99
         },
+        "OBSIDIAN_CUBE": {
+          id: "OBSIDIAN_CUBE",
+          category: ITEM_CATEGORIES.NONE,
+          name_th: "ศิลาออบซิเดียน",
+          name_en: "Obsidian Cube",
+          icon: "🔶",
+          actionType: "MATERIAL",
+          usage_th: "ศิลาออบซิเดียนลายทองคำที่เก็บได้จากซากศิลาออบซิเดียน ใช้เป็นวัตถุดิบหรือไอเทมสะสม",
+          usage_en: "Gilded obsidian stone collected from defeated Obsidian Monolith. Used as material or collectible.",
+          maxStack: 99
+        },
+        "OBSIDIAN_PAD_WARP": {
+          id: "OBSIDIAN_PAD_WARP",
+          category: ITEM_CATEGORIES.PRE_PLACE,
+          name_th: "แท่นวาร์ปออบซิเดียน",
+          name_en: "OBSIDIAN PAD Warp",
+          icon: "🧭",
+          actionType: "PLACE_STRUCTURE",
+          placeType: "obsidian_pad_warp_item",
+          usage_th: "แท่นวาร์ปออบซิเดียนลายทองคำสกัดพลังงานหินเรืองแสง สามารถวางประดับบนพื้นโลกได้",
+          usage_en: "Gilded obsidian warp pad platform infused with Glow Ore energy. Can be placed on planet ground.",
+          maxStack: 99
+        },
         "ROBOT_STAND": {
           id: "ROBOT_STAND",
           category: ITEM_CATEGORIES.PRE_PLACE,
@@ -6043,6 +6081,39 @@ function buildCollectibles(count, seed) {
           usage_th: "กระสุนลูกธนูในกระเป๋า สำหรับใช้งานยิงร่วมกับธนู (BOW)",
           usage_en: "Ammunition stored in inventory, consumed when firing the Bow.",
           maxStack: 99
+        },
+        "IRON_BULLET": {
+          id: "IRON_BULLET",
+          category: ITEM_CATEGORIES.NONE,
+          name_th: "กระสุนเหล็ก ทรงกลม",
+          name_en: "Spherical Iron Bullet",
+          icon: "⚪",
+          actionType: "AMMO",
+          usage_th: "กระสุนเหล็กทรงกลมสำหรับใช้เป็นเครื่องกระสุนยิงปืน/ปืนติดแขน (สร้างดาเมจ 3 HP / เจาะทำลายศิลาออบซิเดียนได้) คราฟต์จากแร่เหล็ก 1 อันได้ 5 นัด",
+          usage_en: "Spherical iron ammunition dealing 3 HP damage (capable of damaging Obsidian Cubes). Crafted from 1 Iron Ore = 5 Bullets.",
+          maxStack: 99
+        },
+        "OBSIDIAN_FLUX": {
+          id: "OBSIDIAN_FLUX",
+          category: ITEM_CATEGORIES.HOLDABLE,
+          name_th: "ออบซิเดียนฟลักซ์ (Obsidian Flux)",
+          name_en: "Obsidian Flux",
+          icon: "⚫",
+          actionType: "WARP_ITEM",
+          usage_th: "ไอเทมวาร์ปออบซิเดียนฟลักซ์ ใส่ในช่อง UI แอคชั่นแล้วกดใช้งานเพื่อเปิดหน้าต่างวาร์ปไปยังแท่นวาร์ป (Obsidian Pad) ที่วางไว้ตามลำดับ (การวาร์ป 1 ครั้งจะทำลาย Obsidian Flux 1 อัน)",
+          usage_en: "Obsidian Flux warp item. Equip in Action UI and use to open the Warp UI and teleport to any placed Obsidian Pad in placement order (consumes 1 Obsidian Flux per warp).",
+          maxStack: 99
+        },
+        "OBSIDIAN_BALL": {
+          id: "OBSIDIAN_FLUX",
+          category: ITEM_CATEGORIES.HOLDABLE,
+          name_th: "ออบซิเดียนฟลักซ์ (Obsidian Flux)",
+          name_en: "Obsidian Flux",
+          icon: "⚫",
+          actionType: "WARP_ITEM",
+          usage_th: "ไอเทมวาร์ปออบซิเดียนฟลักซ์ ใส่ในช่อง UI แอคชั่นแล้วกดใช้งานเพื่อเปิดหน้าต่างวาร์ปไปยังแท่นวาร์ป (Obsidian Pad) ที่วางไว้ตามลำดับ (การวาร์ป 1 ครั้งจะทำลาย Obsidian Flux 1 อัน)",
+          usage_en: "Obsidian Flux warp item. Equip in Action UI and use to open the Warp UI and teleport to any placed Obsidian Pad in placement order (consumes 1 Obsidian Flux per warp).",
+          maxStack: 99
         }
       };
       window.ITEM_DEFINITIONS = ITEM_DEFINITIONS;
@@ -6051,6 +6122,58 @@ function buildCollectibles(count, seed) {
       } else {
         window.ItemRegistry = Object.assign({}, ITEM_DEFINITIONS);
       }
+
+      window.ItemRegistry["iron_bullet"] = {
+        render: function(item, vertices, colors, indices, targetBuffer) {
+          const p = item.position || [0, 0, 0];
+          const s = typeof playerScale !== 'undefined' ? playerScale : 0.1;
+          const radius = (item.radius || 0.18) * s;
+          const segsLat = 12;
+          const segsLong = 16;
+          const ironColor = [0.75, 0.78, 0.82];
+
+          if (typeof buildLowPolySphere === "function") {
+            buildLowPolySphere(p, radius, segsLat, ironColor, 0, 0, vertices, colors, indices);
+          } else {
+            const startIdx = vertices.length / 3;
+            for (let lat = 0; lat <= segsLat; lat++) {
+              const theta = (lat / segsLat) * Math.PI;
+              const sinTheta = Math.sin(theta);
+              const cosTheta = Math.cos(theta);
+
+              for (let lon = 0; lon <= segsLong; lon++) {
+                const phi = (lon / segsLong) * Math.PI * 2;
+                const sinPhi = Math.sin(phi);
+                const cosPhi = Math.cos(phi);
+
+                const dx = sinTheta * cosPhi;
+                const dy = cosTheta;
+                const dz = sinTheta * sinPhi;
+
+                vertices.push(p[0] + radius * dx, p[1] + radius * dy, p[2] + radius * dz);
+
+                const light = Math.max(0.3, dx * 0.35 + dy * 0.75 + dz * 0.55);
+                const spec = Math.pow(Math.max(0, dy * 0.65 + dz * 0.7), 6) * 0.35;
+                colors.push(
+                  Math.min(1.0, ironColor[0] * light + spec),
+                  Math.min(1.0, ironColor[1] * light + spec),
+                  Math.min(1.0, ironColor[2] * light + spec)
+                );
+              }
+            }
+
+            for (let lat = 0; lat < segsLat; lat++) {
+              for (let lon = 0; lon < segsLong; lon++) {
+                const first = startIdx + lat * (segsLong + 1) + lon;
+                const second = first + segsLong + 1;
+                indices.push(first, second, first + 1);
+                indices.push(second, second + 1, first + 1);
+              }
+            }
+          }
+        }
+      };
+      window.ItemRegistry["IRON_BULLET"] = window.ItemRegistry["iron_bullet"];
 
       // Helper functions for Backend Item System
       function getItemDefinition(itemOrName) {

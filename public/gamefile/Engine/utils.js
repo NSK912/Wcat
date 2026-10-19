@@ -71,6 +71,9 @@ function isUIOpen() {
   
   const chest = document.getElementById("chestOverlay");
   if (chest && chest.classList.contains("open")) return true;
+
+  const warp = document.getElementById("warpOverlay");
+  if (warp && warp.classList.contains("open")) return true;
   
   const isStarted = (typeof gameStarted !== "undefined" && gameStarted) || (typeof window.gameStarted !== "undefined" && window.gameStarted);
   if (!isStarted) {
@@ -439,7 +442,7 @@ if (typeof window !== "undefined") {
       });
 
       // Target only the specific overlay containers instead of the whole page subtree to prevent mutation thrashing
-      const overlayIds = ["inventoryOverlay", "chestOverlay", "saveSelectOverlay"];
+      const overlayIds = ["inventoryOverlay", "chestOverlay", "warpOverlay", "saveSelectOverlay"];
       overlayIds.forEach(id => {
         const el = document.getElementById(id);
         if (el) {

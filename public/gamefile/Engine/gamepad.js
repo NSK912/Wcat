@@ -1069,6 +1069,7 @@
       }
       const inv = document.getElementById("inventoryOverlay");
       const cst = document.getElementById("chestOverlay");
+      const wrp = document.getElementById("warpOverlay");
       const trash = document.getElementById("trashConfirmOverlay");
       const saveSelect = document.getElementById("saveSelectOverlay");
       const startOverlay = document.getElementById("gameStartOverlay");
@@ -1076,12 +1077,13 @@
 
       const isInvOpen = inv && inv.classList.contains("open");
       const isCstOpen = cst && cst.classList.contains("open");
+      const isWrpOpen = wrp && wrp.classList.contains("open");
       const isTrashOpen = trash && trash.style.display !== "none" && trash.offsetParent !== null;
       const isSaveSelectOpen = saveSelect && saveSelect.classList.contains("open");
       const isStartOpen = startOverlay && startOverlay.style.display !== "none" && !startOverlay.classList.contains("fade-out") && !isGameStarted;
       const isFreeCam = (typeof cameraMode !== "undefined" && cameraMode === "freecam") || (typeof window.cameraMode !== "undefined" && window.cameraMode === "freecam");
 
-      return !!(isInvOpen || isCstOpen || isTrashOpen || isSaveSelectOpen || isStartOpen || isFreeCam);
+      return !!(isInvOpen || isCstOpen || isWrpOpen || isTrashOpen || isSaveSelectOpen || isStartOpen || isFreeCam);
     },
 
     getCanvas: function() {
@@ -1450,6 +1452,12 @@
           const idx = Math.max(0, Math.min(btns.length - 1, this.uiNav.index || 0));
           return btns[idx] || btns[0];
         }
+      }
+
+      const isWarpOpen = document.getElementById("warpOverlay")?.classList.contains("open");
+      if (isWarpOpen) {
+        const slots = document.querySelectorAll("#warpGrid .inventory-slot");
+        return slots[this.uiNav.index] || slots[0];
       }
 
       const isChestOpen = document.getElementById("chestOverlay")?.classList.contains("open");

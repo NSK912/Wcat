@@ -37,17 +37,17 @@
     const scale = 0.42 * (scaleMultiplier || 1.0);
     const phase = animPhase || 0;
 
-    // Levitation vertical floating bob
-    const levitateY = Math.sin(phase * 2.2) * 0.08;
+    // Levitation vertical floating bob (rests on ground if ragdoll/dead)
+    const levitateY = isRagdoll ? -0.25 : Math.sin(phase * 2.2) * 0.08;
 
     // Rotation around normal (Y axis) for mysterious hovering spin
-    const spinAngle = phase * 0.65;
+    const spinAngle = isRagdoll ? 0 : phase * 0.65;
     const cosS = Math.cos(spinAngle);
     const sinS = Math.sin(spinAngle);
 
     // Subtle tilting oscillation
-    const tiltX = Math.sin(phase * 1.3) * 0.06;
-    const tiltZ = Math.cos(phase * 1.7) * 0.06;
+    const tiltX = isRagdoll ? 0.35 : Math.sin(phase * 1.3) * 0.06;
+    const tiltZ = isRagdoll ? 0.15 : Math.cos(phase * 1.7) * 0.06;
 
     // Helper: transform local point with spin and hover
     const p = (x, y, z) => {
@@ -279,6 +279,12 @@
 
     // Smooth floating navigation behavior using standard NPC movement system
     updateBehavior: function(c, deltaTime, seed, gRadius, wRadius, npcCaveData) {
+      if (c.ragdollEnabled || (c.hp !== undefined && c.hp <= 0)) {
+        const baseR = Math.max(gRadius, wRadius);
+        c.r = baseR + 0.12;
+        return;
+      }
+
       if (c.animPhase === undefined) c.animPhase = Math.random() * Math.PI * 2;
       c.animPhase += deltaTime * 1.6;
 

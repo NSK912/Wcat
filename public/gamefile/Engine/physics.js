@@ -82,15 +82,16 @@ const Physics = {
         let surfaceRad = fallbackTerrainRad;
         let candidates = collectibles;
         if (typeof SpatialGrid !== "undefined" && typeof SpatialGrid.queryRadius === "function") {
-            candidates = SpatialGrid.queryRadius(px, py, pz, 4.0, o => o.active && !o.isPreview && (o.type === "wood_floor" || o.type === "thin_wood_floor" || o.type === "stone_floor" || o.type === "wood_roof"));
+            candidates = SpatialGrid.queryRadius(px, py, pz, 4.0, o => o.active && !o.isPreview && (o.type === "wood_floor" || o.type === "thin_wood_floor" || o.type === "stone_floor" || o.type === "wood_roof" || o.type === "obsidian_pad_warp_item" || o.type === "obsidian_compass_pad_item"));
         }
         for (let o of candidates) {
             if (!o.active || o.isPreview) continue;
-            if (o.type !== "wood_floor" && o.type !== "thin_wood_floor" && o.type !== "stone_floor" && o.type !== "wood_roof") continue;
+            if (o.type !== "wood_floor" && o.type !== "thin_wood_floor" && o.type !== "stone_floor" && o.type !== "wood_roof" && o.type !== "obsidian_pad_warp_item" && o.type !== "obsidian_compass_pad_item") continue;
             
             const isStone = o.type === "stone_floor";
-            const floorW = o.width !== undefined ? o.width : (isStone ? (o.size || 0.25) * 12.0 : (o.size || 0.25) * 1.2);
-            const floorD = o.depth !== undefined ? o.depth : (isStone ? (o.size || 0.25) * 12.0 : (o.size || 0.25) * 1.2);
+            const isObsidianPad = o.type === "obsidian_pad_warp_item" || o.type === "obsidian_compass_pad_item";
+            const floorW = o.width !== undefined ? o.width : (isObsidianPad ? 0.3025 : (isStone ? (o.size || 0.25) * 12.0 : (o.size || 0.25) * 1.2));
+            const floorD = o.depth !== undefined ? o.depth : (isObsidianPad ? 0.3025 : (isStone ? (o.size || 0.25) * 12.0 : (o.size || 0.25) * 1.2));
             const maxBound = Math.max(floorW, floorD) / 2 + 0.5;
 
             const dx = o.position[0] - px, dy = o.position[1] - py, dz = o.position[2] - pz;
@@ -101,7 +102,7 @@ const Physics = {
             const oF = o.F || [0, 0, 1];
             const oN = o.normal || [0, 1, 0];
 
-            if (o.type === "wood_floor" || o.type === "thin_wood_floor" || o.type === "stone_floor") {
+            if (o.type === "wood_floor" || o.type === "thin_wood_floor" || o.type === "stone_floor" || isObsidianPad) {
                 const halfW = floorW / 2 + 0.03;
                 const halfD = floorD / 2 + 0.03;
                 
@@ -112,7 +113,8 @@ const Physics = {
                 // Point MUST strictly lie within the rectangular footprint and close to the floor's top surface
                 if (Math.abs(lx) <= halfW && Math.abs(lz) <= halfD && ly >= -0.15 && ly <= 0.35) {
                     let fHH = 0;
-                    if (o.type === "stone_floor") fHH = (o.size || 0.25) * 0.15;
+                    if (isObsidianPad) fHH = 0.066;
+                    else if (o.type === "stone_floor") fHH = (o.size || 0.25) * 0.15;
                     else if (o.type === "wood_floor") fHH = (typeof woodFloorHeight !== "undefined" ? woodFloorHeight : 0.06) + (o.size || 0.25) * 0.12;
                     else if (o.type === "thin_wood_floor") fHH = (o.size || 0.25) * 0.04;
                     const fR = Math.sqrt(o.position[0]**2 + o.position[1]**2 + o.position[2]**2);

@@ -359,7 +359,7 @@
         const playerPos = [nx * currentFeetRadius, ny * currentFeetRadius, nz * currentFeetRadius];
           
         for (let other of collectibles) {
-          if (other.active && (other.type === "wood_floor" || other.type === "thin_wood_floor" || other.type === "stone_floor" || other.type === "robot_stand") && !other.isPreview) {
+          if (other.active && (other.type === "wood_floor" || other.type === "thin_wood_floor" || other.type === "stone_floor" || other.type === "robot_stand" || other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item") && !other.isPreview) {
             const dx_dist = playerPos[0] - other.position[0];
             const dy_dist = playerPos[1] - other.position[1];
             const dz_dist = playerPos[2] - other.position[2];
@@ -377,12 +377,13 @@
                                 other.position[2] * other.normal[2];
               const isStone = other.type === "stone_floor";
               const isStand = other.type === "robot_stand";
+              const isObsidianPad = other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item";
               const sizeVal = other.size || 0.25;
-              const w = isStand ? 0.72 : (isStone ? (typeof other.width === "number" ? other.width : sizeVal * 12.0) : sizeVal * 1.2);
-              const d = isStand ? 0.72 : (isStone ? (typeof other.depth === "number" ? other.depth : sizeVal * 12.0) : sizeVal * 1.2);
-              const h = isStand ? 0.06 : (isStone ? sizeVal * 0.15 : (other.type === "wood_floor" ? (woodFloorHeight + 0.25 * 0.12) : (other.type === "thin_wood_floor" ? 0.25 * 0.04 : 0.25 * 0.08)));
+              const w = isStand ? 0.72 : (isObsidianPad ? 0.3025 : (isStone ? (typeof other.width === "number" ? other.width : sizeVal * 12.0) : sizeVal * 1.2));
+              const d = isStand ? 0.72 : (isObsidianPad ? 0.3025 : (isStone ? (typeof other.depth === "number" ? other.depth : sizeVal * 12.0) : sizeVal * 1.2));
+              const h = isStand ? 0.06 : (isObsidianPad ? 0.033 : (isStone ? sizeVal * 0.15 : (other.type === "wood_floor" ? (woodFloorHeight + 0.25 * 0.12) : (other.type === "thin_wood_floor" ? 0.25 * 0.04 : 0.25 * 0.08))));
               
-              const hh = isStand ? 0.06 : (isStone ? h * 0.9 : h * 0.5);
+              const hh = isStand ? 0.06 : (isObsidianPad ? 0.033 : (isStone ? h * 0.9 : h * 0.5));
               
               // The exact flat top collision radius in this direction is:
               const topRadius = (pos_dot_n + hh) / u_dot_n;

@@ -253,6 +253,7 @@
         { name: "LOG", icon: "🪵" },
         { name: "BOW", icon: "🏹" },
         { name: "ARROW", icon: "🏹" },
+        { name: "IRON_BULLET", icon: "⚪" },
         { name: "WOODEN_ARM_CANNON", icon: "🪵🦾" },
         { name: "WOOD_FLOOR", icon: "🪵" },
         { name: "THIN_WOOD_FLOOR", icon: "🪵" },
@@ -279,6 +280,9 @@
         { name: "ROBOT_RIGHT_ARM", icon: "🦾" },
         { name: "ROBOT_LEFT_LEG", icon: "🦿" },
         { name: "ROBOT_RIGHT_LEG", icon: "🦿" },
+        { name: "OBSIDIAN_CUBE", icon: "🔶" },
+        { name: "OBSIDIAN_PAD_WARP", icon: "🧭" },
+        { name: "OBSIDIAN_FLUX", icon: "⚫" },
       ];
 
       const icon3DCache = new Map();
@@ -349,11 +353,53 @@
         const f = [0, 0, 1];
         const n = [0, 1, 0];
         
+        function buildSphereMesh(center, radius, segsLat, segsLong, color, vertices, colors, indices) {
+          const startIdx = vertices.length / 3;
+          for (let lat = 0; lat <= segsLat; lat++) {
+            const theta = (lat / segsLat) * Math.PI;
+            const sinTheta = Math.sin(theta);
+            const cosTheta = Math.cos(theta);
+
+            for (let lon = 0; lon <= segsLong; lon++) {
+              const phi = (lon / segsLong) * Math.PI * 2;
+              const sinPhi = Math.sin(phi);
+              const cosPhi = Math.cos(phi);
+
+              const dx = sinTheta * cosPhi;
+              const dy = cosTheta;
+              const dz = sinTheta * sinPhi;
+
+              vertices.push(center[0] + radius * dx, center[1] + radius * dy, center[2] + radius * dz);
+
+              const lightDot = Math.max(0.28, dx * 0.35 + dy * 0.75 + dz * 0.55);
+              const spec = Math.pow(Math.max(0, dy * 0.65 + dz * 0.7), 6) * 0.4;
+
+              colors.push(
+                Math.min(1.0, color[0] * lightDot + spec),
+                Math.min(1.0, color[1] * lightDot + spec),
+                Math.min(1.0, color[2] * lightDot + spec)
+              );
+            }
+          }
+
+          for (let lat = 0; lat < segsLat; lat++) {
+            for (let lon = 0; lon < segsLong; lon++) {
+              const first = startIdx + lat * (segsLong + 1) + lon;
+              const second = first + segsLong + 1;
+              indices.push(first, second, first + 1);
+              indices.push(second, second + 1, first + 1);
+            }
+          }
+        }
+
         let isRegistryRendered = false;
-        const isExcluded = (name === "IRON_ORE" || name === "GOLD_ORE" || name === "GLOW_ORE" || name === "GLOW_BATTERY" || name === "GLOW_BATTERY_EMPTY" || name === "FRIED_BUG");
+        const isExcluded = (name === "IRON_ORE" || name === "GOLD_ORE" || name === "GLOW_ORE" || name === "GLOW_BATTERY" || name === "GLOW_BATTERY_EMPTY" || name === "FRIED_BUG" || name === "IRON_BULLET");
         let registryKey = name.toLowerCase();
         if (registryKey === "meganeura") registryKey = "meganeura_item";
         if (registryKey === "isopod") registryKey = "isopod_item";
+        if (registryKey === "obsidian_cube") registryKey = "obsidian_cube_item";
+        if (registryKey === "obsidian_pad_warp" || registryKey === "obsidian_compass_pad") registryKey = "obsidian_pad_warp_item";
+        if (registryKey === "obsidian_flux" || registryKey === "obsidian_ball") registryKey = "obsidian_flux_item";
 
         const handler = !isExcluded && window.ItemRegistry && window.ItemRegistry[registryKey];
         if (handler && typeof handler.render === "function") {
@@ -459,6 +505,9 @@
           } else if (name === "ISOPOD") {
             scaleFactor = 2.0;
             mockItem.seed = 1234;
+          } else if (name === "OBSIDIAN_FLUX" || name === "OBSIDIAN_BALL") {
+            scaleFactor = 1.05;
+            mockItem.isIconPreview = true;
           }
 
           try {
@@ -589,6 +638,11 @@
             buildTaperedSegment([0, -0.3, 0], [0, 0.3, 0], 0.005, 0.005, 4, [0.55, 0.4, 0.25], rawVertices, rawColors, rawIndices);
             buildTaperedSegment([0, -0.3, 0], [0, -0.2, 0], 0.015, 0.006, 4, [0.9, 0.2, 0.2], rawVertices, rawColors, rawIndices);
             buildTaperedSegment([0, 0.3, 0], [0, 0.34, 0], 0.012, 0.001, 4, [0.35, 0.35, 0.35], rawVertices, rawColors, rawIndices);
+          } else if (name === "IRON_BULLET") {
+            scaleFactor = 1.35;
+            const ironColor = [0.78, 0.81, 0.86];
+            // Render a single clean, perfectly smooth round metallic bullet sphere
+            buildSphereMesh([0, 0, 0], 0.28, 18, 24, ironColor, rawVertices, rawColors, rawIndices);
           } else if (name === "WOODEN_ARM_CANNON" || name === "ARM_CANNON") {
             scaleFactor = 1.2;
             const woodColor = [0.55, 0.38, 0.22];
@@ -880,7 +934,7 @@
             const ny2 = ny * Math.cos(rx) - nz1 * Math.sin(rx);
             
             const dot = nx1 * 0.42 + ny2 * 0.84 + nz1 * 0.32;
-            const lightIntensity = Math.max(0.0, dot);
+            const lightIntensity = (name === "OBSIDIAN_FLUX" || name === "OBSIDIAN_BALL") ? 1.0 : Math.max(0.0, dot);
             
             ctx.fillStyle = shadeColor(face.color, lightIntensity);
             ctx.fill();
@@ -1065,6 +1119,281 @@
         }
         closeTrashConfirm();
       }
+
+      let activeWarpFluxSource = null;
+
+      const MAX_OBSIDIAN_PADS = 5;
+      window.MAX_OBSIDIAN_PADS = MAX_OBSIDIAN_PADS;
+
+      function isObsidianPadType(type) {
+        return (
+          type === "obsidian_pad_warp_item" ||
+          type === "obsidian_pad_warp" ||
+          type === "obsidian_compass_pad" ||
+          type === "obsidian_compass_pad_item"
+        );
+      }
+
+      function getPlacedObsidianPadsInOrder() {
+        if (typeof collectibles === "undefined" || !Array.isArray(collectibles)) return [];
+        const pads = [];
+        for (let i = 0; i < collectibles.length; i++) {
+          const c = collectibles[i];
+          if (
+            c &&
+            c.active !== false &&
+            !c.collected &&
+            !c.isPreview &&
+            !c.isDynamic &&
+            isObsidianPadType(c.type)
+          ) {
+            let isDuplicate = false;
+            for (let j = 0; j < pads.length; j++) {
+              const existing = pads[j];
+              if (existing === c) {
+                isDuplicate = true;
+                break;
+              }
+              if (
+                typeof existing.seed === "number" &&
+                typeof c.seed === "number" &&
+                Math.abs(existing.seed - c.seed) < 1e-12
+              ) {
+                isDuplicate = true;
+                break;
+              }
+              if (Array.isArray(existing.position) && Array.isArray(c.position)) {
+                const dx = (existing.position[0] || 0) - (c.position[0] || 0);
+                const dy = (existing.position[1] || 0) - (c.position[1] || 0);
+                const dz = (existing.position[2] || 0) - (c.position[2] || 0);
+                if (dx * dx + dy * dy + dz * dz < 0.0001) {
+                  isDuplicate = true;
+                  break;
+                }
+              }
+            }
+            if (isDuplicate) {
+              collectibles.splice(i, 1);
+              i--;
+              continue;
+            }
+            pads.push(c);
+          }
+        }
+        for (let idx = 0; idx < pads.length; idx++) {
+          pads[idx].placedOrder = idx + 1;
+        }
+        return pads;
+      }
+      window.getPlacedObsidianPadsInOrder = getPlacedObsidianPadsInOrder;
+
+      function openWarpUI(fluxSourceInfo = null) {
+        const invOverlay = document.getElementById("inventoryOverlay");
+        if (invOverlay && invOverlay.classList.contains("open")) {
+          invOverlay.classList.remove("open");
+        }
+        const chestOverlay = document.getElementById("chestOverlay");
+        if (chestOverlay && chestOverlay.classList.contains("open")) {
+          chestOverlay.classList.remove("open");
+          currentOpenChest = null;
+        }
+
+        activeWarpFluxSource = fluxSourceInfo;
+
+        const overlay = document.getElementById("warpOverlay");
+        if (overlay) {
+          overlay.classList.add("open");
+        }
+        if (document.pointerLockElement) {
+          document.exitPointerLock();
+        }
+        renderWarpUI();
+      }
+      window.openWarpUI = openWarpUI;
+
+      function closeWarpUI() {
+        activeWarpFluxSource = null;
+        const overlay = document.getElementById("warpOverlay");
+        if (overlay) {
+          overlay.classList.remove("open");
+        }
+        if (gameStarted) {
+          requestPointerLockSafe();
+        }
+      }
+      window.closeWarpUI = closeWarpUI;
+
+      function consumeOneObsidianFlux() {
+        if (activeWarpFluxSource) {
+          const { source, index } = activeWarpFluxSource;
+          const list = source === "action" ? actionSlotsItems : inventory;
+          const slotItem = list && list[index];
+          if (slotItem && (slotItem.name === "OBSIDIAN_FLUX" || slotItem.name === "OBSIDIAN_BALL") && slotItem.count > 0) {
+            if (slotItem.count > 1) {
+              slotItem.count--;
+            } else {
+              list[index] = null;
+              if (source === "action" && selectedActionSlotIndex === index) {
+                selectedActionSlotIndex = -1;
+              }
+            }
+            renderInventory();
+            renderActionSlots();
+            updateBadge();
+            return true;
+          }
+        }
+
+        if (typeof selectedActionSlotIndex === "number" && selectedActionSlotIndex >= 0 && actionSlotsItems[selectedActionSlotIndex]) {
+          const s = actionSlotsItems[selectedActionSlotIndex];
+          if ((s.name === "OBSIDIAN_FLUX" || s.name === "OBSIDIAN_BALL") && s.count > 0) {
+            if (s.count > 1) {
+              s.count--;
+            } else {
+              actionSlotsItems[selectedActionSlotIndex] = null;
+              selectedActionSlotIndex = -1;
+            }
+            renderInventory();
+            renderActionSlots();
+            updateBadge();
+            return true;
+          }
+        }
+
+        for (let i = 0; i < actionSlotsItems.length; i++) {
+          const s = actionSlotsItems[i];
+          if (s && (s.name === "OBSIDIAN_FLUX" || s.name === "OBSIDIAN_BALL") && s.count > 0) {
+            if (s.count > 1) {
+              s.count--;
+            } else {
+              actionSlotsItems[i] = null;
+              if (selectedActionSlotIndex === i) selectedActionSlotIndex = -1;
+            }
+            renderInventory();
+            renderActionSlots();
+            updateBadge();
+            return true;
+          }
+        }
+
+        for (let i = 0; i < inventory.length; i++) {
+          const s = inventory[i];
+          if (s && (s.name === "OBSIDIAN_FLUX" || s.name === "OBSIDIAN_BALL") && s.count > 0) {
+            if (s.count > 1) {
+              s.count--;
+            } else {
+              inventory[i] = null;
+            }
+            renderInventory();
+            renderActionSlots();
+            updateBadge();
+            return true;
+          }
+        }
+
+        return false;
+      }
+
+      function warpToObsidianPad(padItem, padSequenceNumber) {
+        if (!padItem || !Array.isArray(padItem.position)) return;
+        if (!consumeOneObsidianFlux()) {
+          if (typeof showNotice === "function") {
+            showNotice("🚫 ไม่มี Obsidian Flux สำหรับการวาร์ป!");
+          }
+          closeWarpUI();
+          return;
+        }
+
+        closeWarpUI();
+
+        const px = padItem.position[0];
+        const py = padItem.position[1];
+        const pz = padItem.position[2];
+        const r = Math.hypot(px, py, pz) || 1;
+        const targetTheta = Math.acos(Math.max(-1, Math.min(1, py / r)));
+        let targetPhi = Math.atan2(pz, px);
+        if (targetPhi < 0) targetPhi += Math.PI * 2;
+
+        if (typeof window.warpPlayerToCoords === "function") {
+          window.warpPlayerToCoords(targetTheta, targetPhi);
+        } else {
+          charTheta = targetTheta;
+          charPhi = targetPhi;
+          playerDamageCooldown = 2.0;
+          playerControlsLocked = false;
+          if (typeof setRagdoll === "function") setRagdoll(false);
+          playerCenterRadius = null;
+          playerVerticalVel = 0.0;
+          if (typeof saveSettingsToLocalStorage === "function") saveSettingsToLocalStorage();
+        }
+
+        if (typeof playCollectSound === "function") {
+          playCollectSound();
+        }
+        if (typeof showNotice === "function") {
+          const prefix = (typeof window.t === "function") ? window.t("warp_pad_prefix") : "แท่นวาร์ป #";
+          showNotice(`🌀 วาร์ปไปยัง ${prefix}${padSequenceNumber} สำเร็จ! (ใช้ Obsidian Flux 1 อัน)`);
+        }
+      }
+      window.warpToObsidianPad = warpToObsidianPad;
+
+      function renderWarpUI() {
+        const warpGridEl = document.getElementById("warpGrid");
+        if (!warpGridEl) return;
+        warpGridEl.innerHTML = "";
+
+        const pads = getPlacedObsidianPadsInOrder().slice(0, MAX_OBSIDIAN_PADS);
+        const totalSlots = 20;
+        const prefix = (typeof window.t === "function") ? window.t("warp_pad_prefix") : "แท่นวาร์ป #";
+
+        for (let i = 0; i < totalSlots; i++) {
+          const slotDiv = document.createElement("div");
+          slotDiv.className = "inventory-slot";
+          slotDiv.dataset.index = i;
+          slotDiv.dataset.source = "warp";
+
+          const padItem = pads[i] || null;
+          if (padItem) {
+            const padNumber = i + 1;
+            slotDiv.style.cursor = "pointer";
+            slotDiv.title = `${prefix}${padNumber}`;
+
+            const canvas3D = create3DIconCanvas({ name: "OBSIDIAN_PAD_WARP" }, 56, 56);
+            if (canvas3D) {
+              slotDiv.appendChild(canvas3D);
+            } else {
+              const iconSpan = document.createElement("span");
+              iconSpan.textContent = "🧭";
+              slotDiv.appendChild(iconSpan);
+            }
+
+            const countBadge = document.createElement("div");
+            countBadge.className = "slot-count";
+            countBadge.textContent = `#${padNumber}`;
+            slotDiv.appendChild(countBadge);
+
+            const nameLabel = document.createElement("div");
+            nameLabel.className = "slot-name";
+            nameLabel.textContent = `PAD #${padNumber}`;
+            slotDiv.appendChild(nameLabel);
+
+            slotDiv.addEventListener("click", (e) => {
+              e.stopPropagation();
+              warpToObsidianPad(padItem, padNumber);
+            });
+          } else {
+            slotDiv.classList.add("empty");
+          }
+
+          warpGridEl.appendChild(slotDiv);
+        }
+
+        if (pads.length === 0 && typeof showNotice === "function") {
+          const msg = (typeof window.t === "function") ? window.t("no_warp_pads_notice") : "🚫 ยังไม่มีแท่นวาร์ป (Obsidian Pad) ที่วางไว้บนดาวดวงนี้!";
+          showNotice(msg);
+        }
+      }
+      window.renderWarpUI = renderWarpUI;
 
       function addItemToChest(item) {
         if (!currentOpenChest) return false;
@@ -1263,6 +1592,37 @@
               else if (isHoldable) catLabel = "⚔️ ไอเทมถือ (HOLDABLE)";
 
               slotEl.title = `${def.icon || ""} ${def.name_th} (${def.name_en})\n• หมวดหมู่: ${catLabel}\n• การใช้งาน: ${def.usage_th}`;
+            }
+          }
+
+          if (item && (item.name === "WOODEN_ARM_CANNON" || item.name === "ARM_CANNON")) {
+            // Temporary 3D ammo popup overlay when ammo is switched
+            const isPopupActive = window.ammoSwitchPopup &&
+                                  (window.ammoSwitchPopup.expiresAt > Date.now()) &&
+                                  window.ammoSwitchPopup.ammoType;
+            if (isPopupActive) {
+              const popupAmmo = window.ammoSwitchPopup.ammoType;
+              const ammoCount = (typeof getAmmoTotalCount === "function") ? getAmmoTotalCount(popupAmmo) : 0;
+
+              const ammoPopupBadge = document.createElement("div");
+              ammoPopupBadge.className = "ammo-3d-popup-badge";
+
+              const bigAmmo3D = create3DIconCanvas(popupAmmo, 32, 32);
+              if (bigAmmo3D) {
+                ammoPopupBadge.appendChild(bigAmmo3D);
+              }
+
+              const labelEl = document.createElement("span");
+              labelEl.style.fontSize = "10px";
+              labelEl.style.fontWeight = "bold";
+              labelEl.style.color = "#00f0ff";
+              labelEl.style.textShadow = "0 0 4px #000, 1px 1px 2px #000";
+              labelEl.style.marginTop = "0px";
+              labelEl.style.whiteSpace = "nowrap";
+              labelEl.textContent = `x${ammoCount}`;
+
+              ammoPopupBadge.appendChild(labelEl);
+              slotEl.appendChild(ammoPopupBadge);
             }
           }
 
@@ -1507,6 +1867,21 @@
           chestClose.onclick = () => {
             closeChest();
           };
+        }
+
+        const warpClose = document.getElementById("warpClose");
+        if (warpClose) {
+          warpClose.onclick = () => {
+            closeWarpUI();
+          };
+        }
+        const warpOverlay = document.getElementById("warpOverlay");
+        if (warpOverlay) {
+          warpOverlay.addEventListener("click", (e) => {
+            if (e.target === warpOverlay) {
+              closeWarpUI();
+            }
+          });
         }
 
         const chestTakeAll = document.getElementById("chestTakeAllBtn");
@@ -2131,6 +2506,19 @@ function cancelFloorPlacement() {
       
       function placeFloor() {
         if (!isPlacingFloor || !floorPreviewCollectible) return;
+
+        const placingItemName = floorPlacementInfo && floorPlacementInfo.item ? floorPlacementInfo.item.name : "";
+
+        if (placingItemName === "OBSIDIAN_PAD_WARP" || placingItemName === "OBSIDIAN_COMPASS_PAD") {
+          const currentPads = getPlacedObsidianPadsInOrder();
+          if (currentPads.length >= MAX_OBSIDIAN_PADS) {
+            if (typeof showNotice === "function") {
+              const msg = (typeof window.t === "function") ? window.t("max_warp_pads_notice") : "🚫 วาง Obsidian Pad ได้สูงสุดไม่เกิน 5 อัน! (Max 5 Obsidian Pads)";
+              showNotice(msg);
+            }
+            return;
+          }
+        }
         
         if (floorPreviewCollectible.isValidPlacement === false) {
            if (floorPreviewCollectible.type === "folding_ladder") {
@@ -2143,8 +2531,6 @@ function cancelFloorPlacement() {
 
         // Play wood place sound
         playPlaceSound();
-
-        const placingItemName = floorPlacementInfo && floorPlacementInfo.item ? floorPlacementInfo.item.name : "";
 
         // Convert preview to a static placed structure!
         floorPreviewCollectible.isPreview = false;
@@ -2332,6 +2718,10 @@ function cancelFloorPlacement() {
           floorPreviewCollectible.type = "isopod_item";
           floorPreviewCollectible.angle = (typeof floorPreviewCollectible.angle === "number") ? floorPreviewCollectible.angle : placementRotationAngle;
           floorPreviewCollectible.layer = COLLISION_LAYERS.WOOD_WALL;
+        } else if (placingItemName === "OBSIDIAN_PAD_WARP" || placingItemName === "OBSIDIAN_COMPASS_PAD") {
+          floorPreviewCollectible.type = "obsidian_pad_warp_item";
+          floorPreviewCollectible.angle = (typeof floorPreviewCollectible.angle === "number") ? floorPreviewCollectible.angle : placementRotationAngle;
+          floorPreviewCollectible.layer = COLLISION_LAYERS.WOOD_WALL;
         } else if (placingItemName.startsWith("ROBOT_")) {
           floorPreviewCollectible.type = placingItemName.toLowerCase();
           floorPreviewCollectible.angle = (typeof floorPreviewCollectible.angle === "number") ? floorPreviewCollectible.angle : placementRotationAngle;
@@ -2353,7 +2743,17 @@ function cancelFloorPlacement() {
         floorPreviewCollectible.isProceduralHouse = false;
         floorPreviewCollectible.isRuin = false;
 
+        // Avoid duplicate push when floorPreviewCollectible was already pushed in collectibles.js,
+        // and ensure the newly placed structure is always appended at the end in chronological order
+        const existingPreviewIdx = collectibles.indexOf(floorPreviewCollectible);
+        if (existingPreviewIdx !== -1) {
+          collectibles.splice(existingPreviewIdx, 1);
+        }
         collectibles.push(floorPreviewCollectible);
+
+        if (placingItemName === "OBSIDIAN_PAD_WARP" || placingItemName === "OBSIDIAN_COMPASS_PAD") {
+          getPlacedObsidianPadsInOrder();
+        }
         
         // Remove 1 item from player's inventory or action slot
         const info = floorPlacementInfo;
@@ -2381,10 +2781,15 @@ function cancelFloorPlacement() {
         if (info && info.item && info.item.count > 0 && info.item.name === placingItemName) {
           stillHasItems = true;
         }
+        if ((placingItemName === "OBSIDIAN_PAD_WARP" || placingItemName === "OBSIDIAN_COMPASS_PAD") && getPlacedObsidianPadsInOrder().length >= MAX_OBSIDIAN_PADS) {
+          if (info && info.source === "inventory") {
+            stillHasItems = false;
+          }
+        }
 
         if (stillHasItems) {
           // Keep placing, spawn a new preview of the same type
-          const typeToPlace = placingItemName.startsWith("ROBOT_") ? placingItemName.toLowerCase() : (placingItemName === "STONE_FLOOR" ? "stone_floor" : (placingItemName === "WOOD_STAIRS" ? "wood_stairs" : (placingItemName === "FOLDING_LADDER" ? "folding_ladder" : (placingItemName === "CAMPFIRE" ? "campfire" : (placingItemName === "WOOD_BOAT" ? "wood_boat" : (placingItemName === "ELECTRIC_ENGINE" ? "electric_engine" : (placingItemName === "BOAT_WING" ? "boat_wing" : (placingItemName === "WOOD_WHEEL" ? "wood_wheel" : (placingItemName === "WOOD_WALL" ? "wood_wall" : (placingItemName === "WOOD_WINDOW" ? "wood_window" : (placingItemName === "WOOD_DOOR" ? "wood_door" : (placingItemName === "WOOD_ROOF" ? "wood_roof" : (placingItemName === "WOOD_CHEST" ? "wood_chest" : (placingItemName === "MEGANEURA" ? "meganeura_item" : (placingItemName === "ISOPOD" ? "isopod_item" : (placingItemName === "THIN_WOOD_FLOOR" ? "thin_wood_floor" : "wood_floor"))))))))))))))));
+          const typeToPlace = placingItemName.startsWith("ROBOT_") ? placingItemName.toLowerCase() : (placingItemName === "STONE_FLOOR" ? "stone_floor" : (placingItemName === "WOOD_STAIRS" ? "wood_stairs" : (placingItemName === "FOLDING_LADDER" ? "folding_ladder" : (placingItemName === "CAMPFIRE" ? "campfire" : (placingItemName === "WOOD_BOAT" ? "wood_boat" : (placingItemName === "ELECTRIC_ENGINE" ? "electric_engine" : (placingItemName === "BOAT_WING" ? "boat_wing" : (placingItemName === "WOOD_WHEEL" ? "wood_wheel" : (placingItemName === "WOOD_WALL" ? "wood_wall" : (placingItemName === "WOOD_WINDOW" ? "wood_window" : (placingItemName === "WOOD_DOOR" ? "wood_door" : (placingItemName === "WOOD_ROOF" ? "wood_roof" : (placingItemName === "WOOD_CHEST" ? "wood_chest" : (placingItemName === "MEGANEURA" ? "meganeura_item" : (placingItemName === "ISOPOD" ? "isopod_item" : ((placingItemName === "OBSIDIAN_PAD_WARP" || placingItemName === "OBSIDIAN_COMPASS_PAD") ? "obsidian_pad_warp_item" : (placingItemName === "THIN_WOOD_FLOOR" ? "thin_wood_floor" : "wood_floor")))))))))))))))));
           floorPreviewCollectible = {
             type: typeToPlace,
             position: [0, 0, 0],
@@ -2400,7 +2805,7 @@ function cancelFloorPlacement() {
             seed: Math.random(),
             angle: placementRotationAngle
           };
-          if (typeToPlace === "wood_wall" || typeToPlace === "wood_window" || typeToPlace === "wood_door" || typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "wood_boat" || typeToPlace === "wood_wheel" || typeToPlace === "electric_engine" || typeToPlace === "boat_wing" || typeToPlace.startsWith("robot_")) {
+          if (typeToPlace === "wood_wall" || typeToPlace === "wood_window" || typeToPlace === "wood_door" || typeToPlace === "wood_chest" || typeToPlace === "meganeura_item" || typeToPlace === "isopod_item" || typeToPlace === "obsidian_pad_warp_item" || typeToPlace === "obsidian_compass_pad_item" || typeToPlace === "wood_boat" || typeToPlace === "wood_wheel" || typeToPlace === "electric_engine" || typeToPlace === "boat_wing" || typeToPlace.startsWith("robot_")) {
             floorPreviewCollectible.layer = COLLISION_LAYERS.WOOD_WALL;
           } else if (typeToPlace === "wood_floor" || typeToPlace === "thin_wood_floor" || typeToPlace === "wood_roof") {
             floorPreviewCollectible.layer = COLLISION_LAYERS.WOOD_FLOOR;
@@ -2418,21 +2823,119 @@ function cancelFloorPlacement() {
         pendingCollectibleRefresh = true;
       }
 
+      window.activeAmmoType = "IRON_BULLET";
+
+      function getAmmoDisplayName(name) {
+        if (name === "IRON_BULLET") return "⚪ กระสุนเหล็ก ทรงกลม (Spherical Iron Bullet)";
+        if (name === "ARROW") return "🏹 ลูกธนู (Arrow)";
+        return name || "กระสุน";
+      }
+
+      function getAmmoTotalCount(ammoName) {
+        let total = 0;
+        if (typeof actionSlotsItems !== "undefined" && actionSlotsItems) {
+          for (let i = 0; i < actionSlotsItems.length; i++) {
+            const slot = actionSlotsItems[i];
+            if (slot && slot.name === ammoName && slot.count > 0) total += slot.count;
+          }
+        }
+        if (typeof inventory !== "undefined" && inventory) {
+          for (let i = 0; i < inventory.length; i++) {
+            const slot = inventory[i];
+            if (slot && slot.name === ammoName && slot.count > 0) total += slot.count;
+          }
+        }
+        return total;
+      }
+
+      function getAvailableAmmoTypesInInventory() {
+        const ammoTypes = [];
+        const candidateNames = ["IRON_BULLET", "ARROW"];
+        for (const name of candidateNames) {
+          if (getAmmoTotalCount(name) > 0) {
+            ammoTypes.push(name);
+          }
+        }
+        return ammoTypes;
+      }
+
+      function triggerAmmoSwitchUI(ammoType) {
+        window.activeAmmoType = ammoType;
+        window.ammoSwitchPopup = {
+          ammoType: ammoType,
+          expiresAt: Date.now() + 3000
+        };
+        if (window.ammoSwitchTimeout) clearTimeout(window.ammoSwitchTimeout);
+        window.ammoSwitchTimeout = setTimeout(() => {
+          if (typeof renderActionSlots === "function") renderActionSlots();
+        }, 3050);
+        if (typeof renderActionSlots === "function") renderActionSlots();
+      }
+      window.triggerAmmoSwitchUI = triggerAmmoSwitchUI;
+
+      function switchCannonAmmo() {
+        const available = getAvailableAmmoTypesInInventory();
+        if (available.length === 0) {
+          showNotice("🚫 ไม่มีกระสุนอยู่ในกระเป๋า! (No ammo in inventory)");
+          return;
+        }
+        
+        let nextIdx = 0;
+        if (window.activeAmmoType) {
+          const curIdx = available.indexOf(window.activeAmmoType);
+          if (curIdx !== -1) {
+            nextIdx = (curIdx + 1) % available.length;
+          }
+        }
+        
+        const newAmmo = available[nextIdx];
+        triggerAmmoSwitchUI(newAmmo);
+        const count = getAmmoTotalCount(newAmmo);
+        showNotice("🔄 สลับกระสุนเป็น: " + getAmmoDisplayName(newAmmo) + " [จำนวน: " + count + "]");
+      }
+      window.switchCannonAmmo = switchCannonAmmo;
+
       function findArrowInInventory() {
+        const preferred = window.activeAmmoType || "IRON_BULLET";
+        
+        // 1. Search for preferred active ammo first
         for (let i = 0; i < actionSlotsItems.length; i++) {
           const slot = actionSlotsItems[i];
-          if (slot && slot.name === "ARROW" && slot.count > 0) {
+          if (slot && slot.name === preferred && slot.count > 0) {
             return { type: "action", index: i, item: slot };
           }
         }
         for (let i = 0; i < inventory.length; i++) {
           const slot = inventory[i];
-          if (slot && slot.name === "ARROW" && slot.count > 0) {
+          if (slot && slot.name === preferred && slot.count > 0) {
             return { type: "inventory", index: i, item: slot };
+          }
+        }
+        
+        // 2. Fallback to any available ammo in inventory/action bar
+        const candidates = ["IRON_BULLET", "ARROW"];
+        for (const cand of candidates) {
+          if (cand === preferred) continue;
+          for (let i = 0; i < actionSlotsItems.length; i++) {
+            const slot = actionSlotsItems[i];
+            if (slot && slot.name === cand && slot.count > 0) {
+              triggerAmmoSwitchUI(cand);
+              showNotice("⚠️ สลับกระสุนอัตโนมัติเป็น: " + getAmmoDisplayName(cand) + " [เหลือ: " + slot.count + "]");
+              return { type: "action", index: i, item: slot };
+            }
+          }
+          for (let i = 0; i < inventory.length; i++) {
+            const slot = inventory[i];
+            if (slot && slot.name === cand && slot.count > 0) {
+              triggerAmmoSwitchUI(cand);
+              showNotice("⚠️ สลับกระสุนอัตโนมัติเป็น: " + getAmmoDisplayName(cand) + " [เหลือ: " + slot.count + "]");
+              return { type: "inventory", index: i, item: slot };
+            }
           }
         }
         return null;
       }
+      window.findArrowInInventory = findArrowInInventory;
 
       function consumeArrow(arrowRef) {
         if (arrowRef.type === "action") {
@@ -2454,7 +2957,13 @@ function cancelFloorPlacement() {
         saveSettingsToLocalStorage();
       }
 
-      function shootArrowProjectile(drawPower = 1.0) {
+      function shootArrowProjectile(drawPower = 1.0, ammoName = null) {
+        if (!ammoName) {
+          const ref = findArrowInInventory();
+          if (ref && ref.item) ammoName = ref.item.name;
+          else ammoName = window.activeAmmoType || "ARROW";
+        }
+        const isIron = (ammoName === "IRON_BULLET");
         const sinTheta = Math.sin(charTheta);
         const cosTheta = Math.cos(charTheta);
         const sinPhi = Math.sin(charPhi);
@@ -2693,14 +3202,15 @@ function cancelFloorPlacement() {
         
         const arrowCollectible = {
           type: "arrow",
+          ammoType: ammoName || "ARROW",
           position: [startPos[0], startPos[1], startPos[2]],
           vel: arrowVel,
           normal: u_arrow,
           R: r_arrow,
           F: f_arrow,
           U: u_arrow,
-          color: isCannon ? [0.62, 0.44, 0.26] : [0.55, 0.4, 0.25],
-          size: 0.1,
+          color: isIron ? [0.78, 0.81, 0.86] : (isCannon ? [0.62, 0.44, 0.26] : [0.55, 0.4, 0.25]),
+          size: isIron ? 0.12 : 0.1,
           active: true,
           isDynamic: true,
           seed: Math.random(),
@@ -2712,7 +3222,7 @@ function cancelFloorPlacement() {
           animMaxTime: 0.25, // Pure animated barrel exit phase
           animOrigin: [startPos[0], startPos[1], startPos[2]],
           animDir: [arrowDir[0], arrowDir[1], arrowDir[2]],
-          animSpeed: speed,
+          animSpeed: isIron ? speed * 1.35 : speed,
           ignorePlayer: true
         };
         
@@ -2795,9 +3305,13 @@ function cancelFloorPlacement() {
           showNotice("🚫 คันธนูถูกปิดใช้งาน กรุณาใช้ปืนไม้ติดแขน (ARM CANNON) แทน!");
           return;
         } else if (itemName === "WOODEN_ARM_CANNON" || itemName === "ARM_CANNON") {
+          if (isAltAction) {
+            switchCannonAmmo();
+            return;
+          }
           const arrowRef = findArrowInInventory();
           if (!arrowRef) {
-            showNotice("🏹 ลูกธนูไม่เพียงพอ! (No arrows!)");
+            showNotice("🚫 ไม่พบกระสุนในกระเป๋า! กรุณาคราฟ ลูกธนู หรือ กระสุนเหล็ก ทรงกลม");
             return;
           }
           // Animation 01a09186-787b-771f-b4ee-5b234572bcef trimmed 1.40s to 2.47s (total 1.07s)
@@ -2806,9 +3320,20 @@ function cancelFloorPlacement() {
           activeItem = item;
           isUsingItem = true;
           arrowShotInCurrentAnim = false;
+        } else if (itemName === "OBSIDIAN_FLUX" || itemName === "OBSIDIAN_BALL") {
+          if (typeof isActionDown !== "undefined") {
+            isActionDown = false;
+          }
+          openWarpUI({ item, index, source });
+          return;
         } else if (isPlaceable || itemName.startsWith("ROBOT_")) {
           if ((typeof activeRidingBoat !== "undefined" && activeRidingBoat) || (typeof activeRidingMech !== "undefined" && activeRidingMech)) {
             showNotice("🚫 ไม่สามารถวางไอเทมขณะอยู่บนพาหนะได้ (Cannot place items while riding)");
+            return;
+          }
+          if ((itemName === "OBSIDIAN_PAD_WARP" || itemName === "OBSIDIAN_COMPASS_PAD") && getPlacedObsidianPadsInOrder().length >= MAX_OBSIDIAN_PADS) {
+            const msg = (typeof window.t === "function") ? window.t("max_warp_pads_notice") : "🚫 วาง Obsidian Pad ได้สูงสุดไม่เกิน 5 อัน! (Max 5 Obsidian Pads)";
+            showNotice(msg);
             return;
           }
           // ไอเทมหมวดหมู่ พรี-วาง (PRE_PLACE) เข้าสู่โหมดพรีวิววางสิ่งปลูกสร้าง
@@ -3505,6 +4030,13 @@ function cancelFloorPlacement() {
             ]
           },
           {
+            id: "iron_bullet",
+            output: { name: "IRON_BULLET", icon: "⚪", count: 5, label: "กระสุนเหล็ก ทรงกลม (SPHERICAL IRON BULLET) x5" },
+            ingredients: [
+              { name: "IRON_ORE", icon: "🟥", count: 1, label: "แร่เหล็ก (IRON ORE)" }
+            ]
+          },
+          {
             id: "wooden_arm_cannon",
             output: { name: "WOODEN_ARM_CANNON", icon: "🪵🦾", count: 1, label: "ปืนไม้ติดแขน (ARM CANNON) x1" },
             ingredients: [
@@ -3552,6 +4084,22 @@ function cancelFloorPlacement() {
             output: { name: "ROBOT_RIGHT_LEG", icon: "🦿", count: 1, label: "ขาขวาหุ่นยนต์ (RIGHT LEG) x1" },
             ingredients: [
               { name: "LOG", icon: "🪵", count: 10, label: "ท่อนไม้ (LOG)" }
+            ]
+          },
+          {
+            id: "obsidian_pad_warp",
+            output: { name: "OBSIDIAN_PAD_WARP", icon: "🧭", count: 1, label: "แท่นวาร์ปออบซิเดียน (OBSIDIAN PAD Warp) x1" },
+            ingredients: [
+              { name: "OBSIDIAN_CUBE", icon: "🔶", count: 1, label: "ศิลาออบซิเดียน (OBSIDIAN CUBE)" },
+              { name: "GLOW_ORE", icon: "✨", count: 1, label: "แร่หินเรืองแสง (GLOWING ORE)" }
+            ]
+          },
+          {
+            id: "obsidian_flux",
+            output: { name: "OBSIDIAN_FLUX", icon: "⚫", count: 5, label: "ออบซิเดียนฟลักซ์ (Obsidian Flux) x5" },
+            ingredients: [
+              { name: "OBSIDIAN_CUBE", icon: "🔶", count: 1, label: "ศิลาออบซิเดียน (OBSIDIAN CUBE)" },
+              { name: "GLOW_ORE", icon: "✨", count: 1, label: "แร่หินเรืองแสง (GLOWING ORE)" }
             ]
           }
         ];
@@ -3871,6 +4419,13 @@ function cancelFloorPlacement() {
             ]
           },
           {
+            id: "iron_bullet",
+            output: { name: "IRON_BULLET", icon: "⚪", count: 5 },
+            ingredients: [
+              { name: "IRON_ORE", count: 1 }
+            ]
+          },
+          {
             id: "wooden_arm_cannon",
             output: { name: "WOODEN_ARM_CANNON", icon: "🪵🦾", count: 1 },
             ingredients: [
@@ -3926,6 +4481,22 @@ function cancelFloorPlacement() {
             output: { name: "ROBOT_RIGHT_LEG", icon: "🦿", count: 1 },
             ingredients: [
               { name: "LOG", count: 10 }
+            ]
+          },
+          {
+            id: "obsidian_pad_warp",
+            output: { name: "OBSIDIAN_PAD_WARP", icon: "🧭", count: 1 },
+            ingredients: [
+              { name: "OBSIDIAN_CUBE", count: 1 },
+              { name: "GLOW_ORE", count: 1 }
+            ]
+          },
+          {
+            id: "obsidian_flux",
+            output: { name: "OBSIDIAN_FLUX", icon: "⚫", count: 5 },
+            ingredients: [
+              { name: "OBSIDIAN_CUBE", count: 1 },
+              { name: "GLOW_ORE", count: 1 }
             ]
           }
         ];
@@ -4748,6 +5319,13 @@ function cancelFloorPlacement() {
                   selectedActionSlotIndex = i;
                   renderActionSlots();
                 }
+              },
+              onRightClick: (e) => {
+                if (item && (item.name === "WOODEN_ARM_CANNON" || item.name === "ARM_CANNON")) {
+                  switchCannonAmmo();
+                } else {
+                  handleSplitItem("action", i);
+                }
               }
             });
           }
@@ -4897,6 +5475,10 @@ function cancelFloorPlacement() {
           itemData = { name: "MEGANEURA", icon: "🦟", label: "MEGANEURA" };
         } else if (closestDemolishItem.type === "isopod_item") {
           itemData = { name: "ISOPOD", icon: "🦐", label: "ISOPOD" };
+        } else if (closestDemolishItem.type === "obsidian_cube_item") {
+          itemData = { name: "OBSIDIAN_CUBE", icon: "🔶", label: "OBSIDIAN_CUBE" };
+        } else if (closestDemolishItem.type === "obsidian_pad_warp_item" || closestDemolishItem.type === "obsidian_compass_pad_item") {
+          itemData = { name: "OBSIDIAN_PAD_WARP", icon: "🧭", label: "OBSIDIAN_PAD_WARP" };
         } else if (closestDemolishItem.type === "robot_stand") {
           itemData = { name: "ROBOT_STAND", icon: "🏗️", label: "ROBOT_STAND" };
         } else if (closestDemolishItem.type === "robot_cockpit") {

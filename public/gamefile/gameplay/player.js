@@ -704,13 +704,38 @@ window.characterVertexShaderSource = `
           
           playerHP = playerMaxHP;
           updatePlayerHPUI();
-          playerDamageCooldown = 2.0;
-          playerControlsLocked = false;
-          setRagdoll(false);
-          
-          saveSettingsToLocalStorage();
+          if (typeof window.warpPlayerToCoords === "function") {
+            window.warpPlayerToCoords(charTheta, charPhi);
+          } else {
+            playerDamageCooldown = 2.0;
+            playerControlsLocked = false;
+            setRagdoll(false);
+            playerCenterRadius = null;
+            playerVerticalVel = 0.0;
+            saveSettingsToLocalStorage();
+          }
         }, 3000); // 3 seconds ragdoll
       }
+
+      // ระบบวาร์ปพิกัดตัวละคร (ใช้ระบบเดียวกับตอนสุ่มตื่นจากตอนที่หมดสติ)
+      window.warpPlayerToCoords = function(targetTheta, targetPhi) {
+        charTheta = targetTheta;
+        charPhi = targetPhi;
+        playerDamageCooldown = 2.0;
+        playerControlsLocked = false;
+        if (typeof setRagdoll === "function") {
+          setRagdoll(false);
+        }
+        playerCenterRadius = null;
+        playerVerticalVel = 0.0;
+        isPlayerGrounded = true;
+        if (typeof pendingCollectibleRefresh !== "undefined") {
+          pendingCollectibleRefresh = true;
+        }
+        if (typeof saveSettingsToLocalStorage === "function") {
+          saveSettingsToLocalStorage();
+        }
+      };
       let playerScale = 0.1;
       let playerCenterRadius = null;
       let playerVerticalVel = 0.0;
@@ -4848,6 +4873,28 @@ window.characterVertexShaderSource = `
                     // Scoop pointy tip
                     addWedge(wBladeMid, wBladeTip, 0.065 * itemScale, 0.01 * itemScale, 0.01 * itemScale, bladeColor);
                 }
+            } else if ((heldItem.name === "OBSIDIAN_FLUX" || heldItem.name === "OBSIDIAN_BALL") && typeof window.buildObsidianBallModel === "function") {
+                const wHandleP1 = transformPt(axeHandleP1Rot);
+                const wHandleP2 = transformPt(axeHandleP2Rot);
+                const handPos = [
+                    (wHandleP1[0] + wHandleP2[0]) * 0.5,
+                    (wHandleP1[1] + wHandleP2[1]) * 0.5,
+                    (wHandleP1[2] + wHandleP2[2]) * 0.5
+                ];
+                window.buildObsidianBallModel(
+                    1234,
+                    0,
+                    false,
+                    false,
+                    0.18 * itemScale,
+                    handPos,
+                    [1, 0, 0],
+                    [0, 1, 0],
+                    [0, 0, 1],
+                    rawV,
+                    rawC,
+                    rawI
+                );
             }
             
             if (!isClone) {
@@ -5509,6 +5556,52 @@ window.characterVertexShaderSource = `
                   showNotice("กระเป๋าเต็ม! (Inventory full)");
                 }
               }
+            } else if (activeInteractNPC.type === 'obsidian_cube') {
+              const itemsFound = [{ name: "OBSIDIAN_CUBE", count: 1, icon: "🔶", seed: activeInteractNPC.seed }];
+              if (typeof addItemToInventory === "function") {
+                const success = addItemToInventory(itemsFound[0]);
+                if (success) {
+                  showNotice("เก็บศิลาออบซิเดียนแล้ว! (Obsidian Cube picked up)");
+                  if (typeof playCollectSound === "function") playCollectSound();
+                  
+                  // Force respawn it immediately
+                  activeInteractNPC.theta = Math.random() * Math.PI;
+                  activeInteractNPC.phi = Math.random() * Math.PI * 2;
+                  const seed = globalSeed || 1234.5;
+                  const newHeight = getVisualHeightOnSphere(activeInteractNPC.theta, activeInteractNPC.phi, seed);
+                  const wRadius = RADIUS + waterLevel * 0.15;
+                  const gRadius = RADIUS + newHeight * HEIGHT_SCALE;
+                  activeInteractNPC.r = Math.max(gRadius, wRadius) + 1.25;
+                  activeInteractNPC.ragdollEnabled = false;
+                  activeInteractNPC.ragdollInitialized = false;
+                  activeInteractNPC.ragdollPos = null;
+                  activeInteractNPC.ragdollVel = null;
+                  activeInteractNPC.ragdollAsleep = false;
+                  activeInteractNPC.ragdollSleepFrames = 0;
+                  activeInteractNPC.ragdollAngle = 0;
+                  activeInteractNPC.ragdollAngularSpeed = 0;
+                  activeInteractNPC.hp = 6;
+                  activeInteractNPC.maxHp = 6;
+
+                  const sinT = Math.sin(activeInteractNPC.theta);
+                  const cosT = Math.cos(activeInteractNPC.theta);
+                  const sinP = Math.sin(activeInteractNPC.phi);
+                  const cosP = Math.cos(activeInteractNPC.phi);
+                  activeInteractNPC.position = [sinT * cosP * activeInteractNPC.r, cosT * activeInteractNPC.r, sinT * sinP * activeInteractNPC.r];
+
+                  // Remove arrows attached to this NPC
+                  for (let coll of collectibles) {
+                    if (coll.attachedToNPC === activeInteractNPC) {
+                      coll.attachedToNPC = null;
+                      coll.active = false;
+                    }
+                  }
+                  window.pendingCollectibleRefresh = true;
+                  window.pendingDynamicCollectibleRefresh = true;
+                } else {
+                  showNotice("กระเป๋าเต็ม! (Inventory full)");
+                }
+              }
             } else {
               activeInteractNPC.hp = 0;
               activeInteractNPC.ragdollEnabled = true;
@@ -5545,7 +5638,7 @@ window.characterVertexShaderSource = `
               // 2. Action Reach check for other collectibles
               for (let item of collectibles) {
                 if (!item.active) continue;
-                if (item.type === "planet_core" || item.type === "wood_stairs" || item.type === "wood_floor" || item.type === "thin_wood_floor" || item.type === "stone_floor" || item.type === "campfire" || item.type === "wood_boat" || item.type === "boat" || (typeof item.type === "string" && item.type.toLowerCase().includes("boat")) || item.type === "wood_wheel" || item.type === "electric_engine" || item.type === "boat_wing" || item.type === "wood_wall" || item.type === "wood_window" || item.type === "wood_door" || item.type === "wood_chest" || item.type === "axe" || item.type === "pickaxe" || item.type.startsWith("robot_")) continue;
+                if (item.type === "planet_core" || item.type === "wood_stairs" || item.type === "wood_floor" || item.type === "thin_wood_floor" || item.type === "stone_floor" || item.type === "obsidian_pad_warp_item" || item.type === "obsidian_compass_pad_item" || item.type === "campfire" || item.type === "wood_boat" || item.type === "boat" || (typeof item.type === "string" && item.type.toLowerCase().includes("boat")) || item.type === "wood_wheel" || item.type === "electric_engine" || item.type === "boat_wing" || item.type === "wood_wall" || item.type === "wood_window" || item.type === "wood_door" || item.type === "wood_chest" || item.type === "axe" || item.type === "pickaxe" || item.type.startsWith("robot_")) continue;
                 
                 const reachInfo = isTargetWithinReach(item.position, actionReachDistance);
                 if (reachInfo.valid) {
@@ -5781,6 +5874,52 @@ window.characterVertexShaderSource = `
                   activeInteractNPC.ragdollAngularSpeed = 0;
                   activeInteractNPC.hp = 2;
                   activeInteractNPC.maxHp = 2;
+
+                  const sinT = Math.sin(activeInteractNPC.theta);
+                  const cosT = Math.cos(activeInteractNPC.theta);
+                  const sinP = Math.sin(activeInteractNPC.phi);
+                  const cosP = Math.cos(activeInteractNPC.phi);
+                  activeInteractNPC.position = [sinT * cosP * activeInteractNPC.r, cosT * activeInteractNPC.r, sinT * sinP * activeInteractNPC.r];
+
+                  // Remove arrows attached to this NPC
+                  for (let coll of collectibles) {
+                    if (coll.attachedToNPC === activeInteractNPC) {
+                      coll.attachedToNPC = null;
+                      coll.active = false;
+                    }
+                  }
+                  window.pendingCollectibleRefresh = true;
+                  window.pendingDynamicCollectibleRefresh = true;
+                } else {
+                  showNotice("กระเป๋าเต็ม! (Inventory full)");
+                }
+              }
+            } else if (activeInteractNPC.type === 'obsidian_cube') {
+              const itemsFound = [{ name: "OBSIDIAN_CUBE", count: 1, icon: "🔶", seed: activeInteractNPC.seed }];
+              if (typeof addItemToInventory === "function") {
+                const success = addItemToInventory(itemsFound[0]);
+                if (success) {
+                  showNotice("เก็บศิลาออบซิเดียนแล้ว! (Obsidian Cube picked up)");
+                  if (typeof playCollectSound === "function") playCollectSound();
+                  
+                  // Force respawn it immediately
+                  activeInteractNPC.theta = Math.random() * Math.PI;
+                  activeInteractNPC.phi = Math.random() * Math.PI * 2;
+                  const seed = globalSeed || 1234.5;
+                  const newHeight = getVisualHeightOnSphere(activeInteractNPC.theta, activeInteractNPC.phi, seed);
+                  const wRadius = RADIUS + waterLevel * 0.15;
+                  const gRadius = RADIUS + newHeight * HEIGHT_SCALE;
+                  activeInteractNPC.r = Math.max(gRadius, wRadius) + 1.25;
+                  activeInteractNPC.ragdollEnabled = false;
+                  activeInteractNPC.ragdollInitialized = false;
+                  activeInteractNPC.ragdollPos = null;
+                  activeInteractNPC.ragdollVel = null;
+                  activeInteractNPC.ragdollAsleep = false;
+                  activeInteractNPC.ragdollSleepFrames = 0;
+                  activeInteractNPC.ragdollAngle = 0;
+                  activeInteractNPC.ragdollAngularSpeed = 0;
+                  activeInteractNPC.hp = 6;
+                  activeInteractNPC.maxHp = 6;
 
                   const sinT = Math.sin(activeInteractNPC.theta);
                   const cosT = Math.cos(activeInteractNPC.theta);
@@ -6037,7 +6176,7 @@ window.characterVertexShaderSource = `
                   return true;
                 }
               }
-            } else if (other.type === "wood_floor" || other.type === "thin_wood_floor" || other.type === "stone_floor") {
+            } else if (other.type === "wood_floor" || other.type === "thin_wood_floor" || other.type === "stone_floor" || other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item") {
               const dx_vec = [
                 p[0] - other.position[0],
                 p[1] - other.position[1],
@@ -6049,8 +6188,9 @@ window.characterVertexShaderSource = `
               const dy = dx_vec[0] * other.normal[0] + dx_vec[1] * other.normal[1] + dx_vec[2] * other.normal[2];
               
               const isStone = other.type === "stone_floor";
+              const isObsidianPad = other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item";
               const hw = isStone ? other.size * 6.0 : 0.15;
-              const h = isStone ? other.size * 0.15 : (other.type === "wood_floor" ? woodFloorHeight + 0.25 * 0.12 : 0.25 * 0.04);
+              const h = isObsidianPad ? 0.033 : (isStone ? other.size * 0.15 : (other.type === "wood_floor" ? woodFloorHeight + 0.25 * 0.12 : 0.25 * 0.04));
               
               const cushionR = hw + 0.1;
               const cushionUp = 0.1;

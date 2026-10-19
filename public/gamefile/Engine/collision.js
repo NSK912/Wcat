@@ -373,7 +373,7 @@ const CollisionCore = {
               return true;
             }
           }
-        } else if (other.type === "wood_floor" || other.type === "thin_wood_floor") {
+        } else if (other.type === "wood_floor" || other.type === "thin_wood_floor" || other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item") {
           const dx_vec = [
             p[0] - other.position[0],
             p[1] - other.position[1],
@@ -385,11 +385,12 @@ const CollisionCore = {
           const dy = dx_vec[0] * other.normal[0] + dx_vec[1] * other.normal[1] + dx_vec[2] * other.normal[2];
           
           const isStone = other.type === "stone_floor";
+          const isObsidianPad = other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item";
           const floorW = typeof other.width === "number" ? other.width : (isStone ? other.size * 12.0 : 0.3);
           const floorD = typeof other.depth === "number" ? other.depth : (isStone ? other.size * 12.0 : 0.3);
           const hw = floorW / 2;
           const hd = floorD / 2;
-          const h = isStone ? other.size * 0.15 : (other.type === "wood_floor" ? woodFloorHeight + 0.25 * 0.12 : 0.25 * 0.04);
+          const h = isObsidianPad ? 0.033 : (isStone ? other.size * 0.15 : (other.type === "wood_floor" ? woodFloorHeight + 0.25 * 0.12 : 0.25 * 0.04));
           
           const cushionW = hw + 0.1;
           const cushionD = hd + 0.1;
@@ -793,7 +794,7 @@ const CollisionCore = {
                 }
               }
             }
-          } else if (other.type === "wood_floor" || other.type === "thin_wood_floor") {
+          } else if (other.type === "wood_floor" || other.type === "thin_wood_floor" || other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item") {
             const dx_vec = [
               currentP[0] - other.position[0],
               currentP[1] - other.position[1],
@@ -805,11 +806,12 @@ const CollisionCore = {
             const dy = dx_vec[0] * other.normal[0] + dx_vec[1] * other.normal[1] + dx_vec[2] * other.normal[2];
             
             const isStone = other.type === "stone_floor";
+            const isObsidianPad = other.type === "obsidian_pad_warp_item" || other.type === "obsidian_compass_pad_item";
             const floorW = typeof other.width === "number" ? other.width : (isStone ? other.size * 12.0 : 0.3);
             const floorD = typeof other.depth === "number" ? other.depth : (isStone ? other.size * 12.0 : 0.3);
             const hw = floorW / 2;
             const hd = floorD / 2;
-            const h = isStone ? other.size * 0.15 : (other.type === "wood_floor" ? woodFloorHeight + 0.25 * 0.12 : 0.25 * 0.04);
+            const h = isObsidianPad ? 0.033 : (isStone ? other.size * 0.15 : (other.type === "wood_floor" ? woodFloorHeight + 0.25 * 0.12 : 0.25 * 0.04));
             
             const cushionW = hw + 0.1;
             const cushionD = hd + 0.1;

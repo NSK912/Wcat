@@ -5,7 +5,18 @@ window.ItemRegistry["arrow"] = {
     const p = item.position;
     const f = item.F;
     const s = typeof playerScale !== 'undefined' ? playerScale : 0.1;
-    
+
+    if (item.ammoType === "IRON_BULLET") {
+      const ironColor = [0.78, 0.81, 0.86];
+      if (typeof buildLowPolySphere === "function") {
+        buildLowPolySphere(p, 0.038 * s, 6, ironColor, 0, 0, vertices, colors, indices);
+      } else {
+        const pEnd = [p[0] + f[0] * 0.03 * s, p[1] + f[1] * 0.03 * s, p[2] + f[2] * 0.03 * s];
+        buildTaperedSegment(p, pEnd, 0.02 * s, 0.02 * s, 6, ironColor, vertices, colors, indices);
+      }
+      return;
+    }
+
     const shaftColor = [0.55, 0.4, 0.25];
     const flintColor = [0.35, 0.35, 0.35];
     const featherColor = [0.9, 0.2, 0.2];

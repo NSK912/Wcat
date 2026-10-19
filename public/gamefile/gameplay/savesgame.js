@@ -149,7 +149,7 @@
             playerMaxHP,
             batteryStates: (typeof window.BatterySystem !== "undefined" && window.BatterySystem.exportState) ? window.BatterySystem.exportState() : null,
             collectiblesState: collectibles.filter(c => !c.isDynamic).map((c) => c.active),
-            placedStructures: collectibles.filter(c => c.active && !c.isPreview && !c.isDynamic && (c.type === "wood_floor" || c.type === "thin_wood_floor" || c.type === "stone_floor" || c.type === "wood_stairs" || c.type === "folding_ladder" || c.type === "campfire" || c.type === "wood_wall" || c.type === "wood_window" || c.type === "wood_door" || c.type === "wood_roof" || c.type === "wood_chest" || c.type === "meganeura_item" || c.type === "isopod_item" || c.type === "wood_boat" || c.type === "wood_wheel" || c.type === "electric_engine" || c.type === "boat_wing")),
+            placedStructures: collectibles.filter(c => c.active && !c.isPreview && !c.isDynamic && (c.type === "wood_floor" || c.type === "thin_wood_floor" || c.type === "stone_floor" || c.type === "wood_stairs" || c.type === "folding_ladder" || c.type === "campfire" || c.type === "wood_wall" || c.type === "wood_window" || c.type === "wood_door" || c.type === "wood_roof" || c.type === "wood_chest" || c.type === "meganeura_item" || c.type === "isopod_item" || c.type === "obsidian_pad_warp_item" || c.type === "obsidian_compass_pad_item" || c.type === "wood_boat" || c.type === "wood_wheel" || c.type === "electric_engine" || c.type === "boat_wing")),
             dynamicCollectibles: collectibles.filter(c => c.isDynamic),
             amphibiansState: amphibians.map((a) => ({
               theta: a.theta,
@@ -708,6 +708,12 @@
         // Player state
         if (Array.isArray(settings.inventory)) {
           inventory = settings.inventory;
+          for (let i = 0; i < inventory.length; i++) {
+            if (inventory[i] && inventory[i].name === "OBSIDIAN_BALL") {
+              inventory[i].name = "OBSIDIAN_FLUX";
+              inventory[i].label = "OBSIDIAN_FLUX";
+            }
+          }
           while (inventory.length < TOTAL_SLOTS) {
             inventory.push(null);
           }
@@ -716,6 +722,12 @@
         }
         if (Array.isArray(settings.actionSlotsItems)) {
           actionSlotsItems = settings.actionSlotsItems;
+          for (let i = 0; i < actionSlotsItems.length; i++) {
+            if (actionSlotsItems[i] && actionSlotsItems[i].name === "OBSIDIAN_BALL") {
+              actionSlotsItems[i].name = "OBSIDIAN_FLUX";
+              actionSlotsItems[i].label = "OBSIDIAN_FLUX";
+            }
+          }
           while (actionSlotsItems.length < 8) {
             actionSlotsItems.push(null);
           }
@@ -773,7 +785,14 @@
           buildAtmosphereSphere(currentGridSize);
           
           if (Array.isArray(placedStructures) && placedStructures.length > 0) {
+            const uniquePlacedStructures = [];
             placedStructures.forEach(p => {
+              if (!p) return;
+              const isDup = uniquePlacedStructures.some(u =>
+                u === p ||
+                (u.type === p.type && typeof u.seed === "number" && typeof p.seed === "number" && Math.abs(u.seed - p.seed) < 1e-12)
+              );
+              if (isDup) return;
               p.isPreview = false;
               if (p.type === "wood_boat") {
                   p.isDynamic = true;
@@ -785,8 +804,9 @@
                   const rad = getSuppressRadius(type, p.size);
                   suppressGrassUnder(p.position, rad);
               }
+              uniquePlacedStructures.push(p);
             });
-            collectibles = collectibles.concat(placedStructures);
+            collectibles = collectibles.concat(uniquePlacedStructures);
           }
           
           if (Array.isArray(dynamicCollectibles) && dynamicCollectibles.length > 0) {
@@ -794,6 +814,9 @@
           }
 
           window.collectibles = collectibles;
+          if (typeof window.getPlacedObsidianPadsInOrder === "function") {
+            window.getPlacedObsidianPadsInOrder();
+          }
           
           refreshCollectiblesVBO();
         }

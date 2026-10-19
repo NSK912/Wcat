@@ -209,7 +209,14 @@ function startGameWithSlot(loadedData, devMode = false) {
       const placedStructures = settingsToApply.placedStructures || [];
 
       if (placedStructures.length > 0) {
+        const uniquePlacedStructures = [];
         placedStructures.forEach(p => {
+          if (!p) return;
+          const isDup = uniquePlacedStructures.some(u =>
+            u === p ||
+            (u.type === p.type && typeof u.seed === "number" && typeof p.seed === "number" && Math.abs(u.seed - p.seed) < 1e-12)
+          );
+          if (isDup) return;
           p.isPreview = false;
           if (p.type === "wood_boat") {
               p.isDynamic = true;
@@ -222,8 +229,9 @@ function startGameWithSlot(loadedData, devMode = false) {
               const rad = getSuppressRadius(type, p.size);
               suppressGrassUnder(p.position, rad);
           }
+          uniquePlacedStructures.push(p);
         });
-        collectibles = collectibles.concat(placedStructures);
+        collectibles = collectibles.concat(uniquePlacedStructures);
       }
       
       if (dynamicCollectibles.length > 0) {
@@ -231,6 +239,9 @@ function startGameWithSlot(loadedData, devMode = false) {
       }
 
       window.collectibles = collectibles;
+      if (typeof window.getPlacedObsidianPadsInOrder === "function") {
+        window.getPlacedObsidianPadsInOrder();
+      }
       
       refreshCollectiblesVBO();
 
