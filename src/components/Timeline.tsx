@@ -1,0 +1,3134 @@
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import {
+  Play,
+  Pause,
+  Scissors,
+  Plus,
+  LayoutGrid,
+  Maximize2,
+  Download,
+  ZoomIn,
+  ZoomOut,
+  Sparkles,
+  Layers,
+  Eye,
+  EyeOff,
+  Volume2,
+  VolumeX,
+  Lock,
+  Unlock,
+  Trash2,
+  X,
+  Music,
+  Image as ImageIcon,
+  Video as VideoIcon,
+  FileSpreadsheet,
+  FilePlus,
+  Edit2,
+  Copy,
+  Check,
+  Disc,
+  ArrowRightLeft,
+  AlignLeft,
+  ArrowUp,
+  ArrowDown,
+  MoveVertical,
+  Magnet,
+  Undo2,
+  Redo2,
+} from 'lucide-react';
+import { formatTime } from '../utils/sampleVideos';
+import { probeMediaMetadata } from '../utils/nativeMedia';
+import { probeVideoSafe, generateThumbnailsSafe } from '../utils/webcodecsPlayerClient';
+import wcatSeekPng from '../../assets/Wcat seek.png';
+import wcatSeekSvg from '../../public/wcat-seek.svg';
+import {
+  MediaType,
+  TrackColor,
+  TimelineClip,
+  TimelineTrackData,
+  ClipTransform,
+} from '../types';
+
+export type { MediaType, TrackColor, TimelineClip, TimelineTrackData, ClipTransform };
+
+interface TimelineProps {
+  currentTime: number;
+  duration: number;
+  startTime: number;
+  endTime: number;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
+  onSeek: (time: number) => void;
+  onStartTimeChange: (time: number) => void;
+  onEndTimeChange: (time: number) => void;
+  thumbnails: string[];
+  selectedFiles?: File[];
+  onFilesReorder?: (files: File[]) => void;
+  onSelectFile?: (
+    file: File | null,
+    clipStartTime?: number,
+    clipDuration?: number,
+    sourceStartTime?: number,
+    clipEndTime?: number,
+    activeAudioClips?: { id: string; file: File; startTime: number; sourceStartTime: number }[]
+  ) => void;
+  onUploadClick: () => void;
+  onMultiUploadClick?: () => void;
+  onReset: () => void;
+  onExportClick: (tracks: TimelineTrackData[], mode?: 'export' | 'remux') => void;
+  onFullscreenClick: () => void;
+  isLoaded: boolean;
+  isProcessing: boolean;
+  isEncodeMode?: boolean;
+  tracks?: TimelineTrackData[];
+  onTracksChange?: React.Dispatch<React.SetStateAction<TimelineTrackData[]>> | ((tracks: TimelineTrackData[]) => void);
+}
+
+const COLOR_CLASSES: Record<TrackColor, {
+  tabActive: string;
+  headerBorder: string;
+  headerBg: string;
+  badge: string;
+  clipBorder: string;
+  clipBg: string;
+  clipHandle: string;
+  clipText: string;
+}> = {
+  indigo: {
+    tabActive: 'bg-indigo-600 text-white shadow-indigo-600/30',
+    headerBorder: 'border-indigo-500',
+    headerBg: 'bg-indigo-950/40',
+    badge: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',
+    clipBorder: 'border-indigo-400',
+    clipBg: 'bg-indigo-600/20',
+    clipHandle: 'bg-indigo-400 hover:bg-white',
+    clipText: 'bg-indigo-950/90 border-indigo-400/50 text-indigo-200',
+  },
+  violet: {
+    tabActive: 'bg-violet-600 text-white shadow-violet-600/30',
+    headerBorder: 'border-violet-500',
+    headerBg: 'bg-violet-950/40',
+    badge: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
+    clipBorder: 'border-violet-400',
+    clipBg: 'bg-violet-600/20',
+    clipHandle: 'bg-violet-400 hover:bg-white',
+    clipText: 'bg-violet-950/90 border-violet-400/50 text-violet-200',
+  },
+  emerald: {
+    tabActive: 'bg-emerald-600 text-white shadow-emerald-600/30',
+    headerBorder: 'border-emerald-500',
+    headerBg: 'bg-emerald-950/40',
+    badge: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
+    clipBorder: 'border-emerald-400',
+    clipBg: 'bg-emerald-600/20',
+    clipHandle: 'bg-emerald-400 hover:bg-white',
+    clipText: 'bg-emerald-950/90 border-emerald-400/50 text-emerald-200',
+  },
+  amber: {
+    tabActive: 'bg-amber-600 text-white shadow-amber-600/30',
+    headerBorder: 'border-amber-500',
+    headerBg: 'bg-amber-950/40',
+    badge: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
+    clipBorder: 'border-amber-400',
+    clipBg: 'bg-amber-600/20',
+    clipHandle: 'bg-amber-400 hover:bg-white',
+    clipText: 'bg-amber-950/90 border-amber-400/50 text-amber-200',
+  },
+  rose: {
+    tabActive: 'bg-rose-600 text-white shadow-rose-600/30',
+    headerBorder: 'border-rose-500',
+    headerBg: 'bg-rose-950/40',
+    badge: 'bg-rose-500/20 text-rose-300 border-rose-500/30',
+    clipBorder: 'border-rose-400',
+    clipBg: 'bg-rose-600/20',
+    clipHandle: 'bg-rose-400 hover:bg-white',
+    clipText: 'bg-rose-950/90 border-rose-400/50 text-rose-200',
+  },
+  cyan: {
+    tabActive: 'bg-cyan-600 text-white shadow-cyan-600/30',
+    headerBorder: 'border-cyan-500',
+    headerBg: 'bg-cyan-950/40',
+    badge: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
+    clipBorder: 'border-cyan-400',
+    clipBg: 'bg-cyan-600/20',
+    clipHandle: 'bg-cyan-400 hover:bg-white',
+    clipText: 'bg-cyan-950/90 border-cyan-400/50 text-cyan-200',
+  },
+  fuchsia: {
+    tabActive: 'bg-fuchsia-600 text-white shadow-fuchsia-600/30',
+    headerBorder: 'border-fuchsia-500',
+    headerBg: 'bg-fuchsia-950/40',
+    badge: 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/30',
+    clipBorder: 'border-fuchsia-400',
+    clipBg: 'bg-fuchsia-600/20',
+    clipHandle: 'bg-fuchsia-400 hover:bg-white',
+    clipText: 'bg-fuchsia-950/90 border-fuchsia-400/50 text-fuchsia-200',
+  },
+};
+
+const COLOR_OPTIONS: TrackColor[] = ['indigo', 'violet', 'emerald', 'amber', 'rose', 'cyan', 'fuchsia'];
+
+export const Timeline: React.FC<TimelineProps> = ({
+  currentTime,
+  duration,
+  startTime,
+  endTime,
+  isPlaying,
+  onTogglePlay,
+  onSeek,
+  onStartTimeChange,
+  onEndTimeChange,
+  thumbnails,
+  selectedFiles,
+  onFilesReorder,
+  onSelectFile,
+  onUploadClick,
+  onMultiUploadClick,
+  onExportClick,
+  onFullscreenClick,
+  isProcessing,
+  isEncodeMode = false,
+  tracks: propsTracks,
+  onTracksChange,
+}) => {
+  const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
+  const [encodeZoomLevel, setEncodeZoomLevel] = useState<number>(1);
+  const [copyZoomLevel, setCopyZoomLevel] = useState<number>(1);
+  const [dragTooltip, setDragTooltip] = useState<string | null>(null);
+  const [activeTrackId, setActiveTrackId] = useState<string>('track-1');
+  const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState<string>('');
+  const [activeTransitionMenu, setActiveTransitionMenu] = useState<{ trackId: string, clipId: string } | null>(null);
+
+  // Zoom handlers with dedicated conditions per mode
+  const handleZoomIn = () => {
+    if (isEncodeMode) {
+      // Encode Mode: increment encode zoom
+      setEncodeZoomLevel((z) => {
+        let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
+        if (newZ > 1.0 && z < 1.0) newZ = 1.0;
+        return Math.min(5.0, Number(newZ.toFixed(1)));
+      });
+    } else {
+      // Copy Mode: increment copy zoom
+      setCopyZoomLevel((z) => {
+        let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
+        if (newZ > 1.0 && z < 1.0) newZ = 1.0;
+        return Math.min(5.0, Number(newZ.toFixed(1)));
+      });
+    }
+  };
+
+  const handleZoomOut = () => {
+    if (isEncodeMode) {
+      // Encode Mode: decrement encode zoom
+      setEncodeZoomLevel((z) => {
+        let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
+        if (newZ < 0.1) newZ = 0.1;
+        return Number(newZ.toFixed(1));
+      });
+    } else {
+      // Copy Mode: decrement copy zoom
+      setCopyZoomLevel((z) => {
+        let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
+        if (newZ < 0.1) newZ = 0.1;
+        return Number(newZ.toFixed(1));
+      });
+    }
+  };
+
+  const getDisplayTrackName = useCallback((track: TimelineTrackData, allTracks: TimelineTrackData[]) => {
+    if (!track) return '';
+    const actualTrackIdx = allTracks.findIndex(t => t.id === track.id);
+    if (actualTrackIdx === -1) return track.name;
+    return /^Track \d+$/.test(track.name) ? `Track ${actualTrackIdx + 1}` : track.name;
+  }, []);
+
+  // Universal, Free-form Timeline Tracks (Each track holds MULTIPLE independent clips)
+  const [internalTracks, setInternalTracks] = useState<TimelineTrackData[]>([
+    {
+      id: 'track-1',
+      name: 'Track 1',
+      mediaType: 'any',
+      color: 'indigo',
+      clips: [],
+      muted: false,
+      locked: false,
+      hidden: false,
+    },
+    {
+      id: 'track-2',
+      name: 'Track 2',
+      mediaType: 'any',
+      color: 'violet',
+      clips: [],
+      muted: false,
+      locked: false,
+      hidden: false,
+    },
+  ]);
+
+  const tracks = propsTracks ?? internalTracks;
+  const setTracks = (onTracksChange as unknown as React.Dispatch<React.SetStateAction<TimelineTrackData[]>>) ?? setInternalTracks;
+
+  const trimContainerRef = useRef<HTMLDivElement>(null);
+  const tracksStackRef = useRef<HTMLDivElement>(null);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const leftHeadersScrollRef = useRef<HTMLDivElement>(null);
+  const trackFileInputRef = useRef<HTMLInputElement>(null);
+  const [targetUploadTrackId, setTargetUploadTrackId] = useState<string | null>(null);
+  const [hoveredDropTrackId, setHoveredDropTrackId] = useState<string | null>(null);
+  const [activeMoveMenuClipId, setActiveMoveMenuClipId] = useState<string | null>(null);
+  const [activeClipId, setActiveClipId] = useState<string | null>(null);
+  const [snapEnabled, setSnapEnabled] = useState<boolean>(true);
+  const [snapGuideTime, setSnapGuideTime] = useState<number | null>(null);
+  const dragHoveredTrackIdRef = useRef<string | null>(null);
+  const lastNewStartRef = useRef<number>(0);
+  const lastNewEndRef = useRef<number>(0);
+
+  // Auto-cleanup trailing empty tracks only, always keep Track 1 and Track 2
+  const cleanupEmptyTracks = useCallback((tracksList: TimelineTrackData[]): TimelineTrackData[] => {
+    let lastPopulatedIdx = -1;
+    for (let i = tracksList.length - 1; i >= 0; i--) {
+      if (tracksList[i].clips.length > 0) {
+        lastPopulatedIdx = i;
+        break;
+      }
+    }
+    const maxKeepIdx = Math.max(1, lastPopulatedIdx);
+    return tracksList.filter((_, idx) => idx <= maxKeepIdx);
+  }, []);
+
+  // Horizontal scroll on Ctrl + Mouse Wheel
+  useEffect(() => {
+    const scrollEl = timelineScrollRef.current;
+    if (!scrollEl) return;
+    
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        scrollEl.scrollLeft += e.deltaY;
+      }
+    };
+    
+    scrollEl.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      scrollEl.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
+
+  // Ensure activeTrackId remains valid when tracks are removed
+  useEffect(() => {
+    if (tracks.length > 0 && !tracks.some((t) => t.id === activeTrackId)) {
+      setActiveTrackId(tracks[0].id);
+    }
+  }, [tracks, activeTrackId]);
+
+  // Adjustable timeline panel height with drag up/down
+  const [timelineHeight, setTimelineHeight] = useState<number>(() => {
+    const saved = localStorage.getItem('timeline_panel_height');
+    return saved ? Math.max(130, Math.min(600, parseInt(saved, 10))) : 200;
+  });
+  const [isResizingHeight, setIsResizingHeight] = useState<boolean>(false);
+  const resizeStartYRef = useRef<number>(0);
+  const resizeStartHeightRef = useRef<number>(0);
+
+  const startHeightResize = (clientY: number) => {
+    setIsResizingHeight(true);
+    resizeStartYRef.current = clientY;
+    resizeStartHeightRef.current = timelineHeight;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'row-resize';
+  };
+
+  useEffect(() => {
+    if (!isResizingHeight) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const deltaY = resizeStartYRef.current - e.clientY;
+      const newHeight = Math.max(130, Math.min(window.innerHeight * 0.75, resizeStartHeightRef.current + deltaY));
+      setTimelineHeight(newHeight);
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        const deltaY = resizeStartYRef.current - e.touches[0].clientY;
+        const newHeight = Math.max(130, Math.min(window.innerHeight * 0.75, resizeStartHeightRef.current + deltaY));
+        setTimelineHeight(newHeight);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingHeight(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      setTimelineHeight((curr) => {
+        try {
+          localStorage.setItem('timeline_panel_height', curr.toString());
+        } catch {}
+        return curr;
+      });
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('touchmove', handleTouchMove);
+    window.addEventListener('touchend', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizingHeight]);
+
+  // Undo & Redo History System
+  const pastRef = useRef<TimelineTrackData[][]>([]);
+  const futureRef = useRef<TimelineTrackData[][]>([]);
+  const [canUndo, setCanUndo] = useState<boolean>(false);
+  const [canRedo, setCanRedo] = useState<boolean>(false);
+  const dragStartTracksRef = useRef<TimelineTrackData[] | null>(null);
+
+  const cloneTracks = useCallback((data: TimelineTrackData[]): TimelineTrackData[] => {
+    return data.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => ({
+        ...c,
+        transform: c.transform ? { ...c.transform } : undefined,
+      })),
+    }));
+  }, []);
+
+  const commitToHistory = useCallback((snapshotToSave?: TimelineTrackData[]) => {
+    const current = snapshotToSave || tracks;
+    pastRef.current.push(cloneTracks(current));
+    if (pastRef.current.length > 50) {
+      pastRef.current.shift();
+    }
+    futureRef.current = [];
+    setCanUndo(true);
+    setCanRedo(false);
+  }, [tracks, cloneTracks]);
+
+  const handleUndo = useCallback(() => {
+    if (pastRef.current.length === 0) return;
+    const previous = pastRef.current.pop()!;
+    futureRef.current.push(cloneTracks(tracks));
+    setCanUndo(pastRef.current.length > 0);
+    setCanRedo(true);
+    setTracks(previous);
+  }, [tracks, setTracks, cloneTracks]);
+
+  const handleRedo = useCallback(() => {
+    if (futureRef.current.length === 0) return;
+    const next = futureRef.current.pop()!;
+    pastRef.current.push(cloneTracks(tracks));
+    setCanUndo(true);
+    setCanRedo(futureRef.current.length > 0);
+    setTracks(next);
+  }, [tracks, setTracks, cloneTracks]);
+
+  // Global Keyboard Shortcuts (Ctrl+Z / Cmd+Z, Ctrl+Y / Cmd+Shift+Z)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (e.key === 'z' || e.key === 'Z') {
+          e.preventDefault();
+          if (e.shiftKey) {
+            handleRedo();
+          } else {
+            handleUndo();
+          }
+        } else if (e.key === 'y' || e.key === 'Y') {
+          e.preventDefault();
+          handleRedo();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
+
+  // Independent Thumbnail Cache per File/Media
+  const [fileThumbnails, setFileThumbnails] = useState<Record<string, string[]>>({});
+  const [fileDurations, setFileDurations] = useState<Record<string, number>>({});
+  const inFlightExtractionsRef = useRef<Set<string>>(new Set());
+  const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
+  const isScrubbingRef = useRef<boolean>(false);
+  const lastEmittedClipRef = useRef<{
+    fileKey: string;
+    startTime: number;
+    sourceStart: number;
+    endTime: number;
+    audioSignature?: string;
+  } | null>(null);
+
+  const getFileKey = (file: File): string => `${file.name}_${file.size}_${file.lastModified}`;
+
+  // Helper to extract thumbnails and exact duration for a specific video file
+  const extractThumbnailsForFile = async (file: File) => {
+    const key = getFileKey(file);
+    const isAudio = detectMediaType(file) === 'audio';
+    if (inFlightExtractionsRef.current.has(key)) return;
+    if (isAudio && fileDurations[key]) return;
+    if (!isAudio && fileThumbnails[key] && fileThumbnails[key].length > 0 && fileDurations[key]) return;
+
+    inFlightExtractionsRef.current.add(key);
+
+    const updateClipDurations = (fileDur: number) => {
+      if (!fileDur || fileDur <= 0) return;
+      setFileDurations((prev) => ({ ...prev, [key]: fileDur }));
+
+      setTracks((prev) => {
+        let changed = false;
+        const nextTracks = prev.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) => {
+            const isTargetFile =
+              (c.file && getFileKey(c.file) === key) ||
+              c.name === file.name ||
+              c.fileName === file.name;
+
+            if (isTargetFile) {
+              const wasUntrimmed =
+                !c.isTrimmed ||
+                !c.fileDuration ||
+                c.endTime <= c.startTime ||
+                (c.endTime - c.startTime) <= 10.05 ||
+                Math.abs((c.endTime - c.startTime) - (c.fileDuration || 0)) < 0.5;
+
+              const effectiveDur = Math.max(fileDur, c.fileDuration || 0);
+              const newEnd = wasUntrimmed ? c.startTime + effectiveDur : Math.min(c.startTime + effectiveDur, c.endTime);
+              const newSourceEnd = wasUntrimmed ? effectiveDur : Math.min(effectiveDur, c.sourceEndTime || effectiveDur);
+
+              if (c.fileDuration !== effectiveDur || c.endTime !== newEnd || c.sourceEndTime !== newSourceEnd) {
+                changed = true;
+                return {
+                  ...c,
+                  fileDuration: effectiveDur,
+                  endTime: newEnd,
+                  sourceEndTime: newSourceEnd,
+                };
+              }
+            }
+            return c;
+          }),
+        }));
+        return changed ? nextTracks : prev;
+      });
+    };
+
+    // 1. Fast Native Demuxer probe (100% accurate for MKV, MP4, WebM, TS, AVI)
+    let probedDur = 0;
+    try {
+      const meta = await probeMediaMetadata(file);
+      if (meta.duration && Number.isFinite(meta.duration) && meta.duration > 0) {
+        probedDur = meta.duration;
+      }
+    } catch (e) {
+      console.warn('Native duration extraction in Timeline:', e);
+    }
+
+    if (probedDur > 0) {
+      updateClipDurations(probedDur);
+      if (isAudio) {
+        inFlightExtractionsRef.current.delete(key);
+        return;
+      }
+    }
+
+    if (isAudio) {
+      const audio = document.createElement('audio');
+      const blobUrl = URL.createObjectURL(file);
+      audio.src = blobUrl;
+      audio.onloadedmetadata = () => {
+        if (audio.duration && Number.isFinite(audio.duration) && audio.duration > 0) {
+           updateClipDurations(audio.duration);
+        }
+        inFlightExtractionsRef.current.delete(key);
+        URL.revokeObjectURL(blobUrl);
+      };
+      audio.onerror = () => {
+        inFlightExtractionsRef.current.delete(key);
+        URL.revokeObjectURL(blobUrl);
+      };
+      return;
+    }
+
+    // 2. WebCodecs Dedicated Worker thumbnail extraction & exact duration check (NEVER HTML5 <video>)
+    if (!isAudio) {
+      if (probedDur > 0) {
+        updateClipDurations(probedDur);
+      } else if (duration > 0) {
+        updateClipDurations(duration);
+      } else {
+        probeVideoSafe(file)
+          .then((probe) => {
+            if (probe.duration > 0) {
+              updateClipDurations(probe.duration);
+            }
+          })
+          .catch(() => {});
+      }
+
+      generateThumbnailsSafe(file, 8, probedDur || duration)
+        .then((thumbs) => {
+          if (thumbs && thumbs.length > 0) {
+            const validThumbs = thumbs.filter(Boolean);
+            if (validThumbs.length > 0) {
+              setFileThumbnails((prev) => ({ ...prev, [key]: validThumbs }));
+            }
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlightExtractionsRef.current.delete(key);
+        });
+    }
+  };
+
+  // Extract separate video thumbnails for each distinct video file
+  useEffect(() => {
+    const filesToProcess: File[] = [];
+    if (selectedFiles && selectedFiles.length > 0) {
+      filesToProcess.push(...selectedFiles);
+    }
+    tracks.forEach((t) => {
+      t.clips.forEach((c) => {
+        if (c.file && !filesToProcess.includes(c.file)) {
+          filesToProcess.push(c.file);
+        }
+      });
+    });
+
+    if (filesToProcess.length === 0) return;
+
+    filesToProcess.forEach((file) => {
+      const key = getFileKey(file);
+      const mediaType = detectMediaType(file);
+
+      // 1. Image File Preview
+      if (mediaType === 'image') {
+        if (!fileThumbnails[key] && !inFlightExtractionsRef.current.has(key)) {
+          const imgUrl = URL.createObjectURL(file);
+          setFileThumbnails((prev) => ({ ...prev, [key]: [imgUrl] }));
+          setFileDurations((prev) => ({ ...prev, [key]: 5 }));
+        }
+        return;
+      }
+
+      // 2. Video/Audio File Metadata & Thumbnail Extraction (Specific to this file)
+      if (mediaType === 'video' || mediaType === 'audio') {
+        extractThumbnailsForFile(file);
+      }
+    });
+  }, [selectedFiles, tracks]);
+
+  // Auto-expand clips to project duration if they were created before duration was resolved or had a partial duration
+  useEffect(() => {
+    if (!duration || duration <= 0) return;
+
+    setTracks((prev) => {
+      let changed = false;
+      const isSingleFileProject = !selectedFiles || selectedFiles.length <= 1;
+      const nextTracks = prev.map((t) => ({
+        ...t,
+        clips: t.clips.map((c) => {
+          const isCollapsedOrOutdated =
+            !c.isTrimmed &&
+            (c.endTime <= c.startTime ||
+              c.endTime - c.startTime <= 0.1 ||
+              Math.abs(c.endTime - c.startTime - 10) < 0.1 ||
+              (c.fileDuration || 0) <= 0 ||
+              (isSingleFileProject && Math.abs((c.fileDuration || 0) - duration) > 0.5));
+
+          if (isCollapsedOrOutdated) {
+            changed = true;
+            return {
+              ...c,
+              endTime: c.startTime + duration,
+              sourceStartTime: c.sourceStartTime || 0,
+              sourceEndTime: duration,
+              fileDuration: duration,
+            };
+          }
+          return c;
+        }),
+      }));
+      return changed ? nextTracks : prev;
+    });
+  }, [duration, selectedFiles, setTracks]);
+
+  const detectMediaType = (file: File): MediaType => {
+    if (file.type.startsWith('video/')) return 'video';
+    if (file.type.startsWith('audio/')) return 'audio';
+    if (file.type.startsWith('image/')) return 'image';
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    if (['mp4', 'mkv', 'mov', 'webm', 'avi', 'flv'].includes(ext)) return 'video';
+    if (['mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg', 'opus'].includes(ext)) return 'audio';
+    if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp'].includes(ext)) return 'image';
+    return 'any';
+  };
+
+  const prevIsEncodeModeRef = useRef<boolean>(isEncodeMode);
+
+  // When exiting Encode Mode, restore pristine Copy Mode tracks layout
+  useEffect(() => {
+    const wasEncodeMode = prevIsEncodeModeRef.current;
+    prevIsEncodeModeRef.current = isEncodeMode;
+
+    if (wasEncodeMode && !isEncodeMode && selectedFiles && selectedFiles.length > 0) {
+      setTracks((prev) => {
+        // Collect latest clip data for each file to preserve trims if possible
+        const clipMap = new Map<string, TimelineClip>();
+        prev.forEach((t) => {
+          t.clips.forEach((c) => {
+            if (c.file && !clipMap.has(getFileKey(c.file))) {
+              clipMap.set(getFileKey(c.file), c);
+            }
+          });
+        });
+
+        const colorOrder: TrackColor[] = ['indigo', 'violet', 'emerald', 'amber', 'rose', 'cyan', 'fuchsia'];
+        const restoredTracks: TimelineTrackData[] = selectedFiles.map((file, idx) => {
+          const key = getFileKey(file);
+          const detectedType = detectMediaType(file);
+          const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
+          const trackColor = colorOrder[idx % colorOrder.length];
+          const existingClip = clipMap.get(key);
+
+          const clip: TimelineClip = existingClip ? {
+            ...existingClip,
+            startTime: 0,
+            endTime: existingClip.sourceEndTime - existingClip.sourceStartTime, // Reset position to start
+            color: trackColor
+          } : {
+            id: `clip-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+            name: file.name,
+            mediaType: detectedType,
+            startTime: 0,
+            endTime: knownDuration,
+            sourceStartTime: 0,
+            sourceEndTime: knownDuration,
+            fileDuration: knownDuration,
+            file: file,
+            fileName: file.name,
+            previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+            color: trackColor,
+            isTrimmed: false,
+          };
+
+          return {
+            id: `track-${idx + 1}`,
+            name: selectedFiles.length > 1 ? `Track ${idx + 1}` : 'Track 1',
+            mediaType: 'any' as MediaType,
+            color: trackColor,
+            clips: [clip],
+            muted: false,
+            locked: false,
+            hidden: false,
+          };
+        });
+
+        // Ensure at least 2 tracks if only 1 file is selected
+        while (restoredTracks.length < 2) {
+          const nextIdx = restoredTracks.length + 1;
+          restoredTracks.push({
+            id: `track-${nextIdx}`,
+            name: `Track ${nextIdx}`,
+            mediaType: 'any' as MediaType,
+            color: colorOrder[(nextIdx - 1) % colorOrder.length],
+            clips: [],
+            muted: false,
+            locked: false,
+            hidden: false,
+          });
+        }
+        
+        return restoredTracks;
+      });
+      setActiveTrackId('track-1');
+    }
+  }, [isEncodeMode, selectedFiles, fileDurations, setTracks]);
+
+  // Sync timeline tracks and multi-clips dynamically according to selectedFiles
+  useEffect(() => {
+    if (!selectedFiles || selectedFiles.length === 0) return;
+
+    setTracks((prev) => {
+      const colorOrder: TrackColor[] = ['indigo', 'violet', 'emerald', 'amber', 'rose', 'cyan', 'fuchsia'];
+
+      // Check existing files already present across any track
+      const existingFilesSet = new Set<string>();
+      prev.forEach((t) => {
+        t.clips.forEach((c) => {
+          if (c.file) {
+            existingFilesSet.add(getFileKey(c.file));
+          }
+        });
+      });
+
+      const selectedKeysSet = new Set(selectedFiles.map((f) => getFileKey(f)));
+      const anyExistingStillSelected = Array.from(existingFilesSet).some((k) => selectedKeysSet.has(k));
+
+      // If tracks are empty or user replaced the selected file(s) with a brand new file, build fresh tracks
+      const totalClipsCount = prev.reduce((acc, t) => acc + t.clips.length, 0);
+      if (totalClipsCount === 0 || (!isEncodeMode && !anyExistingStillSelected)) {
+        const newTracks: TimelineTrackData[] = selectedFiles.map((file, idx) => {
+          const key = getFileKey(file);
+          const detectedType = detectMediaType(file);
+          const knownDuration =
+            fileDurations[key] && fileDurations[key] > 0
+              ? fileDurations[key]
+              : duration > 0
+              ? duration
+              : detectedType === 'image'
+              ? 5
+              : 0;
+          const trackColor = colorOrder[idx % colorOrder.length];
+
+          const clip: TimelineClip = {
+            id: `clip-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+            name: file.name,
+            mediaType: detectedType,
+            startTime: 0,
+            endTime: knownDuration,
+            sourceStartTime: 0,
+            sourceEndTime: knownDuration,
+            fileDuration: knownDuration,
+            file: file,
+            fileName: file.name,
+            previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+            color: trackColor,
+            isTrimmed: false,
+          };
+
+          return {
+            id: `track-${idx + 1}`,
+            name: selectedFiles.length > 1 ? `Track ${idx + 1}` : 'Track 1',
+            mediaType: 'any' as MediaType,
+            color: trackColor,
+            clips: [clip],
+            muted: false,
+            locked: false,
+            hidden: false,
+          };
+        });
+
+        // Ensure at least 2 tracks if only 1 file is selected
+        while (newTracks.length < 2) {
+          const nextIdx = newTracks.length + 1;
+          newTracks.push({
+            id: `track-${nextIdx}`,
+            name: `Track ${nextIdx}`,
+            mediaType: 'any' as MediaType,
+            color: colorOrder[(nextIdx - 1) % colorOrder.length],
+            clips: [],
+            muted: false,
+            locked: false,
+            hidden: false,
+          });
+        }
+
+        return newTracks;
+      }
+
+      // If tracks already exist and have clips, check if any newly selected files need their own track
+      const missingFiles = selectedFiles.filter((file) => !existingFilesSet.has(getFileKey(file)));
+      if (missingFiles.length === 0) {
+        return prev;
+      }
+
+      const updatedTracks = [...prev];
+      missingFiles.forEach((file) => {
+        const key = getFileKey(file);
+        const detectedType = detectMediaType(file);
+        const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
+        const trackColor = colorOrder[updatedTracks.length % colorOrder.length];
+
+        const newClip: TimelineClip = {
+          id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          name: file.name,
+          mediaType: detectedType,
+          startTime: 0,
+          endTime: knownDuration,
+          sourceStartTime: 0,
+          sourceEndTime: knownDuration,
+          fileDuration: knownDuration,
+          file: file,
+          fileName: file.name,
+          previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+          color: trackColor,
+          isTrimmed: false,
+        };
+
+        // Find first empty track without clips
+        const emptyTrackIdx = updatedTracks.findIndex((t) => t.clips.length === 0);
+        if (emptyTrackIdx !== -1) {
+          updatedTracks[emptyTrackIdx] = {
+            ...updatedTracks[emptyTrackIdx],
+            clips: [newClip],
+          };
+        } else {
+          // Create a new separate track for this file
+          const newTrackIdx = updatedTracks.length + 1;
+          updatedTracks.push({
+            id: `track-${Date.now()}-${newTrackIdx}`,
+            name: `Track ${newTrackIdx}`,
+            mediaType: 'any' as MediaType,
+            color: trackColor,
+            clips: [newClip],
+            muted: false,
+            locked: false,
+            hidden: false,
+          });
+        }
+      });
+
+      return updatedTracks;
+    });
+  }, [selectedFiles]);
+
+  // Add a new universal track with zero restrictions
+  const handleAddTrack = () => {
+    commitToHistory();
+    const newIdx = tracks.length + 1;
+    const colorOrder: TrackColor[] = ['emerald', 'amber', 'rose', 'cyan', 'fuchsia', 'indigo', 'violet'];
+    const assignedColor = colorOrder[(newIdx - 1) % colorOrder.length];
+
+    const newTrack: TimelineTrackData = {
+      id: `track-${Date.now()}`,
+      name: `Track ${newIdx}`,
+      mediaType: 'any',
+      color: assignedColor,
+      clips: [],
+      muted: false,
+      locked: false,
+      hidden: false,
+    };
+    setTracks((prev) => [...prev, newTrack]);
+    setActiveTrackId(newTrack.id);
+  };
+
+  // Duplicate a track
+  const handleDuplicateTrack = (trackId: string) => {
+    const src = tracks.find((t) => t.id === trackId);
+    if (!src) return;
+    commitToHistory();
+    const newTrack: TimelineTrackData = {
+      ...src,
+      id: `track-${Date.now()}`,
+      name: `${src.name} (Copy)`,
+      clips: src.clips.map((c) => ({
+        ...c,
+        id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      })),
+    };
+    setTracks((prev) => [...prev, newTrack]);
+    setActiveTrackId(newTrack.id);
+  };
+
+  // Delete a track
+  const handleDeleteTrack = (trackId: string) => {
+    if (tracks.length <= 1) return; // Always keep at least 1 track
+    commitToHistory();
+    setTracks((prev) => prev.filter((t) => t.id !== trackId));
+    if (activeTrackId === trackId) {
+      const remaining = tracks.filter((t) => t.id !== trackId);
+      setActiveTrackId(remaining[0].id);
+    }
+  };
+
+  // Cycle / switch media type icon on track freely
+  const cycleMediaType = (trackId: string) => {
+    commitToHistory();
+    const types: MediaType[] = ['any', 'video', 'audio', 'image', 'text'];
+    setTracks((prev) =>
+      prev.map((t) => {
+        if (t.id === trackId) {
+          const currIdx = types.indexOf(t.mediaType);
+          const nextType = types[(currIdx + 1) % types.length];
+          return { ...t, mediaType: nextType };
+        }
+        return t;
+      })
+    );
+  };
+
+  // Change track color
+  const cycleTrackColor = (trackId: string) => {
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) => {
+        if (t.id === trackId) {
+          const currIdx = COLOR_OPTIONS.indexOf(t.color);
+          const nextColor = COLOR_OPTIONS[(currIdx + 1) % COLOR_OPTIONS.length];
+          return { ...t, color: nextColor };
+        }
+        return t;
+      })
+    );
+  };
+
+  // Direct file attachment to a specific track as a new clip
+  const handleTrackFileSelect = (trackId: string) => {
+    setTargetUploadTrackId(trackId);
+    trackFileInputRef.current?.click();
+  };
+
+  const handleTrackFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !targetUploadTrackId) return;
+
+    const detectedType = detectMediaType(file);
+    const url = URL.createObjectURL(file);
+
+    // If image or video, extract thumbnails immediately
+    const key = getFileKey(file);
+    if (detectedType === 'image') {
+      setFileThumbnails((prev) => ({ ...prev, [key]: [url] }));
+    } else if (detectedType === 'video' || detectedType === 'audio') {
+      extractThumbnailsForFile(file);
+    }
+
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) => {
+        if (t.id === targetUploadTrackId) {
+          const startVal = currentTime;
+          const dur = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
+          const newClip: TimelineClip = {
+            id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+            name: file.name,
+            mediaType: detectedType,
+            startTime: startVal,
+            endTime: startVal + dur,
+            sourceStartTime: 0,
+            sourceEndTime: dur,
+            fileDuration: dur,
+            file: file,
+            fileName: file.name,
+            previewUrl: url,
+            color: t.color,
+            isTrimmed: false,
+          };
+          return {
+            ...t,
+            clips: [...t.clips, newClip],
+          };
+        }
+        return t;
+      })
+    );
+
+    if (onSelectFile && !isEncodeMode) {
+      onSelectFile(file, currentTime);
+    }
+
+    if (trackFileInputRef.current) {
+      trackFileInputRef.current.value = '';
+    }
+    setTargetUploadTrackId(null);
+  };
+
+  // Start inline rename
+  const handleStartRename = (track: TimelineTrackData) => {
+    setEditingTrackId(track.id);
+    setEditingName(getDisplayTrackName(track, tracks));
+  };
+
+  const handleSaveRename = (trackId: string) => {
+    if (editingName.trim()) {
+      commitToHistory();
+      setTracks((prev) =>
+        prev.map((t) => (t.id === trackId ? { ...t, name: editingName.trim() } : t))
+      );
+    }
+    setEditingTrackId(null);
+  };
+
+  // Track toggles
+  const toggleTrackMute = (trackId: string) => {
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, muted: !t.muted } : t))
+    );
+  };
+
+  const toggleTrackLock = (trackId: string) => {
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, locked: !t.locked } : t))
+    );
+  };
+
+  const toggleTrackHidden = (trackId: string) => {
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, hidden: !t.hidden } : t))
+    );
+  };
+
+  // Multi-file drag and drop (Reorder files tab bar)
+  const handleDragStart = (e: React.DragEvent, idx: number) => {
+    setDraggedIdx(idx);
+    e.dataTransfer.setData('text/plain', idx.toString());
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e: React.DragEvent, targetIdx: number) => {
+    e.preventDefault();
+    if (draggedIdx === null || !selectedFiles || !onFilesReorder) return;
+    if (draggedIdx === targetIdx) return;
+
+    const newFiles = [...selectedFiles];
+    const [movedFile] = newFiles.splice(draggedIdx, 1);
+    newFiles.splice(targetIdx, 0, movedFile);
+    onFilesReorder(newFiles);
+    setDraggedIdx(null);
+  };
+
+  const moveFile = (idx: number, direction: 'left' | 'right') => {
+    if (!selectedFiles || !onFilesReorder) return;
+    const targetIdx = direction === 'left' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= selectedFiles.length) return;
+    const newFiles = [...selectedFiles];
+    const temp = newFiles[idx];
+    newFiles[idx] = newFiles[targetIdx];
+    newFiles[targetIdx] = temp;
+    onFilesReorder(newFiles);
+  };
+
+  // Calculate project total timeline duration dynamically across all clips in all tracks
+  const allClips = tracks.flatMap((t) => t.clips);
+  const computedTimelineDuration = Math.max(
+    duration || 0,
+    ...allClips.map((c) => c.endTime || 0),
+    60
+  );
+  // Scale BASE_DURATION for 1hr-4hr videos so timeline DOM width stays within GPU texture limits (<800% at 1x zoom) while remaining smoothly scrollable
+  const BASE_DURATION = Math.max(60, computedTimelineDuration / 6);
+
+  // Auto-Sequence all clips (Option: Sequence all clips into Track 1 in order)
+  const handleAutoSequence = () => {
+    commitToHistory();
+    let currentOffset = 0;
+    setTracks((prev) => {
+      // Gather all clips across all tracks
+      const allExtractedClips = prev.flatMap((t) => t.clips);
+      if (allExtractedClips.length === 0) return prev;
+
+      // Sort clips by their current start time
+      allExtractedClips.sort((a, b) => a.startTime - b.startTime);
+
+      const sequencedClips = allExtractedClips.map((c) => {
+        const span = c.fileDuration || Math.max(1, c.endTime - c.startTime);
+        const start = currentOffset;
+        const end = start + span;
+        currentOffset = end;
+        return { ...c, startTime: start, endTime: end };
+      });
+
+      // Put all sequenced clips together on Track 1 (or keep empty other tracks)
+      const updated = prev.map((t, idx) => {
+        if (idx === 0) {
+          return { ...t, clips: sequencedClips };
+        }
+        return { ...t, clips: [] };
+      });
+      return cleanupEmptyTracks(updated);
+    });
+  };
+
+  // Align all tracks' first clip to start at 00:00.0 without changing internal spacing
+  const handleAlignToStart = () => {
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) => {
+        if (t.clips.length === 0) return t;
+        const minStart = Math.min(...t.clips.map((c) => c.startTime));
+        return {
+          ...t,
+          clips: t.clips.map((c) => {
+            const span = c.endTime - c.startTime;
+            const newStart = Math.max(0, c.startTime - minStart);
+            return { ...c, startTime: newStart, endTime: newStart + span };
+          }),
+        };
+      })
+    );
+  };
+
+  // Move a specific clip from one track to another track (keeps both clips on the target track!)
+  const handleMoveClipToTrack = (sourceTrackId: string, clipId: string, targetTrackId: string) => {
+    if (sourceTrackId === targetTrackId) return;
+    commitToHistory();
+    setTracks((prev) => {
+      const srcTrack = prev.find((t) => t.id === sourceTrackId);
+      const destTrack = prev.find((t) => t.id === targetTrackId);
+      if (!srcTrack || !destTrack) return prev;
+
+      const movingClip = srcTrack.clips.find((c) => c.id === clipId);
+      if (!movingClip) return prev;
+
+      const remainingSrcClips = srcTrack.clips.filter((c) => c.id !== clipId);
+      const newDestClips = [...destTrack.clips, movingClip];
+
+      const updated = prev.map((t) => {
+        if (t.id === sourceTrackId) return { ...t, clips: remainingSrcClips };
+        if (t.id === targetTrackId) return { ...t, clips: newDestClips };
+        return t;
+      });
+      return cleanupEmptyTracks(updated);
+    });
+
+    setActiveTrackId(targetTrackId);
+    setActiveClipId(clipId);
+    setActiveMoveMenuClipId(null);
+  };
+
+  // Move clip to a brand new track
+  const handleMoveClipToNewTrack = (sourceTrackId: string, clipId: string) => {
+    const srcTrack = tracks.find((t) => t.id === sourceTrackId);
+    if (!srcTrack) return;
+    const movingClip = srcTrack.clips.find((c) => c.id === clipId);
+    if (!movingClip) return;
+    commitToHistory();
+    const newIdx = tracks.length + 1;
+    const colorOrder: TrackColor[] = ['emerald', 'amber', 'rose', 'cyan', 'fuchsia', 'indigo', 'violet'];
+    const assignedColor = colorOrder[(newIdx - 1) % colorOrder.length];
+
+    const newTrack: TimelineTrackData = {
+      id: `track-${Date.now()}`,
+      name: `Track ${newIdx}`,
+      mediaType: movingClip.mediaType,
+      color: assignedColor,
+      clips: [movingClip],
+      muted: false,
+      locked: false,
+      hidden: false,
+    };
+
+    setTracks((prev) => {
+      const updated = [
+        ...prev.map((t) =>
+          t.id === sourceTrackId
+            ? {
+                ...t,
+                clips: t.clips.filter((c) => c.id !== clipId),
+              }
+            : t
+        ),
+        newTrack,
+      ];
+      return cleanupEmptyTracks(updated);
+    });
+
+    setActiveTrackId(newTrack.id);
+    setActiveClipId(clipId);
+    setActiveMoveMenuClipId(null);
+  };
+
+  // Duplicate a specific clip in the same track
+  const handleDuplicateClip = (trackId: string, clipId: string) => {
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) => {
+        if (t.id === trackId) {
+          const srcClip = t.clips.find((c) => c.id === clipId);
+          if (!srcClip) return t;
+          const span = srcClip.endTime - srcClip.startTime;
+          const newClip: TimelineClip = {
+            ...srcClip,
+            id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+            name: `${srcClip.name} (Copy)`,
+            startTime: srcClip.endTime,
+            endTime: srcClip.endTime + span,
+          };
+          return { ...t, clips: [...t.clips, newClip] };
+        }
+        return t;
+      })
+    );
+  };
+
+  const handleApplyTransition = (trackId: string, clipId: string, transitionType: 'none' | 'fade' | 'crossfade' | 'dissolve' | 'wipe') => {
+    commitToHistory();
+    setTracks(prev => prev.map(t => {
+      if (t.id === trackId) {
+        return {
+          ...t,
+          clips: t.clips.map(c => {
+            if (c.id === clipId) {
+              return { ...c, transition: transitionType };
+            }
+            return c;
+          })
+        };
+      }
+      return t;
+    }));
+    setActiveTransitionMenu(null);
+  };
+
+  // Delete a specific clip from a track
+  const handleDeleteClip = (trackId: string, clipId: string) => {
+    commitToHistory();
+    setTracks((prev) => {
+      const updated = prev.map((t) => (t.id === trackId ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t));
+      return cleanupEmptyTracks(updated);
+    });
+
+    // In Copy Mode, update active clip and trim markers when a piece is deleted
+    if (!isEncodeMode) {
+      const track = tracks.find((t) => t.id === trackId);
+      const remainingClips = track?.clips.filter((c) => c.id !== clipId) || [];
+      if (remainingClips.length > 0) {
+        const nextActive = remainingClips[0];
+        setActiveClipId(nextActive.id);
+        const minStart = Math.min(...remainingClips.map((c) => c.startTime));
+        const maxEnd = Math.max(...remainingClips.map((c) => c.endTime));
+        if (onStartTimeChange) onStartTimeChange(minStart);
+        if (onEndTimeChange) onEndTimeChange(maxEnd);
+        if (nextActive.file && onSelectFile) {
+          onSelectFile(nextActive.file, nextActive.startTime, nextActive.fileDuration, nextActive.sourceStartTime, nextActive.endTime);
+        }
+      }
+    }
+  };
+
+  // Dynamically sync preview video when playhead enters any clip's time range
+  useEffect(() => {
+    if (!onSelectFile || tracks.length === 0) return;
+
+    // =========================================================================
+    // 🎛️ PLAYHEAD RESOLUTION LOGIC (ENCODE MODE vs COPY MODE)
+    // =========================================================================
+    // Find clip under playhead
+    let targetClip: TimelineClip | undefined;
+    const activeAudioClips: { id: string; file: File; startTime: number; sourceStartTime: number }[] = [];
+
+    if (!isEncodeMode) {
+      const activeTrack = tracks.find((t) => t.id === activeTrackId);
+      if (activeTrack && !activeTrack.hidden) {
+        targetClip = activeTrack.clips.find((c) => c.file && c.startTime <= currentTime && currentTime <= c.endTime);
+      }
+    } else {
+      for (const t of tracks) {
+        const match = t.clips.find((c) => c.file && c.startTime <= currentTime && currentTime <= c.endTime);
+        if (match) {
+          if (!t.hidden && !targetClip) {
+            targetClip = match; // Topmost visible track provides video
+          }
+          if (!t.muted && match.file) {
+            const matchType = match.mediaType || detectMediaType(match.file);
+            if (matchType !== 'image') {
+              activeAudioClips.push({
+                id: match.id,
+                file: match.file,
+                startTime: match.startTime,
+                sourceStartTime: match.sourceStartTime || 0
+              });
+            }
+          }
+        }
+      }
+    }
+
+    const audioSignature = activeAudioClips.map(c => `${c.id}_${c.startTime}_${c.sourceStartTime}`).join('|');
+    const fileKey = targetClip?.file ? getFileKey(targetClip.file) : '';
+    const startTime = targetClip?.startTime || 0;
+    const sourceStart = targetClip?.sourceStartTime || 0;
+    const endTime = targetClip?.endTime || 0;
+    const fileDuration = targetClip?.fileDuration || (targetClip ? (targetClip.endTime - targetClip.startTime) : 0);
+
+    if (
+      !lastEmittedClipRef.current ||
+      lastEmittedClipRef.current.fileKey !== fileKey ||
+      lastEmittedClipRef.current.audioSignature !== audioSignature ||
+      Math.abs(lastEmittedClipRef.current.startTime - startTime) > 0.001 ||
+      Math.abs(lastEmittedClipRef.current.sourceStart - sourceStart) > 0.001 ||
+      Math.abs(lastEmittedClipRef.current.endTime - endTime) > 0.001
+    ) {
+      lastEmittedClipRef.current = { fileKey, startTime, sourceStart, endTime, audioSignature };
+      onSelectFile(targetClip?.file || null, startTime, fileDuration, sourceStart, endTime, activeAudioClips);
+    }
+  }, [currentTime, tracks, onSelectFile, isEncodeMode, activeTrackId]);
+
+  // Master Timeline Drag-to-Seek Scrubber for Cat Handle, Playhead Needle, and Top Ruler
+  const handleStartScrub = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!trimContainerRef.current) return;
+    setIsScrubbing(true);
+    isScrubbingRef.current = true;
+
+    const calcTimeFromEvent = (clientX: number) => {
+      if (!trimContainerRef.current) return 0;
+      const rect = trimContainerRef.current.getBoundingClientRect();
+      const clickX = clientX - rect.left;
+      const percent = Math.max(0, Math.min(1, clickX / (rect.width || 1)));
+      let targetTime = percent * computedTimelineDuration;
+
+      // Snap if enabled and in encode mode (disabled in copy mode)
+      const shouldSnap = snapEnabled && isEncodeMode;
+
+      if (shouldSnap) {
+        const snapThresholdPx = 10;
+        const snapThresholdTime = (snapThresholdPx / (rect.width || 500)) * computedTimelineDuration;
+        const snapPoints: number[] = [];
+        tracks.forEach((t) => {
+          t.clips.forEach((c) => {
+            snapPoints.push(c.startTime);
+            snapPoints.push(c.endTime);
+          });
+        });
+
+        let snappedPoint: number | null = null;
+        for (const pt of snapPoints) {
+          if (Math.abs(targetTime - pt) <= snapThresholdTime) {
+            targetTime = pt;
+            snappedPoint = pt;
+            break;
+          }
+        }
+        setSnapGuideTime(snappedPoint);
+      } else {
+        setSnapGuideTime(null);
+      }
+
+      return Math.max(0, Math.min(computedTimelineDuration, targetTime));
+    };
+
+    const initialTime = calcTimeFromEvent(e.clientX);
+    onSeek(initialTime);
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!isScrubbingRef.current) return;
+      const newTime = calcTimeFromEvent(moveEvent.clientX);
+      onSeek(newTime);
+    };
+
+    const handleMouseUp = () => {
+      setIsScrubbing(false);
+      isScrubbingRef.current = false;
+      setSnapGuideTime(null);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // Universal Clip Dragging (Supports multi-clip horizontal trimming & moving + vertical inter-track drop into same track)
+  const startTrimDrag = (
+    e: React.MouseEvent,
+    type: 'left' | 'right' | 'middle',
+    trackId: string,
+    clipId: string
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const currentTrack = tracks.find((t) => t.id === trackId);
+    if (!currentTrack || currentTrack.locked) return;
+
+    const currentClip = currentTrack.clips.find((c) => c.id === clipId);
+    if (!currentClip) return;
+
+    setActiveTrackId(trackId);
+    setActiveClipId(clipId);
+    dragHoveredTrackIdRef.current = trackId;
+    dragStartTracksRef.current = cloneTracks(tracks);
+    lastNewStartRef.current = currentClip.startTime;
+    lastNewEndRef.current = currentClip.endTime;
+
+    if (!trimContainerRef.current) return;
+
+    const startX = e.clientX;
+    const startStartTime = currentClip.startTime;
+    const startEndTime = currentClip.endTime;
+    const startSourceStartTime = currentClip.sourceStartTime || 0;
+    const startSourceEndTime =
+      currentClip.sourceEndTime || currentClip.fileDuration || (startEndTime - startStartTime);
+    const rect = trimContainerRef.current.getBoundingClientRect();
+    const containerWidth = rect.width || 500;
+    const totalDuration = computedTimelineDuration;
+    const minSpan = Math.max(0.1, (20 / containerWidth) * totalDuration);
+
+    const clipMaxDuration = currentClip.fileDuration || (currentClip.file && fileDurations[getFileKey(currentClip.file)]) || duration || 0;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const deltaTime = (deltaX / containerWidth) * totalDuration;
+      const snapThresholdPx = 12; // 12px magnetic snap radius
+      const snapThresholdTime = (snapThresholdPx / containerWidth) * totalDuration;
+
+      let newStart = startStartTime;
+      let newEnd = startEndTime;
+      let activeSnapPoint: number | null = null;
+
+      // Snap if enabled and in encode mode (disabled in copy mode)
+      const shouldSnap = snapEnabled && isEncodeMode;
+
+      if (type === 'middle') {
+        const span = startEndTime - startStartTime;
+        let rawStart = startStartTime + deltaTime;
+        let rawEnd = startEndTime + deltaTime;
+
+        if (rawStart < 0) {
+          rawStart = 0;
+          rawEnd = span;
+        }
+
+        if (shouldSnap) {
+          // Candidate snap points only across other clips
+          const snapPoints: number[] = [];
+          if (currentTime >= 0) snapPoints.push(currentTime);
+
+          tracks.forEach((t) => {
+            t.clips.forEach((c) => {
+              if (c.id !== clipId) {
+                snapPoints.push(c.startTime);
+                snapPoints.push(c.endTime);
+              }
+            });
+          });
+
+          let bestDist = Infinity;
+          let snappedStart: number | null = null;
+          let snappedEnd: number | null = null;
+          let snappedPoint: number | null = null;
+
+          for (const pt of snapPoints) {
+            // Check start edge snap
+            const distStart = Math.abs(rawStart - pt);
+            if (distStart <= snapThresholdTime && distStart < bestDist) {
+              bestDist = distStart;
+              snappedStart = pt;
+              snappedEnd = pt + span;
+              snappedPoint = pt;
+            }
+
+            // Check end edge snap
+            const distEnd = Math.abs(rawEnd - pt);
+            if (distEnd <= snapThresholdTime && distEnd < bestDist) {
+              bestDist = distEnd;
+              snappedStart = Math.max(0, pt - span);
+              snappedEnd = pt;
+              snappedPoint = pt;
+            }
+          }
+
+          if (snappedPoint !== null && snappedStart !== null && snappedEnd !== null) {
+            newStart = snappedStart;
+            newEnd = snappedEnd;
+            activeSnapPoint = snappedPoint;
+          } else {
+            newStart = Math.max(0, rawStart);
+            newEnd = Math.max(newStart + 0.1, rawEnd);
+          }
+        } else {
+          newStart = Math.max(0, rawStart);
+          newEnd = Math.max(newStart + 0.1, rawEnd);
+        }
+
+        lastNewStartRef.current = newStart;
+        lastNewEndRef.current = newEnd;
+
+        // Detect target track row on vertical drag
+        if (tracksStackRef.current) {
+          const stackRect = tracksStackRef.current.getBoundingClientRect();
+          const relY = moveEvent.clientY - stackRect.top;
+          const rowH = 56;
+          const currentDisplayed = !isEncodeMode
+            ? tracks.filter((t) => t.id === activeTrackId)
+            : tracks;
+          const totalRows = currentDisplayed.length;
+
+          if (isEncodeMode && relY >= totalRows * rowH - 12) {
+            dragHoveredTrackIdRef.current = 'CREATE_NEW_TRACK';
+            setHoveredDropTrackId('CREATE_NEW_TRACK');
+            const snapPrefix = activeSnapPoint !== null ? `🧲 Snap (${formatTime(activeSnapPoint)}) ` : '';
+            setDragTooltip(`${snapPrefix}[+ Create New Track] Move clip to new bottom track`);
+          } else {
+            const clampedIdx = Math.max(0, Math.min(currentDisplayed.length - 1, Math.floor(relY / rowH)));
+            const targetTrack = currentDisplayed[clampedIdx];
+            if (targetTrack) {
+              dragHoveredTrackIdRef.current = targetTrack.id;
+              setHoveredDropTrackId(targetTrack.id);
+
+              const snapPrefix = activeSnapPoint !== null ? `🧲 Snap (${formatTime(activeSnapPoint)}) ` : '';
+              if (targetTrack.id !== trackId) {
+                setDragTooltip(
+                  `${snapPrefix}[Move to ${getDisplayTrackName(targetTrack, tracks)}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
+                    newEnd - newStart
+                  )})`
+                );
+              } else {
+                setDragTooltip(
+                  `${snapPrefix}[${getDisplayTrackName(currentTrack, tracks)}] ${formatTime(newStart)} - ${formatTime(newEnd)} (${formatTime(
+                    newEnd - newStart
+                  )})`
+                );
+              }
+            }
+          }
+        }
+      } else if (type === 'left') {
+        let rawStart = startStartTime + deltaTime;
+        // In Copy Mode / Single track, cannot expand left beyond 0 or past duration
+        // Also cannot expand left past the original source start if source is at 0
+        const isImage = currentClip.mediaType === 'image' || currentClip.file?.type.startsWith('image/');
+        const minPossibleStart = (!isEncodeMode || isImage) ? 0 : Math.max(0, startStartTime - startSourceStartTime);
+        rawStart = Math.max(minPossibleStart, Math.min(rawStart, startEndTime - minSpan));
+
+        if (shouldSnap) {
+          const snapPoints: number[] = [];
+          if (currentTime >= 0) snapPoints.push(currentTime);
+          tracks.forEach((t) => {
+            t.clips.forEach((c) => {
+              if (c.id !== clipId) {
+                snapPoints.push(c.startTime);
+                snapPoints.push(c.endTime);
+              }
+            });
+          });
+
+          let bestDist = Infinity;
+          let snappedVal: number | null = null;
+          for (const pt of snapPoints) {
+            if (pt >= minPossibleStart && pt <= startEndTime - minSpan) {
+              const dist = Math.abs(rawStart - pt);
+              if (dist <= snapThresholdTime && dist < bestDist) {
+                bestDist = dist;
+                snappedVal = pt;
+              }
+            }
+          }
+
+          if (snappedVal !== null) {
+            newStart = snappedVal;
+            activeSnapPoint = snappedVal;
+          } else {
+            newStart = rawStart;
+          }
+        } else {
+          newStart = rawStart;
+        }
+
+        lastNewStartRef.current = newStart;
+        const snapPrefix = activeSnapPoint !== null ? `🧲 Snap (${formatTime(activeSnapPoint)}) ` : '';
+        setDragTooltip(`${snapPrefix}[${currentClip.name}] In: ${formatTime(newStart)}`);
+      } else if (type === 'right') {
+        let rawEnd = startEndTime + deltaTime;
+        // Limit rawEnd to not exceed original video/media duration
+        const isImage = currentClip.mediaType === 'image' || currentClip.file?.type.startsWith('image/');
+        const maxPossibleEnd = isImage 
+          ? Infinity 
+          : (!isEncodeMode
+            ? (clipMaxDuration > 0 ? clipMaxDuration : totalDuration)
+            : (clipMaxDuration > 0 ? startStartTime + (clipMaxDuration - startSourceStartTime) : Infinity));
+
+        rawEnd = Math.max(startStartTime + minSpan, Math.min(rawEnd, maxPossibleEnd));
+
+        if (shouldSnap) {
+          const snapPoints: number[] = [];
+          if (currentTime >= 0) snapPoints.push(currentTime);
+          tracks.forEach((t) => {
+            t.clips.forEach((c) => {
+              if (c.id !== clipId) {
+                snapPoints.push(c.startTime);
+                snapPoints.push(c.endTime);
+              }
+            });
+          });
+
+          let bestDist = Infinity;
+          let snappedVal: number | null = null;
+          for (const pt of snapPoints) {
+            if (pt >= startStartTime + minSpan && pt <= maxPossibleEnd) {
+              const dist = Math.abs(rawEnd - pt);
+              if (dist <= snapThresholdTime && dist < bestDist) {
+                bestDist = dist;
+                snappedVal = pt;
+              }
+            }
+          }
+
+          if (snappedVal !== null) {
+            newEnd = snappedVal;
+            activeSnapPoint = snappedVal;
+          } else {
+            newEnd = rawEnd;
+          }
+        } else {
+          newEnd = rawEnd;
+        }
+
+        lastNewEndRef.current = newEnd;
+        const snapPrefix = activeSnapPoint !== null ? `🧲 Snap (${formatTime(activeSnapPoint)}) ` : '';
+        setDragTooltip(`${snapPrefix}[${currentClip.name}] Out: ${formatTime(newEnd)}`);
+      }
+
+      setSnapGuideTime(activeSnapPoint);
+
+      let newSourceStart = startSourceStartTime;
+      let newSourceEnd = startSourceEndTime;
+      if (type === 'left') {
+        newSourceStart = Math.max(0, startSourceStartTime + (newStart - startStartTime));
+      } else if (type === 'right') {
+        newSourceEnd = startSourceStartTime + (newEnd - startStartTime);
+      }
+
+      setTracks((prev) =>
+        prev.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                clips: t.clips.map((c) =>
+                  c.id === clipId
+                    ? {
+                        ...c,
+                        startTime: newStart,
+                        endTime: newEnd,
+                        sourceStartTime: newSourceStart,
+                        sourceEndTime: newSourceEnd,
+                        isTrimmed: type === 'left' || type === 'right' ? true : c.isTrimmed,
+                      }
+                    : c
+                ),
+              }
+            : t
+        )
+      );
+
+      if (!isEncodeMode || trackId === 'track-1' || trackId === activeTrackId) {
+        onStartTimeChange(newStart);
+        onEndTimeChange(newEnd);
+      }
+
+      if (type === 'right') {
+        onSeek(newEnd);
+      } else {
+        onSeek(newStart);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setDragTooltip(null);
+      setHoveredDropTrackId(null);
+      setSnapGuideTime(null);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+
+      const finalTargetId = dragHoveredTrackIdRef.current || trackId;
+      const finalStart = lastNewStartRef.current;
+      const finalEnd = lastNewEndRef.current;
+
+      if (!isEncodeMode || trackId === 'track-1' || trackId === activeTrackId) {
+        onStartTimeChange(finalStart);
+        onEndTimeChange(finalEnd);
+      }
+
+      if (type === 'right') {
+        onSeek(finalEnd);
+      } else {
+        onSeek(finalStart);
+      }
+
+      const hasChanged = finalStart !== startStartTime || finalEnd !== startEndTime || finalTargetId !== trackId;
+      if (hasChanged && dragStartTracksRef.current) {
+        commitToHistory(dragStartTracksRef.current);
+      }
+
+      let finalSourceStart = startSourceStartTime;
+      let finalSourceEnd = startSourceEndTime;
+      if (type === 'left') {
+        finalSourceStart = Math.max(0, startSourceStartTime + (finalStart - startStartTime));
+      } else if (type === 'right') {
+        finalSourceEnd = startSourceStartTime + (finalEnd - startStartTime);
+      }
+
+      if (type === 'middle' && finalTargetId !== trackId) {
+        if (finalTargetId === 'CREATE_NEW_TRACK') {
+          const newTrackId = `track-${Date.now()}`;
+          setTracks((prev) => {
+            const src = prev.find((t) => t.id === trackId);
+            if (!src) return prev;
+
+            const clipToMove = src.clips.find((c) => c.id === clipId);
+            if (!clipToMove) return prev;
+
+            const updatedClip = {
+              ...clipToMove,
+              startTime: finalStart,
+              endTime: finalEnd,
+              sourceStartTime: finalSourceStart,
+              sourceEndTime: finalSourceEnd,
+            };
+
+            const colors: (keyof typeof COLOR_CLASSES)[] = ['indigo', 'violet', 'emerald', 'cyan', 'amber', 'rose', 'fuchsia'];
+            const nextColor = colors[prev.length % colors.length];
+
+            const newTrack: TimelineTrackData = {
+              id: newTrackId,
+              name: `Track ${prev.length + 1}`,
+              clips: [updatedClip],
+              mediaType: clipToMove.mediaType || 'video',
+              color: nextColor,
+              muted: false,
+              locked: false,
+              hidden: false,
+            };
+
+            const updated = prev.map((t) => {
+              if (t.id === trackId) {
+                return { ...t, clips: t.clips.filter((c) => c.id !== clipId) };
+              }
+              return t;
+            });
+
+            return cleanupEmptyTracks([...updated, newTrack]);
+          });
+
+          setActiveTrackId(newTrackId);
+          setActiveClipId(clipId);
+          if (currentClip.file && onSelectFile && !isEncodeMode) {
+            onSelectFile(currentClip.file, finalStart, currentClip.fileDuration, finalSourceStart, finalEnd);
+          }
+        } else {
+          // Move clip from source track into destination track
+          setTracks((prev) => {
+            const src = prev.find((t) => t.id === trackId);
+            const dest = prev.find((t) => t.id === finalTargetId);
+            if (!src || !dest) return prev;
+
+            const clipToMove = src.clips.find((c) => c.id === clipId);
+            if (!clipToMove) return prev;
+
+            const updatedClip = {
+              ...clipToMove,
+              startTime: finalStart,
+              endTime: finalEnd,
+              sourceStartTime: finalSourceStart,
+              sourceEndTime: finalSourceEnd,
+            };
+
+            const updated = prev.map((t) => {
+              if (t.id === trackId) {
+                return { ...t, clips: t.clips.filter((c) => c.id !== clipId) };
+              }
+              if (t.id === finalTargetId) {
+                return { ...t, clips: [...t.clips, updatedClip] };
+              }
+              return t;
+            });
+            return cleanupEmptyTracks(updated);
+          });
+
+          setActiveTrackId(finalTargetId);
+          setActiveClipId(clipId);
+          if (currentClip.file && onSelectFile && !isEncodeMode) {
+            onSelectFile(currentClip.file, finalStart, currentClip.fileDuration, finalSourceStart, finalEnd);
+          }
+        }
+      } else {
+        setTracks((prev) =>
+          prev.map((t) =>
+            t.id === trackId
+              ? {
+                  ...t,
+                  clips: t.clips.map((c) =>
+                    c.id === clipId
+                      ? {
+                          ...c,
+                          startTime: finalStart,
+                          endTime: finalEnd,
+                          sourceStartTime: finalSourceStart,
+                          sourceEndTime: finalSourceEnd,
+                        }
+                      : c
+                  ),
+                }
+              : t
+          )
+        );
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // Split at playhead: cuts the clip under playhead into TWO clips inside the track
+  const handleSplitAtPlayhead = () => {
+    if (computedTimelineDuration <= 0) return;
+    const pos = currentTime;
+
+    if (isEncodeMode) {
+      // =========================================================================
+      // 🔴 ENCODE MODE: Split Logic & Track State Update
+      // =========================================================================
+      const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+      if (!activeTrack) return;
+
+      const targetClip =
+        activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
+        tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
+
+      if (!targetClip) return;
+
+      const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id)) || activeTrack;
+
+      commitToHistory();
+
+      const offset = pos - targetClip.startTime;
+      const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
+
+      const clipA: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-a-${Date.now()}`,
+        startTime: targetClip.startTime,
+        endTime: pos,
+        sourceStartTime: targetClip.sourceStartTime || 0,
+        sourceEndTime: splitSourcePos,
+        isTrimmed: true,
+      };
+
+      const clipB: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-b-${Date.now()}`,
+        startTime: pos,
+        endTime: targetClip.endTime,
+        sourceStartTime: splitSourcePos,
+        sourceEndTime:
+          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
+        isTrimmed: true,
+      };
+
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id === parentTrack.id) {
+            const newClips: TimelineClip[] = [];
+            t.clips.forEach((c) => {
+              if (c.id === targetClip.id) {
+                newClips.push(clipA, clipB);
+              } else {
+                newClips.push(c);
+              }
+            });
+            return { ...t, clips: newClips };
+          }
+          return t;
+        })
+      );
+
+      setActiveClipId(clipB.id);
+    } else {
+      // =========================================================================
+      // 🔵 COPY MODE: Split Logic & Track State Update (Split into 2 parts for user selection)
+      // =========================================================================
+      const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+      if (!activeTrack) return;
+
+      const targetClip =
+        activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
+        tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
+
+      if (!targetClip) return;
+
+      const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id)) || activeTrack;
+
+      commitToHistory();
+
+      const offset = pos - targetClip.startTime;
+      const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
+
+      const clipA: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-a-${Date.now()}`,
+        startTime: targetClip.startTime,
+        endTime: pos,
+        sourceStartTime: targetClip.sourceStartTime || 0,
+        sourceEndTime: splitSourcePos,
+        isTrimmed: true,
+      };
+
+      const clipB: TimelineClip = {
+        ...targetClip,
+        id: `${targetClip.id}-b-${Date.now()}`,
+        startTime: pos,
+        endTime: targetClip.endTime,
+        sourceStartTime: splitSourcePos,
+        sourceEndTime:
+          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
+        isTrimmed: true,
+      };
+
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id === parentTrack.id) {
+            const newClips: TimelineClip[] = [];
+            t.clips.forEach((c) => {
+              if (c.id === targetClip.id) {
+                newClips.push(clipA, clipB);
+              } else {
+                newClips.push(c);
+              }
+            });
+            return { ...t, clips: newClips };
+          }
+          return t;
+        })
+      );
+
+      setActiveClipId(clipB.id);
+    }
+  };
+
+  // Mark In
+  const handleMarkIn = () => {
+    const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+    const targetClip = activeTrack.clips.find((c) => c.id === activeClipId) || activeTrack.clips[0];
+    if (targetClip && currentTime < targetClip.endTime) {
+      commitToHistory();
+      setTracks((prev) =>
+        prev.map((t) =>
+          t.id === activeTrack.id
+            ? {
+                ...t,
+                clips: t.clips.map((c) => (c.id === targetClip.id ? { ...c, startTime: currentTime } : c)),
+              }
+            : t
+        )
+      );
+      if (activeTrack.id === 'track-1') {
+        onStartTimeChange(currentTime);
+      }
+    }
+  };
+
+  // Mark Out
+  const handleMarkOut = () => {
+    const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+    const targetClip = activeTrack.clips.find((c) => c.id === activeClipId) || activeTrack.clips[0];
+    if (targetClip && currentTime > targetClip.startTime) {
+      commitToHistory();
+      setTracks((prev) =>
+        prev.map((t) =>
+          t.id === activeTrack.id
+            ? {
+                ...t,
+                clips: t.clips.map((c) => (c.id === targetClip.id ? { ...c, endTime: currentTime } : c)),
+              }
+            : t
+        )
+      );
+      if (activeTrack.id === 'track-1') {
+        onEndTimeChange(currentTime);
+      }
+    }
+  };
+
+  const progressPercent =
+    computedTimelineDuration > 0 ? (currentTime / computedTimelineDuration) * 100 : 0;
+
+  // Ruler tick marks memoized and capped so multi-hour videos never create thousands of DOM nodes per frame
+  const activeZoomLevel = isEncodeMode ? encodeZoomLevel : copyZoomLevel;
+  const rulerTicks = useMemo(() => {
+    const rawTicks = Math.ceil((computedTimelineDuration / BASE_DURATION) * 10 * activeZoomLevel);
+    const tickCount = Math.max(6, Math.min(120, rawTicks));
+    const ticks: { percent: number; time: string }[] = [];
+    for (let i = 0; i <= tickCount; i++) {
+      const timeVal = (i / tickCount) * computedTimelineDuration;
+      ticks.push({
+        percent: (i / tickCount) * 100,
+        time: formatTime(timeVal),
+      });
+    }
+    return ticks;
+  }, [computedTimelineDuration, BASE_DURATION, activeZoomLevel]);
+
+  // =========================================================================
+  // 🚀 HIGH-PRECISION INTERACTIVE HORIZONTAL SCROLL & JUMP NAVIGATOR
+  // =========================================================================
+  const [scrollState, setScrollState] = useState({ scrollLeft: 0, scrollWidth: 1, clientWidth: 1 });
+  const customScrollTrackRef = useRef<HTMLDivElement>(null);
+
+  const updateScrollState = useCallback(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    setScrollState((prev) => {
+      if (
+        prev.scrollLeft === el.scrollLeft &&
+        prev.scrollWidth === el.scrollWidth &&
+        prev.clientWidth === el.clientWidth
+      ) {
+        return prev;
+      }
+      return {
+        scrollLeft: el.scrollLeft,
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+      };
+    });
+  }, []);
+
+  useEffect(() => {
+    updateScrollState();
+    const el = timelineScrollRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      updateScrollState();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [updateScrollState, activeZoomLevel, computedTimelineDuration, tracks]);
+
+  // Click on horizontal track to JUMP immediately to that position + drag support
+  const handleScrollTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const track = customScrollTrackRef.current;
+    const scrollEl = timelineScrollRef.current;
+    if (!track || !scrollEl) return;
+
+    const rect = track.getBoundingClientRect();
+    const scrollableWidth = scrollEl.scrollWidth - scrollEl.clientWidth;
+    if (scrollableWidth <= 0 || rect.width <= 0) return;
+
+    const thumbRatio = Math.max(0.03, Math.min(1, scrollEl.clientWidth / scrollEl.scrollWidth));
+    const thumbPixelWidth = Math.max(28, thumbRatio * rect.width);
+    const trackTravelWidth = Math.max(1, rect.width - thumbPixelWidth);
+
+    const jumpToClientX = (clientX: number) => {
+      const clickX = clientX - rect.left;
+      const targetThumbLeft = clickX - thumbPixelWidth / 2;
+      const newRatio = Math.max(0, Math.min(1, targetThumbLeft / trackTravelWidth));
+      scrollEl.scrollLeft = newRatio * scrollableWidth;
+      setScrollState({
+        scrollLeft: scrollEl.scrollLeft,
+        scrollWidth: scrollEl.scrollWidth,
+        clientWidth: scrollEl.clientWidth,
+      });
+    };
+
+    // Instant Jump!
+    jumpToClientX(e.clientX);
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      jumpToClientX(moveEvent.clientX);
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // Drag thumb directly
+  const handleThumbMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const track = customScrollTrackRef.current;
+    const scrollEl = timelineScrollRef.current;
+    if (!track || !scrollEl) return;
+
+    const rect = track.getBoundingClientRect();
+    const scrollableWidth = scrollEl.scrollWidth - scrollEl.clientWidth;
+    if (scrollableWidth <= 0 || rect.width <= 0) return;
+
+    const thumbRatio = Math.max(0.03, Math.min(1, scrollEl.clientWidth / scrollEl.scrollWidth));
+    const thumbPixelWidth = Math.max(28, thumbRatio * rect.width);
+    const trackTravelWidth = Math.max(1, rect.width - thumbPixelWidth);
+
+    const startClientX = e.clientX;
+    const startScrollLeft = scrollEl.scrollLeft;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startClientX;
+      const deltaScroll = (deltaX / trackTravelWidth) * scrollableWidth;
+      scrollEl.scrollLeft = Math.max(0, Math.min(scrollableWidth, startScrollLeft + deltaScroll));
+      setScrollState({
+        scrollLeft: scrollEl.scrollLeft,
+        scrollWidth: scrollEl.scrollWidth,
+        clientWidth: scrollEl.clientWidth,
+      });
+    };
+
+    const handleMouseUp = () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const scrollableTimelineWidth = Math.max(0, scrollState.scrollWidth - scrollState.clientWidth);
+  const thumbWidthRatio = scrollState.scrollWidth > 0 
+    ? Math.max(0.03, Math.min(1, scrollState.clientWidth / scrollState.scrollWidth)) 
+    : 1;
+  const thumbWidthPct = thumbWidthRatio * 100;
+  const scrollRatio = scrollableTimelineWidth > 0 ? scrollState.scrollLeft / scrollableTimelineWidth : 0;
+  const thumbLeftPct = scrollRatio * (100 - thumbWidthPct);
+
+  const displayedTracks = isEncodeMode 
+    ? tracks 
+    : (tracks.filter((t) => t.id === activeTrackId).length ? tracks.filter((t) => t.id === activeTrackId) : tracks.slice(0, 1));
+
+  const effectiveTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+  const effectiveTrackIdx = displayedTracks.findIndex((t) => t.id === effectiveTrack?.id);
+  const effectiveClip =
+    (activeClipId ? effectiveTrack?.clips?.find((c) => c.id === activeClipId) : null) ||
+    effectiveTrack?.clips?.[0];
+  const effectiveClipIndex = effectiveClip ? effectiveTrack.clips.findIndex(c => c.id === effectiveClip.id) : -1;
+
+  const getMediaIcon = (type: MediaType) => {
+    switch (type) {
+      case 'video':
+        return <VideoIcon className="w-3 h-3 text-indigo-400" />;
+      case 'audio':
+        return <Music className="w-3 h-3 text-emerald-400" />;
+      case 'image':
+        return <ImageIcon className="w-3 h-3 text-amber-400" />;
+      case 'text':
+        return <FileSpreadsheet className="w-3 h-3 text-rose-400" />;
+      default:
+        return <Disc className="w-3 h-3 text-cyan-400" />;
+    }
+  };
+
+  // In Copy Mode, if any track has > 1 clips (after split), the user must delete the unwanted piece first
+  const isPendingDeleteInCopyMode = !isEncodeMode && tracks.some((t) => (t.clips || []).length > 1);
+
+  return (
+    <div
+      style={{ height: `${timelineHeight}px` }}
+      className={`backdrop-blur-xl bg-slate-950/95 border-t border-white/15 px-4 pt-2.5 pb-2 flex flex-col space-y-2 select-none relative shrink-0 z-20 ${
+        isResizingHeight ? 'transition-none' : 'transition-[height] duration-100 ease-out'
+      }`}
+    >
+      {/* Top Splitter / Resize Drag Bar (Drag up/down to resize tools panel) */}
+      <div
+        className="absolute -top-2 left-0 right-0 h-4.5 z-50 cursor-row-resize flex items-center justify-center group select-none"
+        onMouseDown={(e) => {
+          e.preventDefault();
+          startHeightResize(e.clientY);
+        }}
+        onTouchStart={(e) => {
+          if (e.touches.length > 0) {
+            startHeightResize(e.touches[0].clientY);
+          }
+        }}
+      >
+        <div className="w-20 h-1 rounded-full bg-slate-600/50 group-hover:bg-indigo-400 group-hover:h-1.5 group-hover:w-28 transition-all duration-150 shadow-sm flex items-center justify-center">
+          <div className="w-6 h-0.5 bg-slate-300/40 rounded-full" />
+        </div>
+      </div>
+
+      {/* Hidden File Input for Direct Track Media Upload */}
+      <input
+        ref={trackFileInputRef}
+        type="file"
+        accept="video/*,audio/*,image/*"
+        className="hidden"
+        onChange={handleTrackFileChange}
+      />
+
+      {/* Top Controls Toolbar */}
+      <div className="flex items-center justify-between gap-3 text-sm text-slate-300">
+        {/* Playback Controls & Time Display & Auto-Expanding File Bar */}
+        <div className="flex-1 min-w-0 flex items-center space-x-3">
+          <div className="flex items-center space-x-1.5 shrink-0">
+            <button
+              onClick={onFullscreenClick}
+              className="h-8 w-8 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center shadow-sm border border-white/10 transition shrink-0 cursor-pointer"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={onTogglePlay}
+              className={`h-8 w-8 rounded-lg flex items-center justify-center text-white shadow-md transition shrink-0 cursor-pointer ${
+                isEncodeMode
+                  ? 'bg-violet-600 hover:bg-violet-500 shadow-violet-600/30'
+                  : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/20'
+              }`}
+            >
+              {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
+            </button>
+          </div>
+
+          <div className="font-mono text-xs font-medium leading-snug flex flex-col justify-center shrink-0 select-none">
+            <span className={isEncodeMode ? 'text-violet-400 font-bold' : 'text-indigo-400 font-bold'}>
+              {formatTime(currentTime, computedTimelineDuration)}
+            </span>
+            <span className="text-slate-400 font-bold text-[10px]">
+              {formatTime(computedTimelineDuration || 0)}
+            </span>
+          </div>
+
+          {/* Timeline Editing Split Button & Track/Clip Quick Tools (Available in both Encode Mode and Copy Mode) */}
+          <div className="flex items-center space-x-1.5 pl-2 border-l border-white/10 shrink-0">
+            {/* Undo & Redo Buttons */}
+            <div className="flex items-center space-x-1">
+              <button
+                onClick={handleUndo}
+                disabled={!canUndo}
+                className="h-8 w-8 bg-slate-800/90 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800/90 text-slate-200 hover:text-white rounded-lg border border-white/10 flex items-center justify-center transition cursor-pointer disabled:cursor-not-allowed shadow-sm"
+                aria-label="Undo"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={handleRedo}
+                disabled={!canRedo}
+                className="h-8 w-8 bg-slate-800/90 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800/90 text-slate-200 hover:text-white rounded-lg border border-white/10 flex items-center justify-center transition cursor-pointer disabled:cursor-not-allowed shadow-sm"
+                aria-label="Redo"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Split (Cut) Button */}
+            <button
+              onClick={handleSplitAtPlayhead}
+              className={`h-8 px-2.5 bg-slate-800/90 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg border border-white/10 text-xs font-medium flex items-center space-x-1.5 transition cursor-pointer shadow-sm ${
+                isEncodeMode ? 'hover:border-violet-500/50' : 'hover:border-indigo-500/50'
+              }`}
+            >
+              <Scissors className={`w-3.5 h-3.5 ${isEncodeMode ? 'text-violet-400' : 'text-indigo-400'}`} />
+              <span className="hidden sm:inline">Split</span>
+            </button>
+
+            {/* Track & Clip Quick Action Tools (Only in Encode Mode) */}
+            {isEncodeMode && effectiveTrack && effectiveClip && (
+              <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-2 shadow-sm relative shrink-0">
+                {/* Track Name Badge */}
+                <span 
+                  className="text-xs font-medium text-slate-200 select-none hidden sm:inline-flex items-center max-w-[250px] truncate"
+                  title={effectiveClip.name || getDisplayTrackName(effectiveTrack, tracks)}
+                >
+                  {effectiveClipIndex >= 0 && (
+                    <span className="mr-1.5 shrink-0 text-slate-400 font-medium">
+                      Track {tracks.findIndex(t => t.id === effectiveTrack?.id) + 1}-{effectiveClipIndex + 1} |
+                    </span>
+                  )}
+                  <span className="truncate">{effectiveClip.name || getDisplayTrackName(effectiveTrack, tracks)}</span>
+                </span>
+
+                {/* Vertical Divider */}
+                <div className="w-px h-3.5 bg-white/15 mx-0.5 hidden sm:block" />
+
+                {/* Duplicate Clip */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDuplicateClip(effectiveTrack.id, effectiveClip.id);
+                  }}
+                  className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 rounded transition cursor-pointer"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
+
+                {/* Delete Clip */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteClip(effectiveTrack.id, effectiveClip.id);
+                  }}
+                  className="h-6 w-6 flex items-center justify-center text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 rounded transition cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Multi-file Reorder Bar (Fast Copy / Remux mode only - hidden in Encode mode) */}
+          {!isEncodeMode && selectedFiles && selectedFiles.length > 1 && (
+            <div className="flex-1 min-w-0 flex items-center space-x-1.5 pl-2 border-l border-white/10 overflow-hidden">
+              <div className="text-[10px] font-semibold text-indigo-400 whitespace-nowrap bg-indigo-950/80 px-2 py-1 rounded border border-indigo-500/30 flex items-center space-x-1 shrink-0">
+                <span>Files ({selectedFiles.length})</span>
+              </div>
+              <div className="flex items-center space-x-1 overflow-x-auto py-0.5 flex-1 min-w-0">
+                {selectedFiles.map((file, idx) => (
+                  <div
+                    key={idx}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, idx)}
+                    onDragOver={handleDragOver}
+                    onDrop={(e) => handleDrop(e, idx)}
+                    onClick={() => {
+                      if (tracks[idx]) {
+                        setActiveTrackId(tracks[idx].id);
+                      }
+                      if (!isEncodeMode) {
+                        onSelectFile?.(file);
+                      }
+                    }}
+                    className={`flex items-center space-x-1 bg-slate-900/90 border ${
+                      draggedIdx === idx
+                        ? 'border-indigo-400 opacity-50'
+                        : selectedFiles[idx]?.name ===
+                          (tracks.find((t) => t.id === activeTrackId)?.fileName ||
+                            tracks.find((t) => t.id === activeTrackId)?.name)
+                        ? 'border-indigo-400 bg-indigo-950/70 shadow-[0_0_8px_rgba(99,102,241,0.3)]'
+                        : 'border-white/10 hover:border-indigo-500/50'
+                    } px-2 py-0.5 rounded text-[11px] whitespace-nowrap cursor-pointer transition shrink-0`}
+                  >
+                    <span className="text-indigo-300 font-mono font-bold">#{idx + 1}</span>
+                    <span className="text-slate-200 truncate max-w-[120px] lg:max-w-[180px]">
+                      {file.name}
+                    </span>
+                    <div className="flex items-center space-x-0.5 ml-1 pl-1 border-l border-white/10">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          moveFile(idx, 'left');
+                        }}
+                        disabled={idx === 0}
+                        className="p-0.5 hover:bg-white/10 rounded disabled:opacity-30 text-slate-300 cursor-pointer"
+                      >
+                        ‹
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          moveFile(idx, 'right');
+                        }}
+                        disabled={idx === selectedFiles.length - 1}
+                        className="p-0.5 hover:bg-white/10 rounded disabled:opacity-30 text-slate-300 cursor-pointer"
+                      >
+                        ›
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Action Buttons Cluster */}
+        <div className="flex items-center space-x-1.5 shrink-0">
+          {/* Zoom Controls (Available in both Copy Mode & Encode Mode with separated conditions) */}
+          <div className="h-8 flex items-center space-x-1 bg-slate-800/90 border border-white/10 rounded-lg px-1.5 shrink-0 shadow-sm">
+            <button
+              onClick={handleZoomOut}
+              disabled={activeZoomLevel <= 0.1}
+              className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
+            >
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <span className="text-xs font-medium text-slate-200 px-1 select-none flex items-center">
+              {activeZoomLevel.toFixed(1)}x
+            </span>
+            <button
+              onClick={handleZoomIn}
+              disabled={activeZoomLevel >= 5.0}
+              className="h-6 w-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent rounded transition cursor-pointer"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Add Media Button */}
+          <button
+            onClick={onMultiUploadClick || onUploadClick}
+            className="h-8 w-8 flex items-center justify-center bg-white/5 hover:bg-white/10 text-slate-200 rounded-lg transition border border-white/10 backdrop-blur-sm group shrink-0 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5 text-indigo-400 group-hover:scale-110 transition-transform" />
+          </button>
+
+          {/* Remux Button: ONLY shown when NOT in Encode Mode */}
+          {!isEncodeMode && (!selectedFiles || selectedFiles.length <= 1) && (
+            <button
+              onClick={() => {
+                if (isPendingDeleteInCopyMode) return;
+                onExportClick(tracks, 'remux');
+              }}
+              disabled={isProcessing || isPendingDeleteInCopyMode}
+              className={`h-8 px-2.5 flex items-center justify-center rounded-lg text-[11px] font-semibold transition shrink-0 ${
+                isPendingDeleteInCopyMode
+                  ? 'bg-black text-slate-600 border border-slate-800/80 cursor-not-allowed opacity-40 shadow-none pointer-events-none'
+                  : 'bg-indigo-950/60 hover:bg-indigo-900/80 disabled:bg-indigo-950/30 text-indigo-200 border border-indigo-500/30 backdrop-blur-sm shadow-md transform active:scale-95 cursor-pointer'
+              }`}
+            >
+              <span>Remux</span>
+            </button>
+          )}
+
+          {/* Export / Encode Button */}
+          {(() => {
+            const isPendingDelete = isPendingDeleteInCopyMode;
+            return (
+              <button
+                onClick={() => {
+                  if (isPendingDelete) return;
+                  onExportClick(tracks, 'export');
+                }}
+                disabled={isProcessing || isPendingDelete}
+                className={`h-8 px-3.5 flex items-center space-x-1 rounded-lg text-xs font-semibold shadow-md transition shrink-0 ${
+                  isPendingDelete
+                    ? 'bg-black text-slate-600 border border-slate-800/80 cursor-not-allowed opacity-40 shadow-none pointer-events-none'
+                    : isEncodeMode
+                    ? 'bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 shadow-violet-500/25 text-white transform active:scale-95 cursor-pointer'
+                    : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-500/20 text-white transform active:scale-95 cursor-pointer'
+                }`}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>{isEncodeMode ? 'Encode' : 'Export'}</span>
+              </button>
+            );
+          })()}
+        </div>
+      </div>
+
+      {/* Universal Timeline Workspace (Same unified layout & calculation for Copy Mode and Encode Mode) */}
+      {!computedTimelineDuration || computedTimelineDuration <= 0 ? (
+        /* Empty / Idle State Timeline with clean ruler and empty track placeholder */
+        <div className="flex border border-white/15 rounded-xl overflow-hidden bg-black/60 shadow-inner select-none opacity-60 flex-1 min-h-0">
+          {/* Left Track Header */}
+          <div className="w-44 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col divide-y divide-white/10 z-20">
+            <div className="h-4 bg-black/80 px-2 flex items-center justify-between border-b border-white/10 shrink-0">
+              <span className="text-[8px] font-mono text-slate-500 uppercase tracking-wider">Track</span>
+              <span className="text-[8px] font-mono text-slate-500">Ready</span>
+            </div>
+            <div className="h-14 px-2 py-1 flex items-center justify-between bg-slate-900/40 shrink-0">
+              <div className="flex items-center space-x-1.5">
+                <VideoIcon className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-[11px] font-medium text-slate-500">Main Video</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Empty Ruler & Track Area */}
+          <div className="flex-1 relative overflow-hidden flex flex-col min-h-0">
+            <div className="h-4 bg-black/70 border-b border-white/10 flex items-center relative shrink-0">
+              {['00:00.0', '00:05.0', '00:10.0', '00:15.0', '00:20.0', '00:25.0', '00:30.0'].map((tick, i) => (
+                <div
+                  key={i}
+                  className="absolute top-0 bottom-0 border-l border-white/15 pl-0.5 flex items-center"
+                  style={{ left: `${(i / 6) * 100}%` }}
+                >
+                  <span className="text-[8px] font-mono text-slate-600 leading-none">{tick}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex-1 min-h-[56px] bg-slate-950/60 relative [background-image:linear-gradient(to_right,rgba(255,255,255,0.03)_1px,transparent_1px)] [background-size:28px_100%] flex items-center justify-center">
+              <div className="text-[11px] text-slate-500 font-mono flex items-center space-x-1.5 pointer-events-none">
+                <span>Timeline Ready</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex border border-white/15 rounded-xl overflow-hidden bg-black/60 shadow-inner flex-1 min-h-0">
+          {/* Track Headers Panel (Left side: Name, Media Type Tag, Mute, Lock, Hide, Color, Upload, Delete) - Full height without horizontal split */}
+          <div
+            ref={leftHeadersScrollRef}
+            onScroll={(e) => {
+              if (timelineScrollRef.current && timelineScrollRef.current.scrollTop !== e.currentTarget.scrollTop) {
+                timelineScrollRef.current.scrollTop = e.currentTarget.scrollTop;
+              }
+            }}
+            className="w-32 shrink-0 bg-slate-950/95 border-r border-white/10 flex flex-col z-20 overflow-y-auto min-h-0 no-scrollbar"
+          >
+            {/* Top Header Label */}
+            <div className="h-4 bg-black/80 px-2 flex items-center justify-center border-b border-white/10 shrink-0 sticky top-0 z-30">
+              <span className="text-[9px] font-mono text-indigo-400 font-bold">
+                {isEncodeMode ? `${displayedTracks.length} Tracks` : "Ready"}
+              </span>
+            </div>
+
+          {/* Track Headers List */}
+          <div className="flex flex-col divide-y divide-white/10">
+          {displayedTracks.map((track) => {
+            const isActive = activeTrackId === track.id;
+            const colorConfig = COLOR_CLASSES[track.color] || COLOR_CLASSES.indigo;
+            const isEditing = editingTrackId === track.id;
+
+            return (
+              <div
+                key={track.id}
+                onClick={() => {
+                  setActiveTrackId(track.id);
+                  const firstClip = track.clips?.[0];
+                  if (firstClip) {
+                    setActiveClipId(firstClip.id);
+                  }
+                  if (firstClip?.file && onSelectFile && !isEncodeMode) {
+                    onSelectFile(firstClip.file, firstClip.startTime, firstClip.fileDuration);
+                  }
+                }}
+                className={`h-14 px-2 py-1 flex flex-col justify-between cursor-pointer transition ${
+                  isActive
+                    ? `${colorConfig.headerBg} border-l-2 ${colorConfig.headerBorder}`
+                    : 'hover:bg-white/5 border-l-2 border-transparent'
+                }`}
+              >
+                {/* Track Top Row: Icon + Name / Inline Edit + Color / Delete */}
+                <div className="flex items-center justify-between space-x-1">
+                  <div className="flex items-center space-x-1 overflow-hidden flex-1">
+                    {/* Media Type Switcher Button */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        cycleMediaType(track.id);
+                      }}
+                      className="p-0.5 rounded hover:bg-white/10 transition cursor-pointer"
+                    >
+                      {getMediaIcon(track.mediaType)}
+                    </button>
+
+                    {/* Track Name or Inline Input */}
+                    {isEditing ? (
+                      <div className="flex items-center space-x-0.5 flex-1" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="text"
+                          value={editingName}
+                          onChange={(e) => setEditingName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleSaveRename(track.id);
+                            if (e.key === 'Escape') setEditingTrackId(null);
+                          }}
+                          autoFocus
+                          className="bg-slate-900 text-white text-[10px] px-1 py-0.2 rounded border border-indigo-500 w-full focus:outline-none"
+                        />
+                        <button
+                          onClick={() => handleSaveRename(track.id)}
+                          className="p-0.5 text-emerald-400 hover:text-emerald-300"
+                        >
+                          <Check className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <span
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          handleStartRename(track);
+                        }}
+                        className="text-[11px] font-medium text-slate-200 truncate flex-1 flex items-center space-x-1"
+                      >
+                        <span className="truncate">{getDisplayTrackName(track, tracks)}</span>
+                        {track.clips?.length > 0 && (
+                          <span className="text-[8px] text-indigo-400 font-mono bg-indigo-950/80 px-1 py-0.2 rounded border border-indigo-500/20 shrink-0">
+                            {track.clips.length}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Actions: Color tag, Duplicate, Delete */}
+                  <div className="flex items-center space-x-0.5 shrink-0">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        cycleTrackColor(track.id);
+                      }}
+                      className={`w-2.5 h-2.5 rounded-full border border-white/20 transition cursor-pointer bg-${track.color}-500`}
+                      style={{
+                        backgroundColor:
+                          track.color === 'indigo'
+                            ? '#6366f1'
+                            : track.color === 'violet'
+                            ? '#8b5cf6'
+                            : track.color === 'emerald'
+                            ? '#10b981'
+                            : track.color === 'amber'
+                            ? '#f59e0b'
+                            : track.color === 'rose'
+                            ? '#f43f5e'
+                            : track.color === 'cyan'
+                            ? '#06b6d4'
+                            : '#d946ef',
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* Track Bottom Controls: File attach, Mute, Lock, Hide, Edit */}
+                <div className="flex items-center justify-between pt-0.5 border-t border-white/5">
+                  <div className="flex items-center space-x-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleTrackHidden(track.id);
+                      }}
+                      className={`p-1 rounded text-[10px] transition cursor-pointer ${
+                        track.hidden ? 'text-rose-400 bg-rose-500/10' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {track.hidden ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                    </button>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleTrackMute(track.id);
+                      }}
+                      className={`p-1 rounded text-[10px] transition cursor-pointer ${
+                        track.muted ? 'text-amber-400 bg-amber-500/10' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {track.muted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                    </button>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleTrackLock(track.id);
+                      }}
+                      className={`p-1 rounded text-[10px] transition cursor-pointer ${
+                        track.locked ? 'text-red-400 bg-red-500/10' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {track.locked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center space-x-0.5">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleStartRename(track);
+                      }}
+                      className="p-1 rounded text-slate-400 hover:text-slate-200 transition cursor-pointer"
+                    >
+                      <Edit2 className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          {isEncodeMode && hoveredDropTrackId === 'CREATE_NEW_TRACK' && (
+            <div className="h-14 px-2 py-1 flex items-center space-x-1.5 bg-indigo-950/90 border-l-2 border-indigo-400 text-indigo-200 text-xs font-medium animate-pulse shrink-0">
+              <Plus className="w-3.5 h-3.5 text-indigo-400" />
+              <span>+ New Track</span>
+            </div>
+          )}
+          </div>
+        </div>
+
+        {/* Right Side: Tracks Main Canvas + Bottom Horizontal Scroll Navigator */}
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+          {/* Tracks Main Scrubbing & Trimming Area */}
+          <div
+            ref={timelineScrollRef}
+            onScroll={(e) => {
+              if (leftHeadersScrollRef.current && leftHeadersScrollRef.current.scrollTop !== e.currentTarget.scrollTop) {
+                leftHeadersScrollRef.current.scrollTop = e.currentTarget.scrollTop;
+              }
+              setScrollState({
+                scrollLeft: e.currentTarget.scrollLeft,
+                scrollWidth: e.currentTarget.scrollWidth,
+                clientWidth: e.currentTarget.clientWidth,
+              });
+            }}
+            className="flex-1 relative overflow-x-auto overflow-y-auto min-h-0 no-scrollbar"
+          >
+          <div
+            ref={trimContainerRef}
+            className={`relative select-none ${isScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
+            style={{ width: `${Math.max(100, (computedTimelineDuration / BASE_DURATION) * 100 * activeZoomLevel)}%`, minWidth: '100%' }}
+            onMouseDown={(e) => {
+              // If clicked directly on tracks container background (not on a clip or button)
+              const target = e.target as HTMLElement;
+              if (
+                target === trimContainerRef.current ||
+                target.classList.contains('track-row-canvas') ||
+                target.classList.contains('ruler-bar')
+              ) {
+                handleStartScrub(e);
+              }
+            }}
+          >
+            {/* 1. Top Ruler (Ticks & Timestamps) - Click or Drag anywhere to scrub smoothly */}
+            <div
+              onMouseDown={handleStartScrub}
+              className="ruler-bar h-5 bg-slate-950/90 hover:bg-slate-900 border-b border-white/10 flex items-center relative z-20 cursor-pointer select-none transition-colors"
+            >
+              {rulerTicks.map((tick, i) => (
+                <div
+                  key={i}
+                  className="absolute top-0 bottom-0 border-l border-white/20 pl-0.5 flex items-center pointer-events-none"
+                  style={{ left: `${tick.percent}%` }}
+                >
+                  <span className="text-[8px] font-mono text-slate-400 leading-none select-none">{tick.time}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* 2. Track Rows Stack */}
+            <div ref={tracksStackRef} className="flex flex-col divide-y divide-white/10">
+              {displayedTracks.map((track, trackIdx) => {
+                const isActive = activeTrackId === track.id;
+                const isDropTarget = hoveredDropTrackId === track.id;
+                const colorConfig = COLOR_CLASSES[track.color] || COLOR_CLASSES.indigo;
+                const hasClips = track.clips && track.clips.length > 0;
+
+                return (
+                  <div
+                    key={track.id}
+                    onClick={() => {
+                      setActiveTrackId(track.id);
+                      const firstClip = track.clips?.[0];
+                      if (firstClip) {
+                        setActiveClipId(firstClip.id);
+                      }
+                    }}
+                    className={`relative h-14 transition cursor-pointer ${
+                      track.hidden ? 'opacity-25' : 'opacity-100'
+                    } ${
+                      isDropTarget
+                        ? 'bg-indigo-900/40 ring-2 ring-indigo-400 ring-inset z-10'
+                        : isActive
+                        ? colorConfig.headerBg
+                        : 'bg-slate-950/70'
+                    } [background-image:linear-gradient(to_right,rgba(255,255,255,0.03)_1px,transparent_1px)] [background-size:32px_100%]`}
+                  >
+                    {/* Empty Track Placeholder (if no clip on this track) */}
+                    {!hasClips && (
+                      <div className="absolute inset-x-2 top-2 bottom-2 rounded border border-dashed border-white/15 pointer-events-none select-none">
+                      </div>
+                    )}
+
+                    {/* All Clips in this Track */}
+                    {hasClips &&
+                      track.clips.map((clip, clipIdx) => {
+                        const clipStartPct =
+                          computedTimelineDuration > 0 ? (clip.startTime / computedTimelineDuration) * 100 : 0;
+                        const clipEndPct =
+                          computedTimelineDuration > 0 ? (clip.endTime / computedTimelineDuration) * 100 : 100;
+                        const clipDuration = Math.max(0, clip.endTime - clip.startTime);
+                        const clipSpan = Math.max(0.001, clipDuration);
+                        const isClipActive = activeClipId === clip.id || (isActive && clipIdx === 0 && !activeClipId);
+                        const clipColorConfig = COLOR_CLASSES[clip.color || track.color] || colorConfig;
+
+                        // Thumbnails for this clip's file
+                        const clipFileKey = clip.file ? getFileKey(clip.file) : null;
+                        const hasThumbnails = clipFileKey && fileThumbnails[clipFileKey] && fileThumbnails[clipFileKey].length > 0;
+                        const isClipVideo =
+                          clip.mediaType === 'video' ||
+                          clip.file?.type.startsWith('video/') ||
+                          /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(clip.fileName || clip.name || '');
+                        const clipThumbs = hasThumbnails 
+                          ? fileThumbnails[clipFileKey] 
+                          : (isClipVideo && thumbnails.length > 0 ? thumbnails : null);
+
+                        const clipImageSrc = (clipFileKey && fileThumbnails[clipFileKey]?.[0]) || clip.previewUrl;
+
+                        // Filmstrip positioning relative to source media duration to prevent squishing when trimmed
+                        const rawFileDur = clip.fileDuration || (clipFileKey && fileDurations[clipFileKey]) || clipSpan;
+                        const fileDur = Math.max(clipSpan, rawFileDur);
+                        const srcStart = typeof clip.sourceStartTime === 'number' ? clip.sourceStartTime : 0;
+                        const srcEnd = typeof clip.sourceEndTime === 'number' && clip.sourceEndTime > srcStart
+                          ? clip.sourceEndTime
+                          : (srcStart + clipSpan);
+                        const srcSpan = Math.max(0.001, srcEnd - srcStart);
+
+                        const filmstripWidthPct = Math.max(100, (fileDur / srcSpan) * 100);
+                        const filmstripLeftPct = -((srcStart / srcSpan) * 100);
+
+                        const nextClip = clipIdx < track.clips.length - 1 ? track.clips[clipIdx + 1] : null;
+                        const isSnappedToNext = nextClip && Math.abs(clip.endTime - nextClip.startTime) < 0.15;
+
+                        return (
+                          <React.Fragment key={clip.id}>
+                            <div
+                              className={`absolute top-1 bottom-1 rounded-md shadow-xl z-20 overflow-hidden cursor-grab active:cursor-grabbing select-none border-2 transition group ${
+                                clipColorConfig.clipBorder
+                              } ${clipColorConfig.clipBg} ${isClipActive ? 'ring-2 ring-white/60 shadow-indigo-500/20' : ''}`}
+                            style={{
+                              left: `${clipStartPct}%`,
+                              width: `${Math.max(0, clipEndPct - clipStartPct)}%`,
+                            }}
+                            onMouseDown={(e) => {
+                              setActiveTrackId(track.id);
+                              setActiveClipId(clip.id);
+                              startTrimDrag(e, 'middle', track.id, clip.id);
+                            }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveTrackId(track.id);
+                              setActiveClipId(clip.id);
+                              if (clip.file && onSelectFile && !isEncodeMode) {
+                                onSelectFile(clip.file, clip.startTime, clip.fileDuration);
+                              }
+                            }}
+                          >
+                            {/* Visualizer INSIDE Clip: Video Filmstrip, Audio Waveform, Image, or Pattern */}
+                            {isClipVideo || (!clip.mediaType && clipThumbs && clipThumbs.length > 0) ? (
+                              <div
+                                className="absolute top-0 bottom-0 flex items-stretch overflow-hidden pointer-events-none opacity-75"
+                                style={{
+                                  left: `${filmstripLeftPct}%`,
+                                  width: `${filmstripWidthPct}%`,
+                                }}
+                              >
+                                {clipThumbs && clipThumbs.length > 0 ? (
+                                  clipThumbs.map((thumb, idx) => (
+                                    <div
+                                      key={idx}
+                                      className="relative h-full overflow-hidden border-r border-white/10 last:border-r-0 shrink-0"
+                                      style={{ 
+                                        width: `${100 / clipThumbs.length}%`,
+                                        backgroundImage: `url(${thumb})`,
+                                        backgroundSize: 'auto 100%',
+                                        backgroundRepeat: 'repeat-x',
+                                        backgroundPosition: 'left center'
+                                      }}
+                                    />
+                                  ))
+                                ) : (
+                                  Array.from({ length: 8 }).map((_, idx) => (
+                                    <div
+                                      key={idx}
+                                      className="relative h-full overflow-hidden bg-slate-900/90 border-r border-white/10 last:border-r-0 flex items-center justify-center shrink-0"
+                                      style={{ width: `${100 / 8}%` }}
+                                    >
+                                      <span className="text-[8px] text-slate-400 font-mono">
+                                        {clip.fileName ? clip.fileName.slice(0, 6) : `F${idx + 1}`}
+                                      </span>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            ) : clip.mediaType === 'audio' || clip.file?.type.startsWith('audio/') ? (
+                              /* Audio Waveform inside clip */
+                              <div className={`absolute inset-0 pointer-events-none opacity-75 ${clipColorConfig.clipBorder.replace('border-', 'text-')}`}>
+                                <svg width="100%" height="100%" preserveAspectRatio="none" viewBox="0 0 1000 100">
+                                  {Array.from({ length: 250 }).map((_, i) => {
+                                    const x = i * 4;
+                                    const seed = (trackIdx + clipIdx + 1) * 1.37;
+                                    const h = 25 + Math.sin(i * 0.2 + seed) * 30 + Math.cos(i * 0.6 + seed * 2) * 25 + Math.sin(i * 1.3) * 15;
+                                    const height = Math.max(10, Math.min(95, h));
+                                    const y = 50 - height / 2;
+                                    return (
+                                      <rect
+                                        key={i}
+                                        x={x}
+                                        y={y}
+                                        width="2.5"
+                                        height={height}
+                                        rx="1.25"
+                                        fill="currentColor"
+                                      />
+                                    );
+                                  })}
+                                </svg>
+                              </div>
+                            ) : (clip.mediaType === 'image' || clip.file?.type.startsWith('image/')) && clipImageSrc ? (
+                              /* Image Preview inside clip */
+                              <div 
+                                className="absolute inset-0 pointer-events-none opacity-80 overflow-hidden"
+                                style={{
+                                  backgroundImage: `url(${clipImageSrc})`,
+                                  backgroundSize: 'auto 100%',
+                                  backgroundRepeat: 'repeat-x',
+                                  backgroundPosition: 'left center'
+                                }}
+                              />
+                            ) : (
+                              /* Universal subtle Pattern inside clip */
+                              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-40 bg-[radial-gradient(#6366f1_1px,transparent_1px)] [background-size:12px_12px]" />
+                            )}
+
+                            {/* Semi-transparent tint overlay matching clip color */}
+                            <div className={`absolute inset-0 pointer-events-none opacity-30 ${clipColorConfig.clipBg}`} />
+
+                            {/* Left Trim Handle */}
+                            {!track.locked && (
+                              <div
+                                className={`absolute left-0 top-0 bottom-0 w-3 rounded-l-[3px] shadow-md cursor-ew-resize z-30 shrink-0 flex items-center justify-center group ${clipColorConfig.clipHandle}`}
+                                onMouseDown={(e) => startTrimDrag(e, 'left', track.id, clip.id)}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="w-0.5 h-3.5 bg-slate-950/80 rounded-full" />
+                              </div>
+                            )}
+
+                            {/* Right Trim Handle */}
+                            {!track.locked && (
+                              <div
+                                className={`absolute right-0 top-0 bottom-0 w-3 rounded-r-[3px] shadow-md cursor-ew-resize z-30 shrink-0 flex items-center justify-center group ${clipColorConfig.clipHandle}`}
+                                onMouseDown={(e) => startTrimDrag(e, 'right', track.id, clip.id)}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="w-0.5 h-3.5 bg-slate-950/80 rounded-full" />
+                              </div>
+                            )}
+
+                            {/* Clip Name & Time Badge + Quick Delete Button */}
+                            <div className="relative z-20 flex items-center justify-between px-4 w-full h-full pointer-events-none overflow-hidden">
+                              <div className="flex items-center space-x-1 min-w-0 truncate">
+                                <span className="shrink-0 drop-shadow">{getMediaIcon(clip.mediaType)}</span>
+                                <span
+                                  className={`text-[9px] font-mono font-bold text-white px-2 py-0.5 rounded shadow-md whitespace-nowrap truncate backdrop-blur-md ${clipColorConfig.clipText}`}
+                                >
+                                  Track {tracks.findIndex(t => t.id === track.id) + 1}-{clipIdx + 1} | {clip.fileName ? clip.fileName : clip.name}: {formatTime(clip.startTime)} - {formatTime(clip.endTime)} ({formatTime(clipDuration)})
+                                </span>
+                              </div>
+
+                              {/* Quick Delete Action (Only in Copy Mode when track has >1 pieces after splitting) */}
+                              {!isEncodeMode && track.clips.length > 1 && (
+                                <div className="pointer-events-auto ml-1.5 mr-1 shrink-0 flex items-center">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteClip(track.id, clip.id);
+                                    }}
+                                    title="Delete this piece"
+                                    className="w-6 h-6 rounded flex items-center justify-center shadow-md transition-all cursor-pointer select-none active:scale-90 bg-rose-600 hover:bg-rose-500 text-white hover:scale-110 ring-1 ring-white/40"
+                                  >
+                                    <Trash2 className="w-3 h-3 text-white" />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Inter-clip Add / Transition Button (Only in Encode Mode) */}
+                          {isEncodeMode && isSnappedToNext && (
+                            <div 
+                              className="absolute z-40 pointer-events-auto flex items-center justify-center -translate-x-1/2 -translate-y-1/2"
+                              style={{ left: `${clipEndPct}%`, top: '50%' }}
+                            >
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setActiveTransitionMenu({ trackId: track.id, clipId: clip.id });
+                                }}
+                                className={`w-5 h-5 bg-slate-900 rounded-md border border-white/20 shadow-lg flex items-center justify-center text-white hover:scale-110 hover:bg-indigo-600 transition-all cursor-pointer active:scale-95 ${clipColorConfig.clipBorder} ${activeTransitionMenu?.trackId === track.id && activeTransitionMenu?.clipId === clip.id ? 'bg-indigo-600' : ''}`}
+                              >
+                                {clip.transition && clip.transition !== 'none' ? (
+                                  <div className="w-2.5 h-2.5 bg-white rounded-sm opacity-80" style={{ clipPath: 'polygon(0 0, 100% 50%, 0 100%)' }} />
+                                ) : (
+                                  <Plus className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                              
+                              {activeTransitionMenu?.trackId === track.id && activeTransitionMenu?.clipId === clip.id && (
+                                <>
+                                  <div className="fixed inset-0 z-40 cursor-default" onClick={(e) => { e.stopPropagation(); setActiveTransitionMenu(null); }} />
+                                  <div className="absolute top-6 left-1/2 -translate-x-1/2 bg-slate-800 border border-slate-700 rounded-lg shadow-2xl p-1 z-50 flex flex-col min-w-[120px] text-xs font-medium overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+                                    <div className="px-2 py-1.5 text-slate-400 text-[10px] uppercase tracking-wider mb-1 border-b border-slate-700/50">Transition</div>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'none'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'none' || !clip.transition ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>None</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'fade'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'fade' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Fade</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'crossfade'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'crossfade' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Crossfade</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'dissolve'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'dissolve' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Dissolve</button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleApplyTransition(track.id, clip.id, 'wipe'); }} className={`flex items-center px-2 py-1.5 rounded-md hover:bg-slate-700 text-left transition-colors ${clip.transition === 'wipe' ? 'text-indigo-400 bg-indigo-500/10' : 'text-slate-200'}`}>Wipe</button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </React.Fragment>
+                        );
+                      })}
+                  </div>
+                );
+              })}
+              {isEncodeMode && hoveredDropTrackId === 'CREATE_NEW_TRACK' && (
+                <div className="h-14 bg-indigo-950/60 ring-2 ring-indigo-400 ring-inset border-2 border-dashed border-indigo-400/80 flex items-center justify-center text-xs font-semibold text-indigo-300 transition-all animate-pulse z-20">
+                  <Plus className="w-4 h-4 mr-1.5" />
+                  <span>Release to create new track</span>
+                </div>
+              )}
+            </div>
+
+            {/* 3. Magnetic Snap Vertical Guideline & Indicator */}
+            {snapGuideTime !== null && computedTimelineDuration > 0 && (
+              <div
+                className="absolute top-0 bottom-0 z-40 pointer-events-none flex flex-col items-center -translate-x-1/2"
+                style={{ left: `${(snapGuideTime / computedTimelineDuration) * 100}%` }}
+              >
+                <div className="bg-amber-400 text-slate-950 font-mono text-[9px] font-extrabold px-1.5 py-0.5 rounded shadow-lg flex items-center space-x-1 -translate-y-1">
+                  <Magnet className="w-2.5 h-2.5 fill-current" />
+                  <span>Snap {formatTime(snapGuideTime)}</span>
+                </div>
+                <div className="w-[1.5px] flex-1 bg-amber-400 shadow-[0_0_8px_#f59e0b]" />
+              </div>
+            )}
+
+            {/* 4. Playhead Vertical Needle & Cat Handle (Spans through entire ruler and all tracks) */}
+            <div
+              className="absolute top-0 bottom-0 z-30 pointer-events-none flex flex-col items-center -translate-x-1/2"
+              style={{ left: `${progressPercent}%` }}
+            >
+              {/* Cat Handle on Ruler - Highly interactive, draggable with grab cursor */}
+              <div
+                onMouseDown={handleStartScrub}
+                className="pointer-events-auto cursor-grab active:cursor-grabbing p-1.5 -m-1.5 flex items-center justify-center group/cat hover:scale-125 transition-transform z-30 select-none"
+              >
+                <img
+                  src={wcatSeekPng}
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = wcatSeekSvg;
+                  }}
+                  alt="Playhead Cat"
+                  className="h-5 w-auto max-w-none object-contain select-none drop-shadow-[0_2px_8px_rgba(244,63,94,0.7)] group-hover/cat:brightness-110 pointer-events-none"
+                />
+              </div>
+              {/* Playhead Needle Line through all stacked tracks */}
+              <div
+                onMouseDown={handleStartScrub}
+                className="w-[2px] flex-1 bg-rose-500 shadow-[0_0_10px_#f43f5e] pointer-events-auto cursor-col-resize hover:w-[4px] transition-all"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* 5. High-Precision Click-to-Jump & Drag Horizontal Scroll Navigator (Right Side Only) */}
+        {scrollableTimelineWidth > 1 && (
+          <div className="h-4 bg-slate-950/95 border-t border-white/10 flex items-center px-1.5 shrink-0 select-none z-30">
+            <div
+              ref={customScrollTrackRef}
+              onMouseDown={handleScrollTrackMouseDown}
+              className="flex-1 h-2.5 bg-slate-900/90 hover:bg-slate-800/90 rounded-full relative cursor-pointer group flex items-center border border-white/10 transition-colors shadow-inner"
+            >
+              {/* Draggable Viewport Thumb Pill with Integrated % Badge */}
+              <div
+                onMouseDown={handleThumbMouseDown}
+                style={{
+                  left: `${thumbLeftPct}%`,
+                  width: `${thumbWidthPct}%`,
+                  minWidth: '42px',
+                }}
+                className="absolute top-0 bottom-0 rounded-full bg-slate-700/90 group-hover:bg-indigo-600/90 hover:!bg-indigo-500 active:!bg-indigo-500 transition-colors shadow-md flex items-center justify-center cursor-grab active:cursor-grabbing border border-white/30 z-20 px-1"
+              >
+                <span className="text-[8px] font-mono font-bold text-white/90 leading-none select-none drop-shadow">
+                  {Math.round((scrollState.scrollLeft / Math.max(1, scrollableTimelineWidth)) * 100)}%
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      </div>
+      )}
+    </div>
+  );
+};
