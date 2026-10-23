@@ -654,25 +654,44 @@ export default function App() {
     const files = e.target.files;
     if (files && files.length > 0) {
       const file = files[0];
-      setSelectedFiles([file]);
-      setActiveClipFile(file);
-      const url = getOrCreateFileUrl(file);
+      const isAddingToExisting = selectedFiles.length > 0 || tracks.some((t) => t.clips.length > 0);
       const dur = await getFileDuration(file);
-      setVideoUrl(url);
-      setVideoName(file.name);
-      setDuration(dur);
-      if (outputUrl) {
-        try { URL.revokeObjectURL(outputUrl); } catch {}
+
+      if (isAddingToExisting) {
+        const key = `${file.name}_${file.size}_${file.lastModified}`;
+        const exists = selectedFiles.some((f) => `${f.name}_${f.size}_${f.lastModified}` === key);
+        const mergedFiles = exists ? selectedFiles : [...selectedFiles, file];
+        setSelectedFiles(mergedFiles);
+
+        const existingMaxClipEnd = Math.max(0, ...tracks.flatMap((t) => t.clips).map((c) => c.endTime || 0));
+        const updatedTotalDuration = Math.max(duration, existingMaxClipEnd, dur);
+        setDuration(updatedTotalDuration);
+        setVideoName(`${mergedFiles.length} files selected`);
+        setSettings((prev) => ({
+          ...prev,
+          duration: updatedTotalDuration,
+          endTime: Math.max(prev.endTime, updatedTotalDuration),
+        }));
+      } else {
+        setSelectedFiles([file]);
+        setActiveClipFile(file);
+        const url = getOrCreateFileUrl(file);
+        setVideoUrl(url);
+        setVideoName(file.name);
+        setDuration(dur);
+        if (outputUrl) {
+          try { URL.revokeObjectURL(outputUrl); } catch {}
+        }
+        setOutputUrl(null);
+        setIsPlaying(false);
+        setCurrentTime(0);
+        setSettings((prev) => ({
+          ...prev,
+          duration: dur,
+          startTime: 0,
+          endTime: dur,
+        }));
       }
-      setOutputUrl(null);
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setSettings((prev) => ({
-        ...prev,
-        duration: dur,
-        startTime: 0,
-        endTime: dur,
-      }));
     }
     e.target.value = '';
   };
@@ -681,31 +700,50 @@ export default function App() {
     const files = e.target.files;
     if (files && files.length > 0) {
       const fileArr: File[] = Array.from(files);
-      setSelectedFiles(fileArr);
+      const isAddingToExisting = selectedFiles.length > 0 || tracks.some((t) => t.clips.length > 0);
 
       // Probe all files in parallel to get their true durations
       const durations = await Promise.all(fileArr.map((f) => getFileDuration(f)));
-      const totalDur = durations.reduce((acc, d) => acc + d, 0);
+      const newTotalDur = durations.reduce((acc, d) => acc + d, 0);
 
-      const firstFile = fileArr[0];
-      setActiveClipFile(firstFile);
-      const url = getOrCreateFileUrl(firstFile);
-      setVideoUrl(url);
-      setVideoName(fileArr.length === 1 ? firstFile.name : `${fileArr.length} files selected`);
-      setDuration(totalDur > 0 ? totalDur : durations[0]);
+      if (isAddingToExisting) {
+        const existingKeys = new Set(selectedFiles.map((f) => `${f.name}_${f.size}_${f.lastModified}`));
+        const genuinelyNewFiles = fileArr.filter((f) => !existingKeys.has(`${f.name}_${f.size}_${f.lastModified}`));
+        const mergedFiles = [...selectedFiles, ...genuinelyNewFiles];
+        setSelectedFiles(mergedFiles);
 
-      if (outputUrl) {
-        try { URL.revokeObjectURL(outputUrl); } catch {}
+        const existingMaxClipEnd = Math.max(0, ...tracks.flatMap((t) => t.clips).map((c) => c.endTime || 0));
+        const updatedTotalDuration = Math.max(duration, existingMaxClipEnd, newTotalDur);
+        setDuration(updatedTotalDuration);
+        setVideoName(`${mergedFiles.length} files selected`);
+        setSettings((prev) => ({
+          ...prev,
+          duration: updatedTotalDuration,
+          endTime: Math.max(prev.endTime, updatedTotalDuration),
+        }));
+      } else {
+        setSelectedFiles(fileArr);
+        const firstFile = fileArr[0];
+        setActiveClipFile(firstFile);
+        const url = getOrCreateFileUrl(firstFile);
+        setVideoUrl(url);
+        setVideoName(fileArr.length === 1 ? firstFile.name : `${fileArr.length} files selected`);
+        const initialDur = newTotalDur > 0 ? newTotalDur : durations[0];
+        setDuration(initialDur);
+
+        if (outputUrl) {
+          try { URL.revokeObjectURL(outputUrl); } catch {}
+        }
+        setOutputUrl(null);
+        setIsPlaying(false);
+        setCurrentTime(0);
+        setSettings((prev) => ({
+          ...prev,
+          duration: initialDur,
+          startTime: 0,
+          endTime: initialDur,
+        }));
       }
-      setOutputUrl(null);
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setSettings((prev) => ({
-        ...prev,
-        duration: totalDur > 0 ? totalDur : durations[0],
-        startTime: 0,
-        endTime: totalDur > 0 ? totalDur : durations[0],
-      }));
     }
     e.target.value = '';
   };
@@ -807,17 +845,28 @@ export default function App() {
   };
 
   const handleDurationLoaded = (dur: number) => {
-    if (dur > 0 && (selectedFiles.length <= 1 || duration === 0)) {
-      setDuration(dur);
-      setSettings((prev) => {
-        const isDefaultOrPreset = prev.endTime === 0 || prev.endTime === 10 || prev.endTime === 15 || Math.abs(prev.endTime - prev.duration) < 0.1;
-        return {
+    if (dur > 0) {
+      const existingMaxClipEnd = Math.max(0, ...tracks.flatMap((t) => t.clips).map((c) => c.endTime || 0));
+      if (duration === 0) {
+        setDuration(dur);
+        setSettings((prev) => {
+          const isDefaultOrPreset = prev.endTime === 0 || prev.endTime === 10 || prev.endTime === 15 || Math.abs(prev.endTime - prev.duration) < 0.1;
+          return {
+            ...prev,
+            duration: dur,
+            startTime: prev.startTime || 0,
+            endTime: isDefaultOrPreset ? dur : prev.endTime,
+          };
+        });
+      } else if (dur > duration && existingMaxClipEnd > 0) {
+        const newDur = Math.max(duration, dur, existingMaxClipEnd);
+        setDuration(newDur);
+        setSettings((prev) => ({
           ...prev,
-          duration: dur,
-          startTime: prev.startTime || 0,
-          endTime: isDefaultOrPreset ? dur : prev.endTime,
-        };
-      });
+          duration: newDur,
+          endTime: Math.max(prev.endTime, newDur),
+        }));
+      }
     }
   };
 

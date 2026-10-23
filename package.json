@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "wcat",
   "private": true,
-  "version": "3.5.0",
+  "version": "3.5.1",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -10,23 +10,42 @@
     "preview": "vite preview",
     "clean": "rm -rf dist dist-electron server.js release",
     "lint": "tsc --noEmit",
-    "electron:build": "vite build && npx tsc electron/main.ts --outDir dist-electron --target esnext --module nodenext --moduleResolution nodenext && electron-builder --linux AppImage"
+    "generate:icons": "node scripts/generate-icons.js",
+    "electron:build": "npm run generate:icons && vite build && npx tsc electron/main.ts --outDir dist-electron --target esnext --module nodenext --moduleResolution nodenext && electron-builder --linux AppImage",
+    "electron:build:win": "npm run generate:icons && vite build && npx tsc electron/main.ts --outDir dist-electron --target esnext --module nodenext --moduleResolution nodenext && electron-builder --win nsis"
   },
   "build": {
-    "appId": "com.app.videocutter",
-    "productName": "VideoCutterPro",
+    "appId": "com.wcat.app",
+    "productName": "Wcat",
+    "icon": "build/icon.png",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*"
+      "dist-electron/**/*",
+      "public/**/*"
     ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Wcat",
+      "uninstallDisplayName": "Wcat",
+      "artifactName": "Wcat Setup ${version}.${ext}"
+    },
     "linux": {
       "target": [
         "AppImage"
       ],
-      "category": "AudioVideo"
+      "category": "AudioVideo",
+      "icon": "build/icons",
+      "artifactName": "Wcat-${version}.${ext}"
     }
   },
   "dependencies": {
@@ -49,9 +68,16 @@
     "electron": "^44.7.1",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
+    "sharp": "^0.35.5",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-win32-x64-msvc": "*",
+    "@rollup/rollup-linux-x64-gnu": "*",
+    "lightningcss-win32-x64-msvc": "*",
+    "lightningcss-linux-x64-gnu": "*"
   }
 }

@@ -568,7 +568,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     if (!isAudio) {
       if (probedDur > 0) {
         updateClipDurations(probedDur);
-      } else if (duration > 0) {
+      } else if (duration > 0 && selectedFiles && selectedFiles.length === 1) {
         updateClipDurations(duration);
       } else {
         probeVideoSafe(file)
@@ -633,40 +633,48 @@ export const Timeline: React.FC<TimelineProps> = ({
     });
   }, [selectedFiles, tracks]);
 
-  // Auto-expand clips to project duration if they were created before duration was resolved or had a partial duration
+  // Auto-expand initial clip if created before duration was resolved (strictly single initial clip only)
   useEffect(() => {
     if (!duration || duration <= 0) return;
 
     setTracks((prev) => {
-      let changed = false;
-      const isSingleFileProject = !selectedFiles || selectedFiles.length <= 1;
-      const nextTracks = prev.map((t) => ({
-        ...t,
-        clips: t.clips.map((c) => {
-          const isCollapsedOrOutdated =
-            !c.isTrimmed &&
-            (c.endTime <= c.startTime ||
-              c.endTime - c.startTime <= 0.1 ||
-              Math.abs(c.endTime - c.startTime - 10) < 0.1 ||
-              (c.fileDuration || 0) <= 0 ||
-              (isSingleFileProject && Math.abs((c.fileDuration || 0) - duration) > 0.5));
+      // Only auto-expand if there is only 1 track with 1 clip in the entire timeline and its duration has not yet been resolved
+      const allClips = prev.flatMap((t) => t.clips);
+      if (allClips.length !== 1) return prev;
 
-          if (isCollapsedOrOutdated) {
-            changed = true;
-            return {
-              ...c,
-              endTime: c.startTime + duration,
-              sourceStartTime: c.sourceStartTime || 0,
-              sourceEndTime: duration,
-              fileDuration: duration,
-            };
-          }
-          return c;
-        }),
-      }));
-      return changed ? nextTracks : prev;
+      const singleClip = allClips[0];
+      if (singleClip.isTrimmed || (singleClip.fileDuration && singleClip.fileDuration > 0 && Math.abs(singleClip.fileDuration - duration) < 0.1)) {
+        return prev;
+      }
+
+      const isCollapsedOrOutdated =
+        singleClip.endTime <= singleClip.startTime ||
+        singleClip.endTime - singleClip.startTime <= 0.1 ||
+        !singleClip.fileDuration ||
+        singleClip.fileDuration <= 0 ||
+        Math.abs(singleClip.endTime - singleClip.startTime - 10) < 0.1;
+
+      if (isCollapsedOrOutdated) {
+        return prev.map((t) => ({
+          ...t,
+          clips: t.clips.map((c) => {
+            if (c.id === singleClip.id) {
+              return {
+                ...c,
+                endTime: c.startTime + duration,
+                sourceStartTime: c.sourceStartTime || 0,
+                sourceEndTime: duration,
+                fileDuration: duration,
+              };
+            }
+            return c;
+          }),
+        }));
+      }
+
+      return prev;
     });
-  }, [duration, selectedFiles, setTracks]);
+  }, [duration, setTracks]);
 
   const detectMediaType = (file: File): MediaType => {
     if (file.type.startsWith('video/')) return 'video';
@@ -789,10 +797,10 @@ export const Timeline: React.FC<TimelineProps> = ({
           const knownDuration =
             fileDurations[key] && fileDurations[key] > 0
               ? fileDurations[key]
-              : duration > 0
-              ? duration
               : detectedType === 'image'
               ? 5
+              : selectedFiles.length === 1 && duration > 0
+              ? duration
               : 0;
           const trackColor = colorOrder[idx % colorOrder.length];
 
