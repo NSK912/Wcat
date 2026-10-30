@@ -1261,7 +1261,6 @@ export default function App() {
         // 🔵 REMUX MODE OR COPY MODE FULL LENGTH (FAST NATIVE REMUX)
         // =====================================================================
         else if (exportMode === 'remux' || isFullLengthRemux) {
-          addLog(`[SOURCE] Input file: ${inputFile.name} (${(inputFile.size / (1024 * 1024)).toFixed(2)} MB, type: ${inputFile.type || 'unknown'})`);
           addLog(`Mode: Full length container repair / fast-start remux for ${inputFile.name}`);
           result = await processNativeRemuxStream(
             inputFile,

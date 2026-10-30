@@ -439,11 +439,10 @@ const ID_TIMECODE = 'e7';
 const ID_DURATION = '4489';
 const ID_TIMECODESCALE = '2ad7b1';
 
-async function parseWebMFile(file: File): Promise<FileMeta> {
-  // Read first MB to parse headers
-  let buf = await readSlice(file, 0, 1024 * 1024);
-  let pos = 0;
-  
+async function parseWebMFile(
+  file: File,
+  onProgress?: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
+): Promise<FileMeta> {
   let meta: FileMeta = {
     ebmlHeader: new Uint8Array(0),
     segmentInfo: new Uint8Array(0),
@@ -453,60 +452,77 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
     segmentHeaderLen: 0,
     fileDurationMs: 0,
     timecodeScale: 1000000,
-    videoTrackNum: 1 // default
+    videoTrackNum: 1
   };
 
-  let timecodeScale = 1000000; // default 1ms
+  let timecodeScale = 1000000;
+  const BUFFER_SIZE = 8 * 1024 * 1024; // 8MB sliding memory buffer
+  let curBufStart = -1;
+  let curBufEnd = -1;
+  let curBuf = new Uint8Array(0);
+
+  const getSlice = async (offset: number, size: number): Promise<Uint8Array> => {
+    const end = Math.min(offset + size, file.size);
+    if (offset >= end) return new Uint8Array(0);
+    if (offset >= curBufStart && end <= curBufEnd && curBuf.length > 0) {
+      return curBuf.subarray(offset - curBufStart, end - curBufStart);
+    }
+    const fetchSize = Math.max(size, Math.min(BUFFER_SIZE, file.size - offset));
+    curBufStart = offset;
+    curBuf = new Uint8Array(await file.slice(offset, offset + fetchSize).arrayBuffer());
+    curBufEnd = offset + curBuf.length;
+    return curBuf.subarray(0, Math.min(size, curBuf.length));
+  };
+
+  if (onProgress) {
+    onProgress({
+      percentage: 1,
+      statusText: `Scanning container headers for ${file.name}...`,
+      speedMBs: 0,
+      log: `[ANALYSIS] Scanning EBML structure and indexing clusters for ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`
+    });
+  }
 
   // 1. Read EBML Header
+  let pos = 0;
+  let buf = await getSlice(0, 1024 * 1024);
   const ebmlHdr = readElementHeader(buf, pos);
-  if (!ebmlHdr || ebmlHdr.idHex !== ID_EBML) throw new Error("Invalid WebM: No EBML Header");
-  meta.ebmlHeader = buf.slice(pos, pos + ebmlHdr.totalHeaderLen + ebmlHdr.size);
+  if (!ebmlHdr || ebmlHdr.idHex !== ID_EBML) throw new Error("Invalid WebM/MKV: No EBML Header");
+  meta.ebmlHeader = new Uint8Array(buf.slice(pos, pos + ebmlHdr.totalHeaderLen + ebmlHdr.size));
   pos += ebmlHdr.totalHeaderLen + ebmlHdr.size;
 
   // 2. Read Segment
-  const segHdr = readElementHeader(buf, pos);
-  if (!segHdr || segHdr.idHex !== ID_SEGMENT) throw new Error("Invalid WebM: No Segment");
+  buf = await getSlice(pos, 1024 * 1024);
+  const segHdr = readElementHeader(buf, 0);
+  if (!segHdr || segHdr.idHex !== ID_SEGMENT) throw new Error("Invalid WebM/MKV: No Segment Header");
   meta.segmentOffset = pos;
   meta.segmentHeaderLen = segHdr.totalHeaderLen;
   pos += segHdr.totalHeaderLen;
 
   let filePos = pos;
-  
+  let lastReportedMB = 0;
+
   // Traverse Segment Elements
   while (filePos < file.size) {
-    if (filePos >= file.size) break;
-    
-    // We need to make sure we have enough buffer
-    if (filePos - meta.segmentOffset + 64 > buf.length) {
-       buf = await readSlice(file, filePos, 1024 * 1024);
-       pos = 0;
-    } else {
-       pos = filePos - (meta.segmentOffset + meta.segmentHeaderLen); // relative to first buffer if it fit? No, offset tracking is easier.
-    }
-
-    // A better way: Always read small chunks to get headers
-    const hdrBuf = await readSlice(file, filePos, 32);
+    const hdrBuf = await getSlice(filePos, 32);
     if (hdrBuf.length === 0) break;
 
     const el = readElementHeader(hdrBuf, 0);
     if (!el) break; // End of file or invalid
 
     if (el.idHex === ID_INFO) {
-      meta.segmentInfo = await readSlice(file, filePos, el.totalHeaderLen + el.size);
+      meta.segmentInfo = new Uint8Array(await getSlice(filePos, el.totalHeaderLen + el.size));
       
-      // Parse Info for Duration & TimecodeScale
       let infoPos = el.totalHeaderLen;
       while (infoPos < meta.segmentInfo.length) {
          const infoEl = readElementHeader(meta.segmentInfo, infoPos);
          if (!infoEl) break;
          if (infoEl.idHex === ID_TIMECODESCALE) {
             let scale = 0;
-            for(let i=0; i<infoEl.size; i++) scale = (scale * 256) + meta.segmentInfo[infoPos + infoEl.totalHeaderLen + i];
+            for (let i = 0; i < infoEl.size; i++) scale = (scale * 256) + meta.segmentInfo[infoPos + infoEl.totalHeaderLen + i];
             timecodeScale = scale;
          }
          if (infoEl.idHex === ID_DURATION) {
-            // Duration is usually a 4-byte or 8-byte float
             const view = new DataView(meta.segmentInfo.buffer, meta.segmentInfo.byteOffset + infoPos + infoEl.totalHeaderLen, infoEl.size);
             if (infoEl.size === 4) meta.fileDurationMs = view.getFloat32(0);
             else if (infoEl.size === 8) meta.fileDurationMs = view.getFloat64(0);
@@ -516,10 +532,9 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
       
       filePos += el.totalHeaderLen + el.size;
     } else if (el.idHex === ID_TRACKS) {
-      meta.segmentTracks = await readSlice(file, filePos, el.totalHeaderLen + el.size);
+      meta.segmentTracks = new Uint8Array(await getSlice(filePos, el.totalHeaderLen + el.size));
       
-      // Parse Tracks to find Video Track Number
-      let trackPos = el.totalHeaderLen; // skip Tracks header
+      let trackPos = el.totalHeaderLen;
       while (trackPos < meta.segmentTracks.length) {
           const trackEntryEl = readElementHeader(meta.segmentTracks, trackPos);
           if (!trackEntryEl) break;
@@ -530,13 +545,13 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
               while (entryPos < entryEnd) {
                   const propEl = readElementHeader(meta.segmentTracks, entryPos);
                   if (!propEl) break;
-                  if (propEl.idHex === 'd7') { // TrackNumber
+                  if (propEl.idHex === 'd7') {
                       let num = 0;
                       for (let i = 0; i < propEl.size; i++) {
                           num = (num * 256) + meta.segmentTracks[entryPos + propEl.totalHeaderLen + i];
                       }
                       currentTrackNum = num;
-                  } else if (propEl.idHex === '83') { // TrackType
+                  } else if (propEl.idHex === '83') {
                       let tType = meta.segmentTracks[entryPos + propEl.totalHeaderLen];
                       if (tType === 1) { // 1 = Video
                           meta.videoTrackNum = currentTrackNum;
@@ -550,12 +565,11 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
 
       filePos += el.totalHeaderLen + el.size;
     } else if (el.idHex === ID_CLUSTER) {
-      // It's a cluster. We read its Timecode.
       const clusterHeaderLen = el.totalHeaderLen;
-      const clusterSize = el.size === -1 ? (file.size - filePos - clusterHeaderLen) : el.size; // Unknown size means till EOF
+      const clusterSize = el.size === -1 ? (file.size - filePos - clusterHeaderLen) : el.size;
       
-      // Read first bytes of cluster to get Timecode
-      const clusterBuf = await readSlice(file, filePos + clusterHeaderLen, Math.min(1024, clusterSize));
+      // Read up to 4096 bytes of cluster payload to reliably find Timecode element
+      const clusterBuf = await getSlice(filePos + clusterHeaderLen, Math.min(4096, clusterSize));
       
       let innerPos = 0;
       let clusterTc = 0;
@@ -568,14 +582,14 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
          if (!innerEl) break;
          if (innerEl.idHex === ID_TIMECODE) {
             let tc = 0;
-            for(let k=0; k<innerEl.size; k++) {
+            for (let k = 0; k < innerEl.size; k++) {
                 tc = (tc * 256) + clusterBuf[innerPos + innerEl.totalHeaderLen + k];
             }
             clusterTc = tc;
             tcOffset = filePos + clusterHeaderLen + innerPos;
             tcLen = innerEl.totalHeaderLen + innerEl.size;
             tcValLen = innerEl.size;
-            break; // Found Timecode
+            break;
          }
          innerPos += innerEl.totalHeaderLen + innerEl.size;
       }
@@ -590,24 +604,42 @@ async function parseWebMFile(file: File): Promise<FileMeta> {
         timecodeValueLength: tcValLen
       });
 
+      const currentMB = Math.floor(filePos / (1024 * 1024 * 5000));
+      if (onProgress && (currentMB > lastReportedMB || meta.clusters.length % 10000 === 0)) {
+        lastReportedMB = currentMB;
+        const scanMB = (filePos / (1024 * 1024)).toFixed(0);
+        const totalMB = (file.size / (1024 * 1024)).toFixed(0);
+        onProgress({
+          percentage: 1,
+          statusText: `Indexed ${meta.clusters.length} clusters (${scanMB} / ${totalMB} MB)...`,
+          speedMBs: 0,
+          log: `[INDEX] Indexed ${meta.clusters.length} EBML clusters — ${scanMB} / ${totalMB} MB scanned`
+        });
+      }
+
       if (el.size === -1) {
-         // Unknown size cluster usually means it's the last one and goes to EOF
          break;
       }
       filePos += el.totalHeaderLen + el.size;
     } else {
-      // Skip unknown/unneeded elements (Cues, Tags, etc)
       if (el.size === -1) break; 
       filePos += el.totalHeaderLen + el.size;
     }
   }
 
-  // Adjust duration if needed based on scale (usually 1000000ns = 1ms)
   if (meta.fileDurationMs > 0 && timecodeScale !== 1000000) {
       meta.fileDurationMs = (meta.fileDurationMs * timecodeScale) / 1000000;
   }
-  
   meta.timecodeScale = timecodeScale;
+
+  if (onProgress) {
+    onProgress({
+      percentage: 2,
+      statusText: `Index complete: ${meta.clusters.length} clusters identified.`,
+      speedMBs: 0,
+      log: `[ANALYSIS COMPLETE] ${meta.clusters.length} EBML clusters indexed successfully (Video Track: #${meta.videoTrackNum}, Duration: ${(meta.fileDurationMs / 1000).toFixed(1)}s)`
+    });
+  }
 
   return meta;
 }
@@ -2216,7 +2248,7 @@ export async function processNativeRemuxStream(
          percentage: 2,
          statusText: `Using Native Zero-RAM EBML Engine for ${format.toUpperCase()} remux...`,
          speedMBs: 0,
-         log: `[INPUT] File: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)\n[ENGINE] Selected Native Zero-RAM EBML Remux & Cues Repair Engine for ${format.toUpperCase()}`
+         log: `[ENGINE] Selected Native Zero-RAM EBML Remux & Cues Repair Engine for ${format.toUpperCase()} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`
        });
        try {
          const res = await executeNativeEBMLRemuxStream(file, writable, onProgress);
@@ -2249,12 +2281,12 @@ async function executeNativeEBMLRemuxStream(
   try {
      onProgress({ percentage: 0, statusText: 'Analyzing file structure for remuxing (Standard Remux Engine)...', speedMBs: 0 });
      
-     const meta = await parseWebMFile(file);
+     const meta = await parseWebMFile(file, onProgress);
      let totalBytesWritten = 0;
      let segmentDataOffset = 0;
      const cuePoints: { time: number, offset: number }[] = [];
 
-     const CHUNK_SIZE = 1024 * 1024;
+     const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB streaming chunks for maximum SSD throughput
 
      // Patch the Duration in SegmentInfo for Standard Compliance
      const patchedSegmentInfo = new Uint8Array(meta.segmentInfo);
@@ -2303,6 +2335,16 @@ async function executeNativeEBMLRemuxStream(
      await writeBytes(meta.segmentTracks);
 
      let firstIncludedTimecode = -1;
+     let lastLoggedBytes = 0;
+     let lastLoggedTime = performance.now();
+     let currentSpeedMBs = 0;
+
+     onProgress({
+       percentage: 2,
+       statusText: `Starting high-speed stream copy...`,
+       speedMBs: 0,
+       log: `[WRITE START] Zero-RAM stream copy initiated (Chunk size: 16 MB). Total clusters: ${meta.clusters.length}`
+     });
 
      for (let cIdx = 0; cIdx < meta.clusters.length; cIdx++) {
          const cluster = meta.clusters[cIdx];
@@ -2315,55 +2357,86 @@ async function executeNativeEBMLRemuxStream(
          if (newTc < 0) continue; // Safety check
 
          cuePoints.push({ time: newTc, offset: totalBytesWritten - segmentDataOffset });
-         // Encode new Timecode value dynamically to avoid byte overflow
-         const newTcValBuf = encodeUint(newTc);
-         const newTcSizeVint = encodeVintSize(newTcValBuf.length);
-         const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-         // Calculate the new Cluster Size
-         const sizeDiff = newTcElementLength - cluster.timecodeLength;
-         const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
+         if (cluster.timecodeOffset > cluster.offset && cluster.timecodeLength > 0) {
+           // Encode new Timecode value dynamically to avoid byte overflow
+           const newTcValBuf = encodeUint(newTc);
+           const newTcSizeVint = encodeVintSize(newTcValBuf.length);
+           const newTcElementLength = 1 + newTcSizeVint.length + newTcValBuf.length;
 
-         // Write patched Cluster Header
-         const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
-         const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
-         await writeBytes(clusterId);
-         await writeBytes(clusterSizeVint);
+           // Calculate the new Cluster Size
+           const sizeDiff = newTcElementLength - cluster.timecodeLength;
+           const newClusterPayloadSize = cluster.size === -1 ? -1 : (cluster.size - cluster.headerLen + sizeDiff);
 
-         // Write from after cluster header up to timecode offset
-         const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
-         if (preTcSize > 0) {
-             const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
-             await writeBytes(preTcBuf);
+           // Write patched Cluster Header
+           const clusterId = new Uint8Array([0x1F, 0x43, 0xB6, 0x75]);
+           const clusterSizeVint = encodeVintSize(newClusterPayloadSize);
+           await writeBytes(clusterId);
+           await writeBytes(clusterSizeVint);
+
+           // Write from after cluster header up to timecode offset
+           const preTcSize = cluster.timecodeOffset - (cluster.offset + cluster.headerLen);
+           if (preTcSize > 0) {
+               const preTcBuf = await readSlice(file, cluster.offset + cluster.headerLen, preTcSize);
+               await writeBytes(preTcBuf);
+           }
+
+           // Write the new Timecode element
+           await writeBytes(new Uint8Array([0xE7]));
+           await writeBytes(newTcSizeVint);
+           await writeBytes(newTcValBuf);
+
+           const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
+           const restEnd = cluster.size === -1 ? file.size : (cluster.offset + cluster.size);
+           
+           let streamPos = restOffset;
+           while (streamPos < restEnd) {
+               const toRead = Math.min(CHUNK_SIZE, restEnd - streamPos);
+               const chunk = await readSlice(file, streamPos, toRead);
+               await writeBytes(chunk);
+               streamPos += chunk.length;
+           }
+         } else {
+           // Fallback direct cluster stream copy if timecode offset missing
+           const clusterEnd = cluster.size === -1 ? file.size : (cluster.offset + cluster.size);
+           let streamPos = cluster.offset;
+           while (streamPos < clusterEnd) {
+               const toRead = Math.min(CHUNK_SIZE, clusterEnd - streamPos);
+               const chunk = await readSlice(file, streamPos, toRead);
+               await writeBytes(chunk);
+               streamPos += chunk.length;
+           }
          }
 
-         // Write the new Timecode element
-         await writeBytes(new Uint8Array([0xE7]));
-         await writeBytes(newTcSizeVint);
-         await writeBytes(newTcValBuf);
-
-         const restOffset = cluster.timecodeOffset + cluster.timecodeLength;
-         const restSize = cluster.size === -1 ? (file.size - restOffset) : (cluster.offset + cluster.size - restOffset);
-         
-         let streamPos = restOffset;
-         const streamEnd = restOffset + restSize;
-         
-         while (streamPos < streamEnd) {
-             const toRead = Math.min(CHUNK_SIZE, streamEnd - streamPos);
-             const chunk = await readSlice(file, streamPos, toRead);
-             await writeBytes(chunk);
-             streamPos += chunk.length;
-         }
-
-         const prog = ((cIdx + 1) / meta.clusters.length) * 100;
+         const prog = Math.min(99, Math.max(2, Math.round(((cIdx + 1) / meta.clusters.length) * 97) + 2));
          const writtenMB = (totalBytesWritten / (1024 * 1024)).toFixed(1);
          const totalMB = (file.size / (1024 * 1024)).toFixed(1);
-         const shouldLog = cIdx === 0 || cIdx === meta.clusters.length - 1 || cIdx % Math.max(1, Math.floor(meta.clusters.length / 10)) === 0;
+
+         const now = performance.now();
+         const bytesSinceLastLog = totalBytesWritten - lastLoggedBytes;
+         const timeSinceLastLogSec = (now - lastLoggedTime) / 1000;
+
+         const shouldLog = cIdx === 0 || 
+                           cIdx === meta.clusters.length - 1 || 
+                           bytesSinceLastLog >= 200 * 1024 * 1024 || 
+                           timeSinceLastLogSec >= 1.5 || 
+                           cIdx % Math.max(1, Math.floor(meta.clusters.length / 50)) === 0;
+
+         if (timeSinceLastLogSec >= 0.5) {
+           currentSpeedMBs = (bytesSinceLastLog / (1024 * 1024)) / timeSinceLastLogSec;
+           lastLoggedBytes = totalBytesWritten;
+           lastLoggedTime = now;
+         }
+
+         const remainingBytes = Math.max(0, file.size - totalBytesWritten);
+         const etaSec = currentSpeedMBs > 0 ? Math.ceil(remainingBytes / (currentSpeedMBs * 1024 * 1024)) : 0;
+         const etaText = etaSec > 0 ? ` (ETA: ${etaSec}s)` : '';
+
          onProgress({
            percentage: prog,
-           statusText: `Remuxing cluster ${cIdx + 1}/${meta.clusters.length} (${writtenMB} / ${totalMB} MB)...`,
-           speedMBs: 0,
-           log: shouldLog ? `[WRITE] Remuxing cluster ${cIdx + 1}/${meta.clusters.length} — Written ${writtenMB} MB / ${totalMB} MB (${prog.toFixed(1)}%)` : undefined
+           statusText: `Remuxing: ${writtenMB} / ${totalMB} MB (${currentSpeedMBs.toFixed(1)} MB/s)${etaText}`,
+           speedMBs: currentSpeedMBs,
+           log: shouldLog ? `[WRITE] Remuxing cluster ${cIdx + 1}/${meta.clusters.length} — Written: ${writtenMB} / ${totalMB} MB (${prog}%) | Speed: ${currentSpeedMBs.toFixed(1)} MB/s${etaText}` : undefined
          });
      }
 
@@ -2394,7 +2467,7 @@ async function executeNativeEBMLRemuxStream(
          blobUrl = URL.createObjectURL(blob);
      }
 
-     onProgress({ percentage: 100, statusText: 'Remuxing successful! (Standard Remux)', speedMBs: 0 });
+     onProgress({ percentage: 100, statusText: 'Remuxing completed successfully!', speedMBs: 0, log: `[DONE] Remux finished successfully! All data written to disk (${(totalBytesWritten / (1024 * 1024)).toFixed(1)} MB).` });
      return { success: totalBytesWritten > 0, totalBytesWritten, blobUrl };
   } catch (err) {
      console.error("Remux Stream Error:", err);
