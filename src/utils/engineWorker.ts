@@ -2216,7 +2216,7 @@ export async function processNativeRemuxStream(
          percentage: 2,
          statusText: `Using Native Zero-RAM EBML Engine for ${format.toUpperCase()} remux...`,
          speedMBs: 0,
-         log: `[ENGINE] Selected Native Zero-RAM EBML Remux & Cues Repair Engine for ${format.toUpperCase()} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`
+         log: `[INPUT] File: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)\n[ENGINE] Selected Native Zero-RAM EBML Remux & Cues Repair Engine for ${format.toUpperCase()}`
        });
        try {
          const res = await executeNativeEBMLRemuxStream(file, writable, onProgress);
@@ -2355,8 +2355,16 @@ async function executeNativeEBMLRemuxStream(
              streamPos += chunk.length;
          }
 
-         const prog = (cIdx / meta.clusters.length) * 100;
-         onProgress({ percentage: prog, statusText: 'Remuxing file structure (Standard Remux)...', speedMBs: 0 });
+         const prog = ((cIdx + 1) / meta.clusters.length) * 100;
+         const writtenMB = (totalBytesWritten / (1024 * 1024)).toFixed(1);
+         const totalMB = (file.size / (1024 * 1024)).toFixed(1);
+         const shouldLog = cIdx === 0 || cIdx === meta.clusters.length - 1 || cIdx % Math.max(1, Math.floor(meta.clusters.length / 10)) === 0;
+         onProgress({
+           percentage: prog,
+           statusText: `Remuxing cluster ${cIdx + 1}/${meta.clusters.length} (${writtenMB} / ${totalMB} MB)...`,
+           speedMBs: 0,
+           log: shouldLog ? `[WRITE] Remuxing cluster ${cIdx + 1}/${meta.clusters.length} — Written ${writtenMB} MB / ${totalMB} MB (${prog.toFixed(1)}%)` : undefined
+         });
      }
 
      if (cuePoints.length > 0) {
