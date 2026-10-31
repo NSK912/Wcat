@@ -1982,22 +1982,8 @@ async function processNativeEBMLConcatStream(
 
     if (cuePoints.length > 0) {
         onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
-        const cuesOffset = totalBytesWritten - segmentDataOffset;
         const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
         await writeBytes(cuesBuffer);
-        
-        if (writable) {
-            try {
-                const actualSeekHead = buildSeekHead(cuesOffset);
-                await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
-
-                const totalSegmentSize = totalBytesWritten - segmentDataOffset;
-                const actualSegmentSize = writeVint(totalSegmentSize, 8);
-                await writable.write({ type: 'write', position: firstMeta.ebmlHeader.length + 4, data: actualSegmentSize });
-            } catch (seekErr) {
-                console.warn("SeekHead or SegmentSize update failed:", seekErr);
-            }
-        }
     }
 
     let blobUrl: string | undefined;
@@ -2208,22 +2194,8 @@ async function executeNativeEBMLTrimStream(
 
      if (cuePoints.length > 0) {
          onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
-         const cuesOffset = totalBytesWritten - segmentDataOffset;
          const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
          await writeBytes(cuesBuffer);
-         
-         if (writable) {
-             try {
-                 const actualSeekHead = buildSeekHead(cuesOffset);
-                 await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
-
-                 const totalSegmentSize = totalBytesWritten - segmentDataOffset;
-                 const actualSegmentSize = writeVint(totalSegmentSize, 8);
-                 await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
-             } catch (seekErr) {
-                 console.warn("SeekHead update failed:", seekErr);
-             }
-         }
      }
 
      let blobUrl: string | undefined;
@@ -2451,22 +2423,8 @@ async function executeNativeEBMLRemuxStream(
 
      if (cuePoints.length > 0) {
          onProgress({ percentage: 99, statusText: 'Creating Cues Index...', speedMBs: 0 });
-         const cuesOffset = totalBytesWritten - segmentDataOffset;
          const cuesBuffer = buildCuesElement(cuePoints, videoTrackNum);
          await writeBytes(cuesBuffer);
-         
-         if (writable) {
-             try {
-                 const actualSeekHead = buildSeekHead(cuesOffset);
-                 await writable.write({ type: 'write', position: seekHeadOffset, data: actualSeekHead });
-
-                 const totalSegmentSize = totalBytesWritten - segmentDataOffset;
-                 const actualSegmentSize = writeVint(totalSegmentSize, 8);
-                 await writable.write({ type: 'write', position: meta.ebmlHeader.length + 4, data: actualSegmentSize });
-             } catch (seekErr) {
-                 console.warn("SeekHead update failed:", seekErr);
-             }
-         }
      }
 
      let blobUrl: string | undefined;
