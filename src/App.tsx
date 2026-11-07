@@ -47,6 +47,8 @@ import {
   ArrowRight,
   Sliders,
   Check,
+  Crop,
+  Eye,
 } from 'lucide-react';
 
 const DEFAULT_SETTINGS: EditSettings = {
@@ -173,6 +175,7 @@ export default function App() {
   const [isLeftPanelExpanded, setIsLeftPanelExpanded] = useState<boolean>(window.innerWidth >= 1200);
   const [isRightPanelExpanded, setIsRightPanelExpanded] = useState<boolean>(window.innerWidth >= 1200);
   const [isCustomFpsMode, setIsCustomFpsMode] = useState<boolean>(false);
+  const [show916SafeZone, setShow916SafeZone] = useState<boolean>(false);
   const [holdProgress, setHoldProgress] = useState<number>(0);
   const [holdHint, setHoldHint] = useState<boolean>(false);
   const holdRafRef = useRef<number | null>(null);
@@ -1777,6 +1780,27 @@ export default function App() {
                           );
                         })}
                       </div>
+
+                      {/* 9:16 TikTok / Reels / Shorts Safe Zone Toggle */}
+                      {settings.cropAspect === '9:16' && (
+                        <div className="flex items-center justify-between p-2 rounded-lg bg-slate-900/90 border border-violet-500/40 mt-1">
+                          <div className="flex items-center space-x-1.5 text-violet-300 font-mono text-[11px] font-bold">
+                            <Eye className="w-3.5 h-3.5 text-violet-400" />
+                            <span>Safe Zone (Reels/TikTok):</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShow916SafeZone((prev) => !prev)}
+                            className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold border cursor-pointer transition ${
+                              show916SafeZone
+                                ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-sm'
+                                : 'bg-slate-800 text-slate-400 border-white/10 hover:text-white'
+                            }`}
+                          >
+                            {show916SafeZone ? 'SHOWING' : 'HIDDEN'}
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* SECTION 2: Sub-Layers List */}
@@ -1884,7 +1908,7 @@ export default function App() {
                               <input
                                 type="range"
                                 min="0.01"
-                                max="3.0"
+                                max="8.0"
                                 step="0.01"
                                 value={activeSelectedLayer.transform.scale}
                                 onChange={(e) => {
@@ -1899,7 +1923,7 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const nextScale = Math.min(3.0, Math.round((activeSelectedLayer.transform.scale + 0.1) * 100) / 100);
+                                  const nextScale = Math.min(8.0, Math.round((activeSelectedLayer.transform.scale + 0.1) * 100) / 100);
                                   handleUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
                                     ...activeSelectedLayer.transform,
                                     scale: nextScale,
@@ -2072,6 +2096,36 @@ export default function App() {
                             >
                               <RotateCw className="w-3.5 h-3.5 text-cyan-400" />
                               <span>Rotate 90°</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const aspect = settings.cropAspect || '16:9';
+                                let coverScale = 3.161; // Exact 256/81 scale for 16:9 -> 9:16 vertical fill
+                                if (aspect === '9:16') {
+                                  coverScale = 3.161;
+                                } else if (aspect === '1:1') {
+                                  coverScale = 1.778;
+                                } else if (aspect === '4:5') {
+                                  coverScale = 2.222;
+                                } else if (aspect === '21:9') {
+                                  coverScale = 1.309;
+                                } else {
+                                  coverScale = 1.778;
+                                }
+                                handleUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
+                                  ...activeSelectedLayer.transform,
+                                  x: 50,
+                                  y: 50,
+                                  scale: coverScale,
+                                  rotation: 0,
+                                });
+                              }}
+                              className="py-1.5 px-2 rounded-lg bg-violet-950/80 hover:bg-violet-900 text-violet-200 text-[11px] font-medium border border-violet-500/40 flex items-center justify-center space-x-1 transition cursor-pointer col-span-2"
+                            >
+                              <Crop className="w-3.5 h-3.5 text-violet-400" />
+                              <span>Fill / Cover Canvas ({settings.cropAspect === '9:16' ? '316%' : (settings.cropAspect || '16:9')})</span>
                             </button>
                           </div>
                         </div>

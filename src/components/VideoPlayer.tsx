@@ -1651,7 +1651,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         const scaleChange = projectedDelta / sensitivity;
         const newScale = Math.max(
           0.05,
-          Math.min(4.0, Math.round((initialTransform.scale + scaleChange) * 100) / 100)
+          Math.min(8.0, Math.round((initialTransform.scale + scaleChange) * 100) / 100)
         );
 
         if (onUpdateClipTransform) {
