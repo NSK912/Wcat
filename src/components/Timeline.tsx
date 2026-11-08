@@ -98,13 +98,10 @@ interface TimelineProps {
 const HoldActionButton: React.FC<{
   onActivate: () => void;
   onReleaseAfterHold?: () => void;
-  holdHintText: string;
   children: React.ReactNode;
-}> = ({ onActivate, onReleaseAfterHold, holdHintText, children }) => {
+}> = ({ onActivate, onReleaseAfterHold, children }) => {
   const [holdProgress, setHoldProgress] = useState<number>(0);
-  const [showHint, setShowHint] = useState<boolean>(false);
   const rafRef = useRef<number | null>(null);
-  const hintTimerRef = useRef<number | null>(null);
   const completedRef = useRef<boolean>(false);
   const startTimeRef = useRef<number>(0);
   const HOLD_DURATION_MS = 550;
@@ -119,9 +116,6 @@ const HoldActionButton: React.FC<{
   useEffect(() => {
     return () => {
       clearHoldRaf();
-      if (hintTimerRef.current !== null) {
-        window.clearTimeout(hintTimerRef.current);
-      }
     };
   }, [clearHoldRaf]);
 
@@ -129,7 +123,6 @@ const HoldActionButton: React.FC<{
     if (e.button !== 0) return;
     clearHoldRaf();
     completedRef.current = false;
-    setShowHint(false);
     startTimeRef.current = performance.now();
     setHoldProgress(5);
 
@@ -152,7 +145,6 @@ const HoldActionButton: React.FC<{
   };
 
   const handlePointerEnd = (isUp: boolean) => {
-    const wasHolding = rafRef.current !== null || holdProgress > 0;
     clearHoldRaf();
     setHoldProgress(0);
 
@@ -161,17 +153,6 @@ const HoldActionButton: React.FC<{
         onReleaseAfterHold();
       }
       completedRef.current = false;
-      return;
-    }
-
-    if (wasHolding && isUp) {
-      setShowHint(true);
-      if (hintTimerRef.current !== null) {
-        window.clearTimeout(hintTimerRef.current);
-      }
-      hintTimerRef.current = window.setTimeout(() => {
-        setShowHint(false);
-      }, 1200);
     }
   };
 
@@ -184,7 +165,6 @@ const HoldActionButton: React.FC<{
         onPointerLeave={() => handlePointerEnd(false)}
         onPointerCancel={() => handlePointerEnd(false)}
         onContextMenu={(e) => e.preventDefault()}
-        title={holdHintText}
         className="relative overflow-hidden h-8 w-8 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 hover:text-slate-100 flex items-center justify-center shadow-sm border border-white/10 transition shrink-0 cursor-pointer select-none"
       >
         {holdProgress > 0 && (
@@ -195,12 +175,6 @@ const HoldActionButton: React.FC<{
         )}
         <span className="relative z-10 flex items-center justify-center">{children}</span>
       </button>
-
-      {showHint && (
-        <div className="absolute -top-7 left-1/2 -translate-x-1/2 z-50 px-2 py-0.5 rounded bg-slate-900 text-slate-100 border border-white/15 text-[10px] font-medium whitespace-nowrap shadow-lg pointer-events-none">
-          {holdHintText}
-        </div>
-      )}
     </div>
   );
 };
@@ -2198,14 +2172,7 @@ export const Timeline: React.FC<TimelineProps> = ({
           <div className="flex items-center space-x-1.5 shrink-0">
             {/* Theme Toggle Button (Left of Fullscreen - Hold to Activate) */}
             {onToggleTheme && (
-              <HoldActionButton
-                onActivate={onToggleTheme}
-                holdHintText={
-                  uiTheme === 'light'
-                    ? 'กดค้างเพื่อสลับธีมสีเทาดำ'
-                    : 'กดค้างเพื่อสลับธีมสีขาว'
-                }
-              >
+              <HoldActionButton onActivate={onToggleTheme}>
                 {uiTheme === 'light' ? (
                   <Moon className="w-3.5 h-3.5 text-slate-200" />
                 ) : (
@@ -2225,7 +2192,6 @@ export const Timeline: React.FC<TimelineProps> = ({
                   onFullscreenClick();
                 }
               }}
-              holdHintText="กดค้างเพื่อขยายเต็มจอ"
             >
               <Maximize2 className="w-3.5 h-3.5 text-slate-200" />
             </HoldActionButton>
