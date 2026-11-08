@@ -1,6 +1,13 @@
 import { EditSettings, ClipTransform, TimelineTrackData, TimelineClip, SampleVideo } from '../types';
 import { HardwareBlurEngine } from './HardwareBlur';
 import {
+  buildCssFilterString as buildCanvasFilterString,
+  calculateTransitionState,
+  isImageFileOrName,
+  isAudioFileOrName,
+  hasVisualSettingsModifications,
+} from './mediaHelpers';
+import {
   Input,
   Output,
   BlobSource,
@@ -3104,6 +3111,103 @@ function drawWatermark(
 }
 
 /**
+ * Shared helper to create an OffscreenCanvas or fallback HTMLCanvasElement
+ */
+function createRenderCanvas(width: number, height: number): {
+  canvas: OffscreenCanvas | HTMLCanvasElement;
+  ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
+} {
+  if (typeof OffscreenCanvas !== 'undefined') {
+    const canvas = new OffscreenCanvas(width, height);
+    return { canvas, ctx: canvas.getContext('2d') };
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return { canvas, ctx: canvas.getContext('2d') };
+}
+
+/**
+ * Shared helper to resolve Mediabunny output format based on settings/extension/codec
+ */
+function resolveContainerOutputFormat(
+  settings: EditSettings,
+  fallbackExt: string,
+  targetVideoCodec?: string
+): WebMOutputFormat | MkvOutputFormat | Mp4OutputFormat {
+  const reqFormat = (settings.outputFormat || (settings as any).containerFormat || '').toLowerCase();
+  const targetExt = reqFormat || fallbackExt.toLowerCase();
+  if (
+    targetExt === 'webm' ||
+    settings.outputFormat === 'webm' ||
+    targetVideoCodec === 'vp8' ||
+    targetVideoCodec === 'vp9'
+  ) {
+    return new WebMOutputFormat();
+  }
+  if (targetExt === 'mkv' || settings.outputFormat === 'mkv') {
+    return new MkvOutputFormat();
+  }
+  return new Mp4OutputFormat({ fastStart: 'in-memory' });
+}
+
+/**
+ * Shared helper to finalize a BufferTarget into a Blob URL & byte count
+ */
+function finalizeBufferTarget(
+  target: StreamTarget | BufferTarget,
+  outputFormat: WebMOutputFormat | MkvOutputFormat | Mp4OutputFormat,
+  currentTotalWritten: number
+): { blobUrl?: string; totalWritten: number } {
+  if (target instanceof BufferTarget && target.buffer) {
+    const isMp4 = outputFormat instanceof Mp4OutputFormat;
+    const isMkv = outputFormat instanceof MkvOutputFormat;
+    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
+    const blob = new Blob([target.buffer], { type: mime });
+    return {
+      blobUrl: URL.createObjectURL(blob),
+      totalWritten: target.buffer.byteLength,
+    };
+  }
+  return { totalWritten: currentTotalWritten };
+}
+
+/**
+ * Shared helper to render a single image or video frame with optional layer transform + watermark
+ */
+function renderSingleSegmentCanvasFrame(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  img: CanvasImageSource,
+  srcWidth: number,
+  srcHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  settings: EditSettings,
+  transform?: ClipTransform
+) {
+  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+  if (!isValidCanvasImageSource(img)) return;
+
+  if (transform !== undefined) {
+    ctx.save();
+    try {
+      ctx.filter = buildCanvasFilterString(settings);
+      if (settings.flipH || settings.flipV) {
+        ctx.translate(settings.flipH ? canvasWidth : 0, settings.flipV ? canvasHeight : 0);
+        ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
+      }
+      drawLayerToCanvas(ctx, img, srcWidth, srcHeight, transform, canvasWidth, canvasHeight, settings);
+    } finally {
+      ctx.restore();
+    }
+  } else {
+    drawFitCover(ctx, img, srcWidth, srcHeight, canvasWidth, canvasHeight, settings);
+  }
+
+  drawWatermark(ctx, canvasWidth, canvasHeight, settings);
+}
+
+/**
  * Checks if the browser natively supports WebCodecs API (VideoEncoder, VideoDecoder)
  */
 export function isWebCodecsSupported(): boolean {
@@ -3241,8 +3345,8 @@ export function getTargetDimensions(
   resolution?: string
 ): { width: number; height: number } {
   if (!resolution || resolution === 'original') {
-    const w = Math.max(8, baseWidth - (baseWidth % 8));
-    const h = Math.max(8, baseHeight - (baseHeight % 8));
+    const w = Math.max(16, baseWidth - (baseWidth % 2));
+    const h = Math.max(16, baseHeight - (baseHeight % 2));
     return { width: w, height: h };
   }
 
@@ -3294,11 +3398,103 @@ export function getTargetDimensions(
   targetWidth = Math.round(targetWidth * scale);
   targetHeight = Math.round(targetHeight * scale);
 
-  // Ensure dimensions are multiples of 8 for optimal hardware encoder compatibility
-  targetWidth = Math.max(8, Math.round(targetWidth / 8) * 8);
-  targetHeight = Math.max(8, Math.round(targetHeight / 8) * 8);
+  // Ensure even dimensions (% 2 === 0) without distorting standard aspect ratios like 1080x1350 (4:5)
+  targetWidth = Math.max(16, Math.round(targetWidth / 2) * 2);
+  targetHeight = Math.max(16, Math.round(targetHeight / 2) * 2);
 
   return { width: targetWidth, height: targetHeight };
+}
+
+/**
+ * Computes exact standard canvas dimensions for a given source resolution, cropAspect, and resolution preset.
+ * Guarantees standard vertical/square/landscape dimensions (e.g. 9:16 -> 1080x1920, 4:5 -> 1080x1350, 1:1 -> 1080x1080).
+ */
+export function calculateCanvasDimensions(
+  sourceWidth: number,
+  sourceHeight: number,
+  settings: EditSettings
+): { width: number; height: number } {
+  const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
+  const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
+
+  let shortSide = Math.min(sourceWidth, sourceHeight);
+  if (hasResolutionPreset) {
+    switch (settings.resolution) {
+      case '480': shortSide = 480; break;
+      case '720': shortSide = 720; break;
+      case '1080': shortSide = 1080; break;
+      case '2k': shortSide = 1440; break;
+      case '4k': shortSide = 2160; break;
+      case '8k': shortSide = 4320; break;
+      default: shortSide = 1080; break;
+    }
+  }
+  shortSide = Math.max(16, Math.round(shortSide / 2) * 2);
+
+  let canvasWidth = sourceWidth;
+  let canvasHeight = sourceHeight;
+
+  if (hasCustomAspect) {
+    if (settings.cropAspect === 'free' && settings.freeCropRect) {
+      const rect = settings.freeCropRect;
+      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
+      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
+      if (hasResolutionPreset) {
+        const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
+        canvasWidth = targetDims.width;
+        canvasHeight = targetDims.height;
+      }
+    } else {
+      switch (settings.cropAspect) {
+        case '9:16':
+          canvasWidth = shortSide;
+          canvasHeight = Math.round((shortSide * 16) / 9);
+          break;
+        case '4:5':
+          canvasWidth = shortSide;
+          canvasHeight = Math.round((shortSide * 5) / 4);
+          break;
+        case '1:1':
+          canvasWidth = shortSide;
+          canvasHeight = shortSide;
+          break;
+        case '16:9':
+          canvasWidth = Math.round((shortSide * 16) / 9);
+          canvasHeight = shortSide;
+          break;
+        case '4:3':
+          canvasWidth = Math.round((shortSide * 4) / 3);
+          canvasHeight = shortSide;
+          break;
+        case '21:9':
+          canvasWidth = Math.round((shortSide * 21) / 9);
+          canvasHeight = shortSide;
+          break;
+        default: {
+          const [num, den] = (settings.cropAspect as string).split(':').map(Number);
+          if (num && den) {
+            if (num < den) {
+              canvasWidth = shortSide;
+              canvasHeight = Math.round((shortSide * den) / num);
+            } else {
+              canvasWidth = Math.round((shortSide * num) / den);
+              canvasHeight = shortSide;
+            }
+          }
+          break;
+        }
+      }
+    }
+  } else if (hasResolutionPreset) {
+    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
+    canvasWidth = targetDims.width;
+    canvasHeight = targetDims.height;
+  }
+
+  canvasWidth = Math.max(16, Math.round(canvasWidth / 2) * 2);
+  canvasHeight = Math.max(16, Math.round(canvasHeight / 2) * 2);
+
+  return { width: canvasWidth, height: canvasHeight };
 }
 
 /**
@@ -3333,8 +3529,8 @@ async function negotiateVideoCodec(
   quality: Quality,
   hwAcceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software' = 'prefer-hardware'
 ): Promise<{ codec: VideoCodec; hwAccel: 'no-preference' | 'prefer-hardware' | 'prefer-software' }> {
-  const safeWidth = Math.max(8, width - (width % 8));
-  const safeHeight = Math.max(8, height - (height % 8));
+  const safeWidth = Math.max(16, width - (width % 2));
+  const safeHeight = Math.max(16, height - (height % 2));
 
   const accelModes: ('prefer-hardware' | 'no-preference' | 'prefer-software')[] = [
     hwAcceleration,
@@ -3462,35 +3658,10 @@ function createWebCodecsTarget(writable: FileSystemWritableFileStream | null): S
   return new StreamTarget(customWritable, { chunked: true });
 }
 
-/**
- * Helper to build Canvas filter string from settings
- */
-function buildCanvasFilterString(settings: EditSettings): string {
-  let filterStr = `brightness(${settings.brightness}) contrast(${settings.contrast})`;
-  switch (settings.filter) {
-    case 'grayscale':
-      filterStr += ' grayscale(100%)';
-      break;
-    case 'sepia':
-      filterStr += ' sepia(100%)';
-      break;
-    case 'negative':
-      filterStr += ' invert(100%)';
-      break;
-    case 'blur':
-      filterStr += ' blur(3px)';
-      break;
-    case 'vignette':
-      filterStr += ' contrast(120%) brightness(90%)';
-      break;
-    default:
-      break;
-  }
-  return filterStr;
-}
+// buildCanvasFilterString imported from ./mediaHelpers
 
 /**
- * Processes Single Video File using WebCodecs API (VideoDecoder & VideoEncoder)
+ * Processes Single Image File to Video using WebCodecs API
  */
 async function processImageToVideo(
   file: File,
@@ -3498,7 +3669,6 @@ async function processImageToVideo(
   writable: FileSystemWritableFileStream | null,
   onProgress: (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => void
 ): Promise<{ success: boolean; totalBytesWritten?: number; blobUrl?: string }> {
-  const startTime = performance.now();
   onProgress({
     percentage: 1,
     statusText: 'Initializing Image-to-Video Pipeline...',
@@ -3507,51 +3677,15 @@ async function processImageToVideo(
   });
 
   const bmp = await createImageBitmap(file);
-  let sourceWidth = bmp.width;
-  let sourceHeight = bmp.height;
-  
-  const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
-  const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
+  const sourceWidth = bmp.width;
+  const sourceHeight = bmp.height;
 
-  let canvasWidth = sourceWidth;
-  let canvasHeight = sourceHeight;
-
-  if (hasCustomAspect) {
-    if (settings.cropAspect === 'free' && settings.freeCropRect) {
-      const rect = settings.freeCropRect;
-      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
-      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
-    } else {
-      let aspectMultiplier = 16 / 9;
-      switch (settings.cropAspect) {
-        case '16:9': aspectMultiplier = 16 / 9; break;
-        case '4:3': aspectMultiplier = 4 / 3; break;
-        case '1:1': aspectMultiplier = 1 / 1; break;
-        case '4:5': aspectMultiplier = 4 / 5; break;
-        case '9:16': aspectMultiplier = 9 / 16; break;
-        case '21:9': aspectMultiplier = 21 / 9; break;
-      }
-      if (sourceWidth / sourceHeight > aspectMultiplier) {
-        canvasHeight = sourceHeight;
-        canvasWidth = Math.round(sourceHeight * aspectMultiplier);
-      } else {
-        canvasWidth = sourceWidth;
-        canvasHeight = Math.round(sourceWidth / aspectMultiplier);
-      }
-    }
-  }
-
-  if (hasResolutionPreset) {
-    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
-    canvasWidth = targetDims.width;
-    canvasHeight = targetDims.height;
-  }
-  
-  canvasWidth = Math.max(8, canvasWidth - (canvasWidth % 8));
-  canvasHeight = Math.max(8, canvasHeight - (canvasHeight % 8));
+  const calcDims = calculateCanvasDimensions(sourceWidth, sourceHeight, settings);
+  const canvasWidth = calcDims.width;
+  const canvasHeight = calcDims.height;
 
   const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
-  const preferredVideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
+  const preferredVideoCodec = (settings.videoCodec as VideoCodec) || 'av1';
   const targetQuality = resolveQuality(settings.videoQuality);
 
   const negotiated = await negotiateVideoCodec(
@@ -3565,15 +3699,8 @@ async function processImageToVideo(
   const targetVideoCodec = negotiated.codec;
   const targetHwAccel = negotiated.hwAccel;
 
-  const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
-  let outputFormat;
-  if (ext === 'webm' || settings.outputFormat === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9') {
-    outputFormat = new WebMOutputFormat();
-  } else if (ext === 'mkv') {
-    outputFormat = new MkvOutputFormat();
-  } else {
-    outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' });
-  }
+  const ext = file.name.split('.').pop()?.toLowerCase() || 'mkv';
+  const outputFormat = resolveContainerOutputFormat(settings, ext, targetVideoCodec);
 
   const target = createWebCodecsTarget(writable);
   let totalWritten = 0;
@@ -3592,7 +3719,7 @@ async function processImageToVideo(
     height: canvasHeight,
     framerate: fps,
   });
-  
+
   output.addVideoTrack(vSource, { width: canvasWidth, height: canvasHeight, framerate: fps, fps });
   await output.start();
 
@@ -3601,91 +3728,28 @@ async function processImageToVideo(
   const frames = Math.ceil(actualDuration * fps);
   const frameDurationSec = 1 / fps;
 
-  let offscreenCanvas: OffscreenCanvas | HTMLCanvasElement;
-  let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
-  
-  if (typeof OffscreenCanvas !== 'undefined') {
-    offscreenCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
-    canvasCtx = offscreenCanvas.getContext('2d');
-  } else {
-    offscreenCanvas = document.createElement('canvas');
-    offscreenCanvas.width = canvasWidth;
-    offscreenCanvas.height = canvasHeight;
-    canvasCtx = offscreenCanvas.getContext('2d');
-  }
-  
+  const { canvas: offscreenCanvas, ctx: canvasCtx } = createRenderCanvas(canvasWidth, canvasHeight);
+
   let lastTime = performance.now();
   let lastBytes = 0;
-  
+
   for (let f = 0; f < frames; f++) {
-    const origDuration = frameDurationSec;
-    const w = canvasWidth;
-    const h = canvasHeight;
-    
     if (canvasCtx) {
-      canvasCtx.save();
-      canvasCtx.clearRect(0, 0, w, h);
-      
-      canvasCtx.filter = buildCanvasFilterString(settings);
-      if (settings.flipH || settings.flipV) {
-        canvasCtx.translate(settings.flipH ? w : 0, settings.flipV ? h : 0);
-        canvasCtx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
-      }
-      
-      const srcRatio = sourceWidth / sourceHeight;
-      const dstRatio = w / h;
-      
-      if (settings.cropAspect === 'free' && settings.freeCropRect) {
-        const rect = settings.freeCropRect;
-        const sx = Math.max(0, Math.min(sourceWidth - 2, Math.round(sourceWidth * (rect.x || 0))));
-        const sy = Math.max(0, Math.min(sourceHeight - 2, Math.round(sourceHeight * (rect.y || 0))));
-        const sw = Math.max(8, Math.min(sourceWidth - sx, Math.round(sourceWidth * (rect.width || 1))));
-        const sh = Math.max(8, Math.min(sourceHeight - sy, Math.round(sourceHeight * (rect.height || 1))));
-        canvasCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
-      } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
-        let sx = 0; let sy = 0; let sw = sourceWidth; let sh = sourceHeight;
-        if (srcRatio > dstRatio) {
-          sw = sourceHeight * dstRatio;
-          sx = (sourceWidth - sw) / 2;
-        } else {
-          sh = sourceWidth / dstRatio;
-          sy = (sourceHeight - sh) / 2;
-        }
-        canvasCtx.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, h);
-      } else {
-        canvasCtx.drawImage(bmp, 0, 0, w, h);
-      }
-      canvasCtx.restore();
-      
-      if (settings.watermarkText && settings.watermarkText.trim()) {
-        canvasCtx.save();
-        const fontSize = settings.watermarkSize || 24;
-        canvasCtx.font = `bold ${fontSize}px sans-serif`;
-        canvasCtx.fillStyle = settings.watermarkColor || '#ffffff';
-        canvasCtx.shadowColor = 'rgba(0,0,0,0.8)';
-        canvasCtx.shadowBlur = 4;
-        canvasCtx.shadowOffsetX = 1;
-        canvasCtx.shadowOffsetY = 1;
-        const text = settings.watermarkText;
-        const textMetrics = canvasCtx.measureText(text);
-        const padding = 20;
-        let x = padding; let y = h - padding;
-        switch (settings.watermarkPosition) {
-          case 'top-left': x = padding; y = padding + fontSize; break;
-          case 'top-right': x = w - textMetrics.width - padding; y = padding + fontSize; break;
-          case 'bottom-left': x = padding; y = h - padding; break;
-          case 'bottom-right': x = w - textMetrics.width - padding; y = h - padding; break;
-          case 'center': x = (w - textMetrics.width) / 2; y = (h + fontSize) / 2; break;
-        }
-        canvasCtx.fillText(text, x, y);
-        canvasCtx.restore();
-      }
+      renderSingleSegmentCanvasFrame(
+        canvasCtx,
+        bmp,
+        sourceWidth,
+        sourceHeight,
+        canvasWidth,
+        canvasHeight,
+        settings
+      );
     }
-    
-    const pSample = new VideoSample(offscreenCanvas, { timestamp: f * frameDurationSec, duration: origDuration });
+
+    const pSample = new VideoSample(offscreenCanvas, { timestamp: f * frameDurationSec, duration: frameDurationSec });
     await vSource.add(pSample);
     pSample.close();
-    
+
     const now = performance.now();
     const elapsed = (now - lastTime) / 1000;
     if (elapsed > 0.5 || f === frames - 1) {
@@ -3700,19 +3764,16 @@ async function processImageToVideo(
       });
     }
   }
-  
+
   bmp.close();
+  try {
+    offscreenCanvas.width = 1;
+    offscreenCanvas.height = 1;
+  } catch {}
   await output.finalize();
 
-  let blobUrl;
-  if (target instanceof BufferTarget && target.buffer) {
-    const isMp4 = outputFormat instanceof Mp4OutputFormat;
-    const isMkv = outputFormat instanceof MkvOutputFormat;
-    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
-    const blob = new Blob([target.buffer], { type: mime });
-    blobUrl = URL.createObjectURL(blob);
-    totalWritten = target.buffer.byteLength;
-  }
+  const finalized = finalizeBufferTarget(target, outputFormat, totalWritten);
+  totalWritten = finalized.totalWritten;
 
   onProgress({
     percentage: 100,
@@ -3724,7 +3785,7 @@ async function processImageToVideo(
   return {
     success: true,
     totalBytesWritten: totalWritten,
-    blobUrl,
+    blobUrl: finalized.blobUrl,
   };
 }
 
@@ -3806,40 +3867,11 @@ export async function processWebCodecsEncodeStream(
   const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
   const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
 
-  let canvasWidth = sourceWidth;
-  let canvasHeight = sourceHeight;
+  const calcDims = calculateCanvasDimensions(sourceWidth, sourceHeight, settings);
+  const canvasWidth = calcDims.width;
+  const canvasHeight = calcDims.height;
 
   if (hasCustomAspect) {
-    if (settings.cropAspect === 'free' && settings.freeCropRect) {
-      const rect = settings.freeCropRect;
-      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
-      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
-    } else {
-      let aspectMultiplier = 16 / 9;
-      switch (settings.cropAspect) {
-        case '16:9': aspectMultiplier = 16 / 9; break;
-        case '4:3': aspectMultiplier = 4 / 3; break;
-        case '1:1': aspectMultiplier = 1 / 1; break;
-        case '4:5': aspectMultiplier = 4 / 5; break;
-        case '9:16': aspectMultiplier = 9 / 16; break;
-        case '21:9': aspectMultiplier = 21 / 9; break;
-      }
-
-      if (sourceWidth / sourceHeight > aspectMultiplier) {
-        // Source is wider than target ratio
-        canvasHeight = sourceHeight;
-        canvasWidth = Math.round(sourceHeight * aspectMultiplier);
-      } else {
-        // Source is taller than target ratio
-        canvasWidth = sourceWidth;
-        canvasHeight = Math.round(sourceWidth / aspectMultiplier);
-      }
-    }
-
-    // Ensure even dimensions
-    canvasWidth = Math.max(8, canvasWidth - (canvasWidth % 8));
-    canvasHeight = Math.max(8, canvasHeight - (canvasHeight % 8));
-
     onProgress({
       percentage: 7,
       statusText: `Applied scale ${settings.cropAspect}: Target resolution ${canvasWidth}x${canvasHeight}`,
@@ -3849,9 +3881,6 @@ export async function processWebCodecsEncodeStream(
   }
 
   if (hasResolutionPreset) {
-    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
-    canvasWidth = targetDims.width;
-    canvasHeight = targetDims.height;
     onProgress({
       percentage: 8,
       statusText: `Applied resolution preset: ${settings.resolution?.toUpperCase()} (${canvasWidth}x${canvasHeight})`,
@@ -3903,19 +3932,8 @@ export async function processWebCodecsEncodeStream(
   });
 
   // Determine Output Format compatible with negotiated codecs
-  const ext = file.name.split('.').pop()?.toLowerCase() || 'mp4';
-  const reqFormat = (settings.outputFormat || (settings as any).containerFormat || '').toLowerCase();
-  const targetExt = reqFormat || ext;
-
-  let outputFormat;
-  if (targetExt === 'webm' || settings.outputFormat === 'webm') {
-    outputFormat = new WebMOutputFormat();
-  } else if (targetExt === 'mkv' || settings.outputFormat === 'mkv') {
-    outputFormat = new MkvOutputFormat();
-  } else {
-    // Standard MP4 with complete sample tables and accurate duration metadata
-    outputFormat = new Mp4OutputFormat({ fastStart: 'in-memory' });
-  }
+  const ext = file.name.split('.').pop()?.toLowerCase() || 'mkv';
+  const outputFormat = resolveContainerOutputFormat(settings, ext);
 
   const target = createWebCodecsTarget(writable);
   let totalWritten = 0;
@@ -3929,16 +3947,9 @@ export async function processWebCodecsEncodeStream(
   let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
 
   if (needsCanvasProcessing) {
-    if (typeof OffscreenCanvas !== 'undefined') {
-      offscreenCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
-      canvasCtx = offscreenCanvas.getContext('2d');
-    } else if (typeof document !== 'undefined') {
-      const c = document.createElement('canvas');
-      c.width = canvasWidth;
-      c.height = canvasHeight;
-      offscreenCanvas = c;
-      canvasCtx = c.getContext('2d');
-    }
+    const created = createRenderCanvas(canvasWidth, canvasHeight);
+    offscreenCanvas = created.canvas;
+    canvasCtx = created.ctx;
   }
 
   // Configure Mediabunny WebCodecs Pipeline with selected speed/acceleration configuration
@@ -3971,108 +3982,10 @@ export async function processWebCodecsEncodeStream(
             const img = sample.toCanvasImageSource();
             const w = canvas.width;
             const h = canvas.height;
+            const srcWidth = (img as any).width || (img as any).videoWidth || (sample as any).displayWidth || (sample as any).codedWidth || w;
+            const srcHeight = (img as any).height || (img as any).videoHeight || (sample as any).displayHeight || (sample as any).codedHeight || h;
 
-            ctx.save();
-            ctx.clearRect(0, 0, w, h);
-
-            if (!isValidCanvasImageSource(img)) {
-              ctx.restore();
-              return;
-            }
-
-            try {
-              // Apply CSS Filters (Brightness, Contrast, Grayscale, etc.)
-              ctx.filter = buildCanvasFilterString(settings);
-
-              // Apply Horizontal / Vertical Flips
-              if (settings.flipH || settings.flipV) {
-                ctx.translate(settings.flipH ? w : 0, settings.flipV ? h : 0);
-                ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
-              }
-
-              // Calculate source crop rectangle to preserve aspect ratio without distortion
-              const srcWidth = (img as any).width || (img as any).videoWidth || (sample as any).displayWidth || (sample as any).codedWidth || w;
-              const srcHeight = (img as any).height || (img as any).videoHeight || (sample as any).displayHeight || (sample as any).codedHeight || h;
-
-              const srcRatio = srcWidth / srcHeight;
-              const dstRatio = w / h;
-
-              if (settings.cropAspect === 'free' && settings.freeCropRect) {
-                const rect = settings.freeCropRect;
-                const sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
-                const sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-                const sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-                const sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
-                ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
-              } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
-                let sx = 0;
-                let sy = 0;
-                let sw = srcWidth;
-                let sh = srcHeight;
-                if (srcRatio > dstRatio) {
-                  // Source is wider than destination: crop sides
-                  sw = srcHeight * dstRatio;
-                  sx = (srcWidth - sw) / 2;
-                } else {
-                  // Source is taller than destination: crop top/bottom
-                  sh = srcWidth / dstRatio;
-                  sy = (srcHeight - sh) / 2;
-                }
-                ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
-              } else {
-                // 5-parameter drawImage maps VideoFrame visibleRect directly without codedWidth padding
-                ctx.drawImage(img as any, 0, 0, w, h);
-              }
-            } catch (drawErr) {
-              console.warn('Canvas process drawImage failed:', drawErr);
-            } finally {
-              ctx.restore();
-            }
-
-            // Apply Watermark Overlay
-            if (settings.watermarkText && settings.watermarkText.trim()) {
-              ctx.save();
-              const fontSize = settings.watermarkSize || 24;
-              ctx.font = `bold ${fontSize}px sans-serif`;
-              ctx.fillStyle = settings.watermarkColor || '#ffffff';
-              ctx.shadowColor = 'rgba(0,0,0,0.8)';
-              ctx.shadowBlur = 4;
-              ctx.shadowOffsetX = 1;
-              ctx.shadowOffsetY = 1;
-              const text = settings.watermarkText;
-              const textMetrics = ctx.measureText(text);
-              const padding = 20;
-
-              let x = padding;
-              let y = h - padding;
-
-              switch (settings.watermarkPosition) {
-                case 'top-left':
-                  x = padding;
-                  y = padding + fontSize;
-                  break;
-                case 'top-right':
-                  x = w - textMetrics.width - padding;
-                  y = padding + fontSize;
-                  break;
-                case 'bottom-left':
-                  x = padding;
-                  y = h - padding;
-                  break;
-                case 'bottom-right':
-                  x = w - textMetrics.width - padding;
-                  y = h - padding;
-                  break;
-                case 'center':
-                  x = (w - textMetrics.width) / 2;
-                  y = (h + fontSize) / 2;
-                  break;
-              }
-
-              ctx.fillText(text, x, y);
-              ctx.restore();
-            }
-
+            renderSingleSegmentCanvasFrame(ctx, img as CanvasImageSource, srcWidth, srcHeight, w, h, settings);
             return canvas as any;
           }
         : undefined,
@@ -4130,7 +4043,6 @@ export async function processWebCodecsEncodeStream(
         speedMBs: 0,
         log: `[WebCodecs API] Hardware encoder failed. Retrying with no-preference (Software). Error: ${err.message}`,
       });
-      // Patch conversion object to use no-preference and retry
       if ((conversion as any).options?.video) {
         (conversion as any).options.video.hardwareAcceleration = 'no-preference';
         await conversion.execute();
@@ -4140,17 +4052,17 @@ export async function processWebCodecsEncodeStream(
     } else {
       throw err;
     }
+  } finally {
+    if (offscreenCanvas) {
+      try {
+        offscreenCanvas.width = 1;
+        offscreenCanvas.height = 1;
+      } catch {}
+    }
   }
 
-  let blobUrl: string | undefined;
-  if (target instanceof BufferTarget && target.buffer) {
-    const isMp4 = outputFormat instanceof Mp4OutputFormat;
-    const isMkv = outputFormat instanceof MkvOutputFormat;
-    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
-    const blob = new Blob([target.buffer], { type: mime });
-    blobUrl = URL.createObjectURL(blob);
-    totalWritten = target.buffer.byteLength;
-  }
+  const finalized = finalizeBufferTarget(target, outputFormat, totalWritten);
+  totalWritten = finalized.totalWritten;
 
   const totalTimeSeconds = ((performance.now() - startTime) / 1000).toFixed(2);
   onProgress({
@@ -4163,79 +4075,11 @@ export async function processWebCodecsEncodeStream(
   return {
     success: true,
     totalBytesWritten: totalWritten,
-    blobUrl,
+    blobUrl: finalized.blobUrl,
   };
 }
 
-/**
- * Multi-Track Timeline Compositing & Transcoding Engine
- * Composites multiple timeline tracks (Base Track 0 + Overlays Track 1, 2, ... N-1)
- * concurrently across timeline time, respecting Z-index, transforms, and duration.
- */
-const TRANSITION_HALF = 0.5;
-
-function calculateTransitionState(
-  activeClip: TimelineClip,
-  prevClip: TimelineClip | null,
-  nextClip: TimelineClip | null,
-  t: number
-): { isActive: boolean; opacity: number; clipPath?: string } {
-  const clipStart = activeClip.startTime || 0;
-  const clipDur = activeClip.endTime !== undefined && activeClip.endTime > clipStart
-    ? activeClip.endTime - clipStart
-    : activeClip.duration || activeClip.fileDuration || (activeClip.mediaType === 'image' ? 5 : 10);
-  const clipEnd = clipStart + clipDur;
-
-  const prevClipEnd = prevClip
-    ? (prevClip.endTime !== undefined && prevClip.endTime > (prevClip.startTime || 0)
-        ? prevClip.endTime
-        : (prevClip.startTime || 0) + (prevClip.duration || prevClip.fileDuration || 10))
-    : 0;
-
-  const hasOutgoing = activeClip.transition && activeClip.transition !== 'none' && nextClip && Math.abs(clipEnd - (nextClip.startTime || 0)) < 0.15;
-  const hasIncoming = prevClip && prevClip.transition && prevClip.transition !== 'none' && Math.abs(prevClipEnd - clipStart) < 0.15;
-
-  const isNormallyActive = t >= clipStart && t <= clipEnd;
-  const isInOutgoing = hasOutgoing && t >= (clipEnd - TRANSITION_HALF) && t <= (clipEnd + TRANSITION_HALF);
-  const isInIncoming = hasIncoming && t >= (prevClipEnd - TRANSITION_HALF) && t <= (prevClipEnd + TRANSITION_HALF);
-  const isSoloFadeEnd = activeClip.transition === 'fade' && !hasOutgoing && t >= (clipEnd - TRANSITION_HALF) && t <= clipEnd;
-
-  if (!isNormallyActive && !isInOutgoing && !isInIncoming && !isSoloFadeEnd) {
-    return { isActive: false, opacity: 1.0 };
-  }
-
-  let transitionOpacity = 1.0;
-  let transitionClipPath: string | undefined = undefined;
-
-  if (isInOutgoing) {
-    const transType = activeClip.transition;
-    const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
-    if (transType === 'fade') {
-      transitionOpacity = p <= 0.5 ? (1.0 - p * 2) : 0.0;
-    } else if (transType === 'crossfade' || transType === 'dissolve') {
-      transitionOpacity = 1.0 - p;
-    } else if (transType === 'wipe') {
-      transitionOpacity = 1.0;
-    }
-  } else if (isInIncoming) {
-    const transType = prevClip!.transition;
-    const p = Math.max(0, Math.min(1, (t - (prevClipEnd - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
-    if (transType === 'fade') {
-      transitionOpacity = p > 0.5 ? ((p - 0.5) * 2) : 0.0;
-    } else if (transType === 'crossfade' || transType === 'dissolve') {
-      transitionOpacity = p;
-    } else if (transType === 'wipe') {
-      transitionOpacity = 1.0;
-      const pct = Math.round(p * 100);
-      transitionClipPath = `polygon(0 0, ${pct}% 0, ${pct}% 100%, 0 100%)`;
-    }
-  } else if (isSoloFadeEnd) {
-    const p = Math.max(0, Math.min(1, (t - (clipEnd - TRANSITION_HALF)) / TRANSITION_HALF));
-    transitionOpacity = 1.0 - p;
-  }
-
-  return { isActive: true, opacity: transitionOpacity, clipPath: transitionClipPath };
-}
+// calculateTransitionState imported from ./mediaHelpers
 
 export async function processWebCodecsMultiTrackTimeline(
   tracks: TimelineTrackData[],
@@ -4387,32 +4231,14 @@ export async function processWebCodecsMultiTrackTimeline(
     if (hasValidDims) break;
   }
 
-  sourceWidth = Math.max(8, Math.round(sourceWidth / 8) * 8);
-  sourceHeight = Math.max(8, Math.round(sourceHeight / 8) * 8);
+  sourceWidth = Math.max(16, Math.round(sourceWidth / 2) * 2);
+  sourceHeight = Math.max(16, Math.round(sourceHeight / 2) * 2);
 
-  const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
-  const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
-  let canvasWidth = sourceWidth;
-  let canvasHeight = sourceHeight;
+  const calcDims = calculateCanvasDimensions(sourceWidth, sourceHeight, settings);
+  const canvasWidth = calcDims.width;
+  const canvasHeight = calcDims.height;
 
-  if (hasCustomAspect) {
-    const [num, den] = (settings.cropAspect as string).split(':').map(Number);
-    if (num && den) {
-      if (sourceWidth / sourceHeight > num / den) canvasWidth = Math.round(sourceHeight * (num / den));
-      else canvasHeight = Math.round(sourceWidth / (num / den));
-    }
-  }
-  if (hasResolutionPreset) {
-    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
-    canvasWidth = targetDims.width;
-    canvasHeight = targetDims.height;
-  }
-
-  // Ensure canvas dimensions are strictly multiples of 8 for hardware encoder macroblock alignment
-  canvasWidth = Math.max(8, Math.round(canvasWidth / 8) * 8);
-  canvasHeight = Math.max(8, Math.round(canvasHeight / 8) * 8);
-
-  const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'avc';
+  const preferredVideoCodec: VideoCodec = (settings.videoCodec as VideoCodec) || 'av1';
   const targetQuality = resolveQuality(settings.videoQuality);
   const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
 
@@ -4576,7 +4402,22 @@ export async function processWebCodecsMultiTrackTimeline(
 
           const { isActive, opacity: transitionOpacity, clipPath: transitionClipPath } = calculateTransitionState(activeClip, prevClip, nextClip, t);
           
-          if (!isActive || transitionOpacity <= 0) continue;
+          if (!isActive || transitionOpacity <= 0) {
+            const clipStart = activeClip.startTime || 0;
+            const clipDur = activeClip.endTime !== undefined && activeClip.endTime > clipStart
+              ? activeClip.endTime - clipStart
+              : activeClip.duration || activeClip.fileDuration || 10;
+            if (t > clipStart + clipDur + 1.0 && clipDecoders.has(activeClip.id)) {
+              const staleDec = clipDecoders.get(activeClip.id)!;
+              if (staleDec.currentSample) { staleDec.currentSample.close(); staleDec.currentSample = null; }
+              if (staleDec.lastDrawnSample) { staleDec.lastDrawnSample.close(); staleDec.lastDrawnSample = null; }
+              if (typeof staleDec.iterator.return === 'function') {
+                staleDec.iterator.return(undefined).catch(() => {});
+              }
+              clipDecoders.delete(activeClip.id);
+            }
+            continue;
+          }
 
           const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
           const isAudio = activeClip.mediaType === 'audio' || activeClip.file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|opus|wma)$/i.test(activeClip.file.name);
@@ -4669,12 +4510,14 @@ export async function processWebCodecsMultiTrackTimeline(
     await vSource.add(outSample);
     outSample.close();
 
-    // Write Interleaved Audio Frame(s) Synchronously
-    if (aSource && !settings.muteAudio) {
-      const targetAudioEnd = outT + frameDur;
+    // Shared helper to mix & write audio frames up to a target time
+    const writeAudioUpTo = async (targetAudioEnd: number, checkAbort = false) => {
+      if (!aSource || settings.muteAudio) return;
       while (currentAudioTime < targetAudioEnd - 0.0005) {
+        if (checkAbort && abortSignal?.aborted) {
+          throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
+        }
         const currentTimelinePos = exportStart + currentAudioTime;
-
         const audioSources: AudioSourceInfo[] = [];
 
         for (const track of visibleTracks) {
@@ -4682,22 +4525,23 @@ export async function processWebCodecsMultiTrackTimeline(
           for (let cIdx = 0; cIdx < track.clips.length; cIdx++) {
             const activeClip = track.clips[cIdx];
             if (!activeClip.file) continue;
-            const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
-            if (isImg) continue;
+            if (activeClip.mediaType === 'image' || isImageFileOrName(activeClip.file)) continue;
 
             const nextClip = cIdx < track.clips.length - 1 ? track.clips[cIdx + 1] : null;
             const prevClip = cIdx > 0 ? track.clips[cIdx - 1] : null;
 
             const { isActive, opacity } = calculateTransitionState(activeClip, prevClip, nextClip, currentTimelinePos);
-            
+
             if (isActive && opacity > 0) {
               const clipSrcStart = activeClip.sourceStartTime || 0;
-              const clipTimelineDur = (activeClip.endTime && activeClip.startTime && activeClip.endTime > activeClip.startTime)
-                ? activeClip.endTime - activeClip.startTime
-                : (activeClip.duration || 60);
-              const clipSrcEnd = (typeof activeClip.sourceEndTime === 'number' && activeClip.sourceEndTime > clipSrcStart)
-                ? activeClip.sourceEndTime
-                : clipSrcStart + clipTimelineDur;
+              const clipTimelineDur =
+                activeClip.endTime && activeClip.startTime && activeClip.endTime > activeClip.startTime
+                  ? activeClip.endTime - activeClip.startTime
+                  : activeClip.duration || 60;
+              const clipSrcEnd =
+                typeof activeClip.sourceEndTime === 'number' && activeClip.sourceEndTime > clipSrcStart
+                  ? activeClip.sourceEndTime
+                  : clipSrcStart + clipTimelineDur;
 
               const audioBuf = await getAudioBufferForFile(activeClip.file, clipSrcStart, clipSrcEnd).catch(() => null);
               if (audioBuf) {
@@ -4710,7 +4554,7 @@ export async function processWebCodecsMultiTrackTimeline(
                   audioSources.push({
                     buffer: audioBuf,
                     sourceStartSec: sourceOffset,
-                    volumeMultiplier: opacity * (track.volume ?? 1)
+                    volumeMultiplier: opacity * (track.volume ?? 1),
                   });
                 }
               }
@@ -4730,7 +4574,10 @@ export async function processWebCodecsMultiTrackTimeline(
           silentSample.close();
         }
       }
-    }
+    };
+
+    // Write Interleaved Audio Frame(s) Synchronously
+    await writeAudioUpTo(outT + frameDur, false);
 
     const now = performance.now();
     const elapsed = (now - lastProgressTime) / 1000;
@@ -4746,93 +4593,38 @@ export async function processWebCodecsMultiTrackTimeline(
         log: `[WebCodecs] Frame: ${f + 1}/${frames} | Time: ${(t - exportStart).toFixed(1)}s / ${exportDuration.toFixed(1)}s | Speed: ${speedMBs.toFixed(1)} MB/s`,
       });
     }
-  }
 
-  // Ensure audio track covers any remaining tail up to exportDuration after all video frames are encoded
-  if (aSource && !settings.muteAudio) {
-    while (currentAudioTime < exportDuration - 0.0005) {
-      if (abortSignal?.aborted) {
-        throw Object.assign(new Error('AbortError'), { name: 'AbortError' });
-      }
-      const currentTimelinePos = exportStart + currentAudioTime;
-      const audioSources: AudioSourceInfo[] = [];
-
-      for (const track of visibleTracks) {
-        if (track.muted) continue;
-        for (let cIdx = 0; cIdx < track.clips.length; cIdx++) {
-          const activeClip = track.clips[cIdx];
-          if (!activeClip.file) continue;
-          const isImg = activeClip.mediaType === 'image' || activeClip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(activeClip.file.name);
-          if (isImg) continue;
-
-          const nextClip = cIdx < track.clips.length - 1 ? track.clips[cIdx + 1] : null;
-          const prevClip = cIdx > 0 ? track.clips[cIdx - 1] : null;
-
-          const { isActive, opacity } = calculateTransitionState(activeClip, prevClip, nextClip, currentTimelinePos);
-
-          if (isActive && opacity > 0) {
-            const clipSrcStart = activeClip.sourceStartTime || 0;
-            const clipTimelineDur = (activeClip.endTime && activeClip.startTime && activeClip.endTime > activeClip.startTime)
-              ? activeClip.endTime - activeClip.startTime
-              : (activeClip.duration || 60);
-            const clipSrcEnd = (typeof activeClip.sourceEndTime === 'number' && activeClip.sourceEndTime > clipSrcStart)
-              ? activeClip.sourceEndTime
-              : clipSrcStart + clipTimelineDur;
-
-            const audioBuf = await getAudioBufferForFile(activeClip.file, clipSrcStart, clipSrcEnd).catch(() => null);
-            if (audioBuf) {
-              const sourceStart = activeClip.sourceStartTime || 0;
-              const clipStart = activeClip.startTime || 0;
-              const sourceOffset = sourceStart + (currentTimelinePos - clipStart);
-              const bufStart = (audioBuf as any).startSec || 0;
-              const bufEnd = bufStart + audioBuf.duration;
-              if (sourceOffset >= bufStart && sourceOffset < bufEnd) {
-                audioSources.push({
-                  buffer: audioBuf,
-                  sourceStartSec: sourceOffset,
-                  volumeMultiplier: opacity * (track.volume ?? 1),
-                });
-              }
-            }
-          }
-        }
-      }
-
-      if (audioSources.length > 0) {
-        const aSample = createMixedAudioSampleBlock(audioSources, currentAudioTime);
-        await aSource.add(aSample);
-        currentAudioTime += AUDIO_FRAME_DURATION;
-        aSample.close();
-      } else {
-        const silentSample = createSilentAudioBlock(currentAudioTime);
-        await aSource.add(silentSample);
-        currentAudioTime += AUDIO_FRAME_DURATION;
-        silentSample.close();
-      }
+    // Ensure audio track covers any remaining tail up to exportDuration on final frame
+    if (f === frames - 1) {
+      await writeAudioUpTo(exportDuration, true);
     }
   }
 
   for (const decoder of clipDecoders.values()) {
     if (decoder.currentSample) { decoder.currentSample.close(); decoder.currentSample = null; }
     if (decoder.lastDrawnSample) { decoder.lastDrawnSample.close(); decoder.lastDrawnSample = null; }
+    if (typeof decoder.iterator.return === 'function') {
+      decoder.iterator.return(undefined).catch(() => {});
+    }
   }
   clipDecoders.clear();
   failedVideoDecoderClips.clear();
+  for (const bmp of bitmapMap.values()) {
+    try { bmp.close(); } catch {}
+  }
+  bitmapMap.clear();
+  try {
+    offscreenCanvas.width = 1;
+    offscreenCanvas.height = 1;
+  } catch {}
 
   // Finalize multiplexer output to ensure container headers (moov/cues) are written
   await output.finalize();
 
-  let blobUrl: string | undefined;
-  if (target instanceof BufferTarget && target.buffer) {
-    const isMp4 = outputFormat instanceof Mp4OutputFormat;
-    const isMkv = outputFormat instanceof MkvOutputFormat;
-    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
-    const blob = new Blob([target.buffer], { type: mime });
-    blobUrl = URL.createObjectURL(blob);
-    totalWritten = target.buffer.byteLength;
-  }
+  const finalized = finalizeBufferTarget(target, outputFormat, totalWritten);
+  totalWritten = finalized.totalWritten;
 
-  return { success: true, totalBytesWritten: totalWritten, blobUrl };
+  return { success: true, totalBytesWritten: totalWritten, blobUrl: finalized.blobUrl };
 }
 
 
@@ -4943,47 +4735,15 @@ export async function processWebCodecsConcatStream(
   }
 
   // Ensure source dimensions are even
-  sourceWidth = Math.max(8, sourceWidth - (sourceWidth % 8));
-  sourceHeight = Math.max(8, sourceHeight - (sourceHeight % 8));
+  sourceWidth = Math.max(16, sourceWidth - (sourceWidth % 2));
+  sourceHeight = Math.max(16, sourceHeight - (sourceHeight % 2));
 
   const hasCustomAspect = Boolean(settings.cropAspect && settings.cropAspect !== 'original');
   const hasResolutionPreset = Boolean(settings.resolution && settings.resolution !== 'original');
 
-  let canvasWidth = sourceWidth;
-  let canvasHeight = sourceHeight;
-
-  if (hasCustomAspect) {
-    if (settings.cropAspect === 'free' && settings.freeCropRect) {
-      const rect = settings.freeCropRect;
-      canvasWidth = Math.round(sourceWidth * Math.max(0.05, Math.min(1, rect.width || 1)));
-      canvasHeight = Math.round(sourceHeight * Math.max(0.05, Math.min(1, rect.height || 1)));
-    } else {
-      let aspectMultiplier = 16 / 9;
-      switch (settings.cropAspect) {
-        case '16:9': aspectMultiplier = 16 / 9; break;
-        case '4:3': aspectMultiplier = 4 / 3; break;
-        case '1:1': aspectMultiplier = 1 / 1; break;
-        case '4:5': aspectMultiplier = 4 / 5; break;
-        case '9:16': aspectMultiplier = 9 / 16; break;
-        case '21:9': aspectMultiplier = 21 / 9; break;
-      }
-      if (sourceWidth / sourceHeight > aspectMultiplier) {
-        canvasHeight = sourceHeight;
-        canvasWidth = Math.round(sourceHeight * aspectMultiplier);
-      } else {
-        canvasWidth = sourceWidth;
-        canvasHeight = Math.round(sourceWidth / aspectMultiplier);
-      }
-    }
-    canvasWidth = Math.max(8, canvasWidth - (canvasWidth % 8));
-    canvasHeight = Math.max(8, canvasHeight - (canvasHeight % 8));
-  }
-
-  if (hasResolutionPreset) {
-    const targetDims = getTargetDimensions(canvasWidth, canvasHeight, settings.resolution);
-    canvasWidth = targetDims.width;
-    canvasHeight = targetDims.height;
-  }
+  const calcDims = calculateCanvasDimensions(sourceWidth, sourceHeight, settings);
+  const canvasWidth = calcDims.width;
+  const canvasHeight = calcDims.height;
 
   const speedConfig = resolveSpeedConfig(settings.encodeSpeed);
   const negotiated = await negotiateVideoCodec(preferredVideoCodec, canvasWidth, canvasHeight, targetQuality, speedConfig.hardwareAcceleration);
@@ -5008,13 +4768,8 @@ export async function processWebCodecsConcatStream(
   });
 
   const firstSeg = segments[0];
-  const ext = firstSeg.file.name.split('.').pop()?.toLowerCase() || 'mp4';
-  const format =
-    ext === 'webm' || targetVideoCodec === 'vp8' || targetVideoCodec === 'vp9'
-      ? new WebMOutputFormat()
-      : ext === 'mkv'
-      ? new MkvOutputFormat()
-      : new Mp4OutputFormat({ fastStart: 'in-memory' });
+  const ext = firstSeg.file.name.split('.').pop()?.toLowerCase() || 'mkv';
+  const format = resolveContainerOutputFormat(settings, ext, targetVideoCodec);
 
   const target = createWebCodecsTarget(writable);
   let totalWritten = 0;
@@ -5053,7 +4808,7 @@ export async function processWebCodecsConcatStream(
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const file = seg.file;
-    const isImage = seg.isImage || file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(file.name);
+    const isImage = seg.isImage || isImageFileOrName(file);
 
     onProgress({
       percentage: Math.round((i / segments.length) * 100),
@@ -5064,118 +4819,29 @@ export async function processWebCodecsConcatStream(
 
     if (isImage) {
       // =========================================================================
-      // 🖼️ IMAGE SEGMENT ENCODING (Generate continuous 30fps video frames)
+      // 🖼️ IMAGE SEGMENT ENCODING (Shared Canvas Frame Renderer)
       // =========================================================================
       const bmp = await createImageBitmap(file);
       const imgWidth = bmp.width;
       const imgHeight = bmp.height;
       const segDuration = seg.duration > 0 ? seg.duration : 5;
-      const fps = (settings.fps && settings.fps > 0) ? Math.min(240, Math.max(1, Math.round(settings.fps))) : 30;
       const frames = Math.ceil(segDuration * fps);
       const frameDurationSec = 1 / fps;
 
-      let segCanvas: OffscreenCanvas | HTMLCanvasElement;
-      let ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
-
-      if (typeof OffscreenCanvas !== 'undefined') {
-        segCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
-        ctx = segCanvas.getContext('2d');
-      } else {
-        segCanvas = document.createElement('canvas');
-        segCanvas.width = canvasWidth;
-        segCanvas.height = canvasHeight;
-        ctx = segCanvas.getContext('2d');
-      }
-
-      const hasLayerTransform = seg.transform !== undefined;
-      const t = seg.transform || { x: 50, y: 50, scale: 1, rotation: 0, opacity: 1 };
-      const opacity = t.opacity ?? 1;
+      const { canvas: segCanvas, ctx } = createRenderCanvas(canvasWidth, canvasHeight);
 
       for (let f = 0; f < frames; f++) {
         if (ctx) {
-          ctx.save();
-          ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-          ctx.filter = buildCanvasFilterString(settings);
-          if (settings.flipH || settings.flipV) {
-            ctx.translate(settings.flipH ? canvasWidth : 0, settings.flipV ? canvasHeight : 0);
-            ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
-          }
-
-          if (hasLayerTransform) {
-            // Apply layer positioning (x/y in percentage, rotation, scale, opacity)
-            const posX = (t.x / 100) * canvasWidth;
-            const posY = (t.y / 100) * canvasHeight;
-            const scale = t.scale || 1;
-            const rotationDeg = t.rotation || 0;
-
-            ctx.save();
-            ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
-            let sourceToDraw: CanvasImageSource = bmp;
-            if (t.blur && t.blur > 0) {
-              const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
-              const scaledBlur = Math.max(1, Math.round(t.blur * (canvasWidth / 640)));
-              
-              sourceToDraw = HardwareBlurEngine.instance.applyBlur(bmp, imgWidth, imgHeight, scaledBlur);
-              ctx.filter = currentFilter;
-            }
-            ctx.translate(posX, posY);
-            if (rotationDeg !== 0) {
-              ctx.rotate((rotationDeg * Math.PI) / 180);
-            }
-            ctx.scale(scale, scale);
-
-            // Layer media is sized relative to canvasWidth with native aspect ratio (matching VideoPlayer.tsx w-full h-auto)
-            const drawW = canvasWidth;
-            const drawH = (imgHeight / imgWidth) * canvasWidth;
-            ctx.drawImage(sourceToDraw, -drawW / 2, -drawH / 2, drawW, drawH);
-            ctx.restore();
-          } else {
-            const srcRatio = imgWidth / imgHeight;
-            const dstRatio = canvasWidth / canvasHeight;
-            let sx = 0; let sy = 0; let sw = imgWidth; let sh = imgHeight;
-
-            if (settings.cropAspect === 'free' && settings.freeCropRect) {
-              const rect = settings.freeCropRect;
-              sx = Math.max(0, Math.min(imgWidth - 2, Math.round(imgWidth * (rect.x || 0))));
-              sy = Math.max(0, Math.min(imgHeight - 2, Math.round(imgHeight * (rect.y || 0))));
-              sw = Math.max(8, Math.min(imgWidth - sx, Math.round(imgWidth * (rect.width || 1))));
-              sh = Math.max(8, Math.min(imgHeight - sy, Math.round(imgHeight * (rect.height || 1))));
-            } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
-              if (srcRatio > dstRatio) {
-                sw = imgHeight * dstRatio;
-                sx = (imgWidth - sw) / 2;
-              } else {
-                sh = imgWidth / dstRatio;
-                sy = (imgHeight - sh) / 2;
-              }
-            }
-            ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, canvasWidth, canvasHeight);
-          }
-          ctx.restore();
-
-          if (settings.watermarkText && settings.watermarkText.trim()) {
-            ctx.save();
-            const fontSize = settings.watermarkSize || 24;
-            ctx.font = `bold ${fontSize}px sans-serif`;
-            ctx.fillStyle = settings.watermarkColor || '#ffffff';
-            ctx.shadowColor = 'rgba(0,0,0,0.8)';
-            ctx.shadowBlur = 4;
-            ctx.shadowOffsetX = 1;
-            ctx.shadowOffsetY = 1;
-            const text = settings.watermarkText;
-            const textMetrics = ctx.measureText(text);
-            const padding = 20;
-            let x = padding; let y = canvasHeight - padding;
-            switch (settings.watermarkPosition) {
-              case 'top-left': x = padding; y = padding + fontSize; break;
-              case 'top-right': x = canvasWidth - textMetrics.width - padding; y = padding + fontSize; break;
-              case 'bottom-left': x = padding; y = canvasHeight - padding; break;
-              case 'bottom-right': x = canvasWidth - textMetrics.width - padding; y = canvasHeight - padding; break;
-              case 'center': x = (canvasWidth - textMetrics.width) / 2; y = (canvasHeight + fontSize) / 2; break;
-            }
-            ctx.fillText(text, x, y);
-            ctx.restore();
-          }
+          renderSingleSegmentCanvasFrame(
+            ctx,
+            bmp,
+            imgWidth,
+            imgHeight,
+            canvasWidth,
+            canvasHeight,
+            settings,
+            seg.transform
+          );
         }
 
         const pSample = new VideoSample(segCanvas, {
@@ -5187,12 +4853,16 @@ export async function processWebCodecsConcatStream(
       }
 
       bmp.close();
+      try {
+        segCanvas.width = 1;
+        segCanvas.height = 1;
+      } catch {}
       currentVideoTime += segDuration;
       currentAudioTime += segDuration;
 
     } else {
       // =========================================================================
-      // 🎥 VIDEO SEGMENT ENCODING
+      // 🎥 VIDEO SEGMENT ENCODING (Shared Canvas Frame Renderer)
       // =========================================================================
       const input = new Input({
         source: new BlobSource(file),
@@ -5206,17 +4876,9 @@ export async function processWebCodecsConcatStream(
       const aTracks = await input.getAudioTracks();
 
       const hasLayerTransform = seg.transform !== undefined;
-      const t = seg.transform || { x: 50, y: 50, scale: 1, rotation: 0, opacity: 1 };
-      const opacity = t.opacity ?? 1;
-
       const needsCanvasProcessing =
         hasLayerTransform ||
-        settings.filter !== 'none' ||
-        settings.brightness !== 1.0 ||
-        settings.contrast !== 1.0 ||
-        settings.flipH ||
-        settings.flipV ||
-        Boolean(settings.watermarkText?.trim()) ||
+        hasVisualSettingsModifications(settings) ||
         hasCustomAspect ||
         hasResolutionPreset;
 
@@ -5224,15 +4886,9 @@ export async function processWebCodecsConcatStream(
       let canvasCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
 
       if (needsCanvasProcessing) {
-        if (typeof OffscreenCanvas !== 'undefined') {
-          offscreenCanvas = new OffscreenCanvas(canvasWidth, canvasHeight);
-          canvasCtx = offscreenCanvas.getContext('2d');
-        } else {
-          offscreenCanvas = document.createElement('canvas');
-          offscreenCanvas.width = canvasWidth;
-          offscreenCanvas.height = canvasHeight;
-          canvasCtx = offscreenCanvas.getContext('2d');
-        }
+        const created = createRenderCanvas(canvasWidth, canvasHeight);
+        offscreenCanvas = created.canvas;
+        canvasCtx = created.ctx;
       }
 
       const sourceStart = seg.sourceStartTime || 0;
@@ -5258,7 +4914,7 @@ export async function processWebCodecsConcatStream(
             if (lastSourceVideoTime !== -1) {
               let delta = sample.timestamp - lastSourceVideoTime;
               if (delta < 0 || delta > 1.0) {
-                 delta = origDuration;
+                delta = origDuration;
               }
               segmentElapsedVideoTime += delta;
             }
@@ -5267,159 +4923,38 @@ export async function processWebCodecsConcatStream(
             let pSample = sample;
 
             if (needsCanvasProcessing && offscreenCanvas && canvasCtx) {
-              const canvas = offscreenCanvas;
-              const ctx = canvasCtx;
               const img = pSample.toCanvasImageSource();
-              const w = canvasWidth;
-              const h = canvasHeight;
-              
-              ctx.save();
-              ctx.clearRect(0, 0, w, h);
-
               if (!isValidCanvasImageSource(img)) {
-                ctx.restore();
+                sample.close();
                 continue;
               }
 
-              try {
-                // Apply CSS Filters (Brightness, Contrast, Grayscale, etc.)
-                ctx.filter = buildCanvasFilterString(settings);
+              renderSingleSegmentCanvasFrame(
+                canvasCtx,
+                img as CanvasImageSource,
+                pSample.squarePixelWidth,
+                pSample.squarePixelHeight,
+                canvasWidth,
+                canvasHeight,
+                settings,
+                seg.transform
+              );
 
-                // Apply Horizontal / Vertical Flips
-                if (settings.flipH || settings.flipV) {
-                  ctx.translate(settings.flipH ? w : 0, settings.flipV ? h : 0);
-                  ctx.scale(settings.flipH ? -1 : 1, settings.flipV ? -1 : 1);
-                }
-
-                // Calculate source crop rectangle to preserve aspect ratio without distortion
-                const srcWidth = pSample.squarePixelWidth;
-                const srcHeight = pSample.squarePixelHeight;
-                const srcRatio = srcWidth / srcHeight;
-                const dstRatio = w / h;
-
-                if (hasLayerTransform) {
-                  // Apply layer positioning (x/y in percentage, rotation, scale, opacity)
-                  const posX = (t.x / 100) * w;
-                  const posY = (t.y / 100) * h;
-                  const scale = t.scale || 1;
-                  const rotationDeg = t.rotation || 0;
-
-                  ctx.save();
-                  ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
-                  let sourceToDraw: CanvasImageSource = img as any;
-                  if (t.blur && t.blur > 0) {
-                    const currentFilter = ctx.filter === 'none' ? '' : ctx.filter;
-                    const scaledBlur = Math.max(1, Math.round(t.blur * (w / 640)));
-                    
-                    try {
-                      sourceToDraw = HardwareBlurEngine.instance.applyBlur(img as any, srcWidth, srcHeight, scaledBlur);
-                    } catch (blurErr) {
-                      console.warn('Hardware blur failed, falling back to unblurred image:', blurErr);
-                      sourceToDraw = img as any;
-                    }
-                    ctx.filter = currentFilter;
-                  }
-
-                  if (isValidCanvasImageSource(sourceToDraw)) {
-                    ctx.translate(posX, posY);
-                    if (rotationDeg !== 0) {
-                      ctx.rotate((rotationDeg * Math.PI) / 180);
-                    }
-                    ctx.scale(scale, scale);
-
-                    // Layer media is sized relative to canvas width with native video aspect ratio
-                    const drawW = w;
-                    const drawH = (srcHeight / srcWidth) * w;
-                    ctx.drawImage(sourceToDraw, -drawW / 2, -drawH / 2, drawW, drawH);
-                  }
-                  ctx.restore();
-                } else {
-                  if (settings.cropAspect === 'free' && settings.freeCropRect) {
-                    const rect = settings.freeCropRect;
-                    const sx = Math.max(0, Math.min(srcWidth - 2, Math.round(srcWidth * (rect.x || 0))));
-                    const sy = Math.max(0, Math.min(srcHeight - 2, Math.round(srcHeight * (rect.y || 0))));
-                    const sw = Math.max(8, Math.min(srcWidth - sx, Math.round(srcWidth * (rect.width || 1))));
-                    const sh = Math.max(8, Math.min(srcHeight - sy, Math.round(srcHeight * (rect.height || 1))));
-                    ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
-                  } else if (Math.abs(srcRatio - dstRatio) > 0.01) {
-                    let sx = 0;
-                    let sy = 0;
-                    let sw = srcWidth;
-                    let sh = srcHeight;
-                    if (srcRatio > dstRatio) {
-                      sw = srcHeight * dstRatio;
-                      sx = (srcWidth - sw) / 2;
-                    } else {
-                      sh = srcWidth / dstRatio;
-                      sy = (srcHeight - sh) / 2;
-                    }
-                    ctx.drawImage(img as any, sx, sy, sw, sh, 0, 0, w, h);
-                  } else {
-                    ctx.drawImage(img as any, 0, 0, w, h);
-                  }
-                }
-              } catch (drawErr) {
-                console.warn('Concat canvas process drawImage failed:', drawErr);
-              } finally {
-                ctx.restore();
-              }
-
-              // Apply Watermark Overlay
-              if (settings.watermarkText && settings.watermarkText.trim()) {
-                ctx.save();
-                const fontSize = settings.watermarkSize || 24;
-                ctx.font = `bold ${fontSize}px sans-serif`;
-                ctx.fillStyle = settings.watermarkColor || '#ffffff';
-                ctx.shadowColor = 'rgba(0,0,0,0.8)';
-                ctx.shadowBlur = 4;
-                ctx.shadowOffsetX = 1;
-                ctx.shadowOffsetY = 1;
-
-                const text = settings.watermarkText;
-                const textMetrics = ctx.measureText(text);
-                const padding = 20;
-                let x = padding;
-                let y = h - padding;
-
-                switch (settings.watermarkPosition) {
-                  case 'top-left':
-                    x = padding;
-                    y = padding + fontSize;
-                    break;
-                  case 'top-right':
-                    x = w - textMetrics.width - padding;
-                    y = padding + fontSize;
-                    break;
-                  case 'bottom-left':
-                    x = padding;
-                    y = h - padding;
-                    break;
-                  case 'bottom-right':
-                    x = w - textMetrics.width - padding;
-                    y = h - padding;
-                    break;
-                  case 'center':
-                    x = (w - textMetrics.width) / 2;
-                    y = (h + fontSize) / 2;
-                    break;
-                }
-
-                ctx.fillText(text, x, y);
-                ctx.restore();
-              }
-
-              const canvasSample = new VideoSample(canvas, { timestamp: pSample.timestamp, duration: origDuration });
+              const canvasSample = new VideoSample(offscreenCanvas, { timestamp: pSample.timestamp, duration: origDuration });
+              // Immediately release decoded ImageBitmap from GPU VRAM before encoding
+              sample.close();
               pSample = canvasSample;
 
             } else if (pSample.squarePixelWidth !== canvasWidth || pSample.squarePixelHeight !== canvasHeight) {
-                const scaledSample = await pSample.transform({ width: canvasWidth, height: canvasHeight, fit: 'cover' });
-                pSample = scaledSample;
+              const scaledSample = await pSample.transform({ width: canvasWidth, height: canvasHeight, fit: 'cover' });
+              sample.close();
+              pSample = scaledSample;
             }
 
             let outTime = currentVideoTime + segmentElapsedVideoTime;
             if (outTime <= lastWrittenVideoTime) outTime = lastWrittenVideoTime + 0.001;
             lastWrittenVideoTime = outTime;
-            
+
             pSample.setTimestamp(outTime);
             await vSource.add(pSample);
             maxVidDur = Math.max(maxVidDur, segmentElapsedVideoTime + origDuration);
@@ -5449,7 +4984,7 @@ export async function processWebCodecsConcatStream(
             if (lastSourceAudioTime !== -1) {
               let delta = sample.timestamp - lastSourceAudioTime;
               if (delta < 0 || delta > 1.0) {
-                 delta = origDuration;
+                delta = origDuration;
               }
               segmentElapsedAudioTime += delta;
             }
@@ -5458,7 +4993,7 @@ export async function processWebCodecsConcatStream(
             let outTime = currentAudioTime + segmentElapsedAudioTime;
             if (outTime <= lastWrittenAudioTime) outTime = lastWrittenAudioTime + origDuration;
             lastWrittenAudioTime = outTime;
-            
+
             const adaptedSample = adaptAudioSample(sample, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
             adaptedSample.setTimestamp(outTime);
             await aSource.add(adaptedSample);
@@ -5469,26 +5004,35 @@ export async function processWebCodecsConcatStream(
         }
       })();
 
-      await videoPromise;
+      try {
+        await videoPromise;
 
-      if (aTracks.length > 0 && !settings.muteAudio) {
-        await audioPromise;
-      } else if (!settings.muteAudio) {
-        // Generate silent audio for video segments without audio track to keep audio stream synced
-        const segDur = maxVidDur > 0 ? maxVidDur : (seg.duration || 5);
-        let silencePos = 0;
-        while (silencePos < segDur) {
-          const step = Math.min(0.1, segDur - silencePos);
-          let outTime = currentAudioTime + silencePos;
-          if (outTime <= lastWrittenAudioTime) outTime = lastWrittenAudioTime + 0.001;
-          
-          const silentSample = createSilentAudioSample(outTime, step, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
-          await aSource.add(silentSample);
-          lastWrittenAudioTime = outTime;
-          silencePos += step;
-          silentSample.close();
+        if (aTracks.length > 0 && !settings.muteAudio) {
+          await audioPromise;
+        } else if (!settings.muteAudio) {
+          // Generate silent audio for video segments without audio track to keep audio stream synced
+          const segDur = maxVidDur > 0 ? maxVidDur : (seg.duration || 5);
+          let silencePos = 0;
+          while (silencePos < segDur) {
+            const step = Math.min(0.1, segDur - silencePos);
+            let outTime = currentAudioTime + silencePos;
+            if (outTime <= lastWrittenAudioTime) outTime = lastWrittenAudioTime + 0.001;
+
+            const silentSample = createSilentAudioSample(outTime, step, MASTER_AUDIO_SAMPLE_RATE, MASTER_AUDIO_CHANNELS);
+            await aSource.add(silentSample);
+            lastWrittenAudioTime = outTime;
+            silencePos += step;
+            silentSample.close();
+          }
+          maxAudDur = segDur;
         }
-        maxAudDur = segDur;
+      } finally {
+        if (offscreenCanvas) {
+          try {
+            offscreenCanvas.width = 1;
+            offscreenCanvas.height = 1;
+          } catch {}
+        }
       }
 
       const segDur = Math.max(maxVidDur, maxAudDur, seg.duration || 0);
@@ -5499,15 +5043,8 @@ export async function processWebCodecsConcatStream(
 
   await output.finalize();
 
-  let blobUrl: string | undefined;
-  if (target instanceof BufferTarget && target.buffer) {
-    const isMp4 = format instanceof Mp4OutputFormat;
-    const isMkv = format instanceof MkvOutputFormat;
-    const mime = isMp4 ? 'video/mp4' : isMkv ? 'video/x-matroska' : 'video/webm';
-    const blob = new Blob([target.buffer], { type: mime });
-    blobUrl = URL.createObjectURL(blob);
-    totalWritten = target.buffer.byteLength;
-  }
+  const finalized = finalizeBufferTarget(target, format, totalWritten);
+  totalWritten = finalized.totalWritten;
 
   onProgress({
     percentage: 100,
@@ -5519,7 +5056,7 @@ export async function processWebCodecsConcatStream(
   return {
     success: true,
     totalBytesWritten: totalWritten,
-    blobUrl,
+    blobUrl: finalized.blobUrl,
   };
 }
 

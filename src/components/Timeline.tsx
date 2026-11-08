@@ -36,6 +36,8 @@ import {
   Magnet,
   Undo2,
   Redo2,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import { formatTime } from '../utils/sampleVideos';
 import { probeMediaMetadata } from '../utils/nativeMedia';
@@ -49,6 +51,12 @@ import {
   TimelineTrackData,
   ClipTransform,
 } from '../types';
+import {
+  COLOR_ORDER,
+  createInitialTimelineTracks,
+  getFileKey,
+  detectMediaType,
+} from '../utils/mediaHelpers';
 
 export type { MediaType, TrackColor, TimelineClip, TimelineTrackData, ClipTransform };
 
@@ -78,12 +86,124 @@ interface TimelineProps {
   onReset: () => void;
   onExportClick: (tracks: TimelineTrackData[], mode?: 'export' | 'remux') => void;
   onFullscreenClick: () => void;
+  uiTheme?: 'dark' | 'light';
+  onToggleTheme?: () => void;
   isLoaded: boolean;
   isProcessing: boolean;
   isEncodeMode?: boolean;
   tracks?: TimelineTrackData[];
   onTracksChange?: React.Dispatch<React.SetStateAction<TimelineTrackData[]>> | ((tracks: TimelineTrackData[]) => void);
 }
+
+const HoldActionButton: React.FC<{
+  onActivate: () => void;
+  onReleaseAfterHold?: () => void;
+  holdHintText: string;
+  children: React.ReactNode;
+}> = ({ onActivate, onReleaseAfterHold, holdHintText, children }) => {
+  const [holdProgress, setHoldProgress] = useState<number>(0);
+  const [showHint, setShowHint] = useState<boolean>(false);
+  const rafRef = useRef<number | null>(null);
+  const hintTimerRef = useRef<number | null>(null);
+  const completedRef = useRef<boolean>(false);
+  const startTimeRef = useRef<number>(0);
+  const HOLD_DURATION_MS = 550;
+
+  const clearHoldRaf = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearHoldRaf();
+      if (hintTimerRef.current !== null) {
+        window.clearTimeout(hintTimerRef.current);
+      }
+    };
+  }, [clearHoldRaf]);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.button !== 0) return;
+    clearHoldRaf();
+    completedRef.current = false;
+    setShowHint(false);
+    startTimeRef.current = performance.now();
+    setHoldProgress(5);
+
+    const step = (now: number) => {
+      const elapsed = now - startTimeRef.current;
+      const pct = Math.min(100, (elapsed / HOLD_DURATION_MS) * 100);
+      setHoldProgress(pct);
+
+      if (pct >= 100) {
+        completedRef.current = true;
+        setHoldProgress(0);
+        rafRef.current = null;
+        onActivate();
+        return;
+      }
+      rafRef.current = requestAnimationFrame(step);
+    };
+
+    rafRef.current = requestAnimationFrame(step);
+  };
+
+  const handlePointerEnd = (isUp: boolean) => {
+    const wasHolding = rafRef.current !== null || holdProgress > 0;
+    clearHoldRaf();
+    setHoldProgress(0);
+
+    if (completedRef.current) {
+      if (isUp && onReleaseAfterHold) {
+        onReleaseAfterHold();
+      }
+      completedRef.current = false;
+      return;
+    }
+
+    if (wasHolding && isUp) {
+      setShowHint(true);
+      if (hintTimerRef.current !== null) {
+        window.clearTimeout(hintTimerRef.current);
+      }
+      hintTimerRef.current = window.setTimeout(() => {
+        setShowHint(false);
+      }, 1200);
+    }
+  };
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onPointerDown={handlePointerDown}
+        onPointerUp={() => handlePointerEnd(true)}
+        onPointerLeave={() => handlePointerEnd(false)}
+        onPointerCancel={() => handlePointerEnd(false)}
+        onContextMenu={(e) => e.preventDefault()}
+        title={holdHintText}
+        className="relative overflow-hidden h-8 w-8 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 hover:text-slate-100 flex items-center justify-center shadow-sm border border-white/10 transition shrink-0 cursor-pointer select-none"
+      >
+        {holdProgress > 0 && (
+          <div
+            className="absolute bottom-0 left-0 right-0 pointer-events-none transition-none bg-slate-400/35"
+            style={{ height: `${holdProgress}%` }}
+          />
+        )}
+        <span className="relative z-10 flex items-center justify-center">{children}</span>
+      </button>
+
+      {showHint && (
+        <div className="absolute -top-7 left-1/2 -translate-x-1/2 z-50 px-2 py-0.5 rounded bg-slate-900 text-slate-100 border border-white/15 text-[10px] font-medium whitespace-nowrap shadow-lg pointer-events-none">
+          {holdHintText}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const COLOR_CLASSES: Record<TrackColor, {
   tabActive: string;
@@ -167,7 +287,7 @@ const COLOR_CLASSES: Record<TrackColor, {
   },
 };
 
-const COLOR_OPTIONS: TrackColor[] = ['indigo', 'violet', 'emerald', 'amber', 'rose', 'cyan', 'fuchsia'];
+const COLOR_OPTIONS: TrackColor[] = COLOR_ORDER;
 
 export const Timeline: React.FC<TimelineProps> = ({
   currentTime,
@@ -187,11 +307,14 @@ export const Timeline: React.FC<TimelineProps> = ({
   onMultiUploadClick,
   onExportClick,
   onFullscreenClick,
+  uiTheme = 'dark',
+  onToggleTheme,
   isProcessing,
   isEncodeMode = false,
   tracks: propsTracks,
   onTracksChange,
 }) => {
+  const wasFullscreenBeforeHoldRef = useRef<boolean>(false);
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
   const [encodeZoomLevel, setEncodeZoomLevel] = useState<number>(1);
   const [copyZoomLevel, setCopyZoomLevel] = useState<number>(1);
@@ -201,42 +324,26 @@ export const Timeline: React.FC<TimelineProps> = ({
   const [editingName, setEditingName] = useState<string>('');
   const [activeTransitionMenu, setActiveTransitionMenu] = useState<{ trackId: string, clipId: string } | null>(null);
 
-  // Zoom handlers with dedicated conditions per mode
-  const handleZoomIn = () => {
+  // Unified zoom updater shared between Encode Mode and Copy Mode
+  const adjustZoom = (direction: 'in' | 'out') => {
+    const updater = (z: number) => {
+      if (direction === 'in') {
+        let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
+        if (newZ > 1.0 && z < 1.0) newZ = 1.0;
+        return Math.min(5.0, Number(newZ.toFixed(1)));
+      }
+      const newZ = Math.max(0.1, z > 1.0 ? z - 0.5 : z - 0.2);
+      return Number(newZ.toFixed(1));
+    };
     if (isEncodeMode) {
-      // Encode Mode: increment encode zoom
-      setEncodeZoomLevel((z) => {
-        let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
-        if (newZ > 1.0 && z < 1.0) newZ = 1.0;
-        return Math.min(5.0, Number(newZ.toFixed(1)));
-      });
+      setEncodeZoomLevel(updater);
     } else {
-      // Copy Mode: increment copy zoom
-      setCopyZoomLevel((z) => {
-        let newZ = z >= 1.0 ? z + 0.5 : z + 0.2;
-        if (newZ > 1.0 && z < 1.0) newZ = 1.0;
-        return Math.min(5.0, Number(newZ.toFixed(1)));
-      });
+      setCopyZoomLevel(updater);
     }
   };
 
-  const handleZoomOut = () => {
-    if (isEncodeMode) {
-      // Encode Mode: decrement encode zoom
-      setEncodeZoomLevel((z) => {
-        let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
-        if (newZ < 0.1) newZ = 0.1;
-        return Number(newZ.toFixed(1));
-      });
-    } else {
-      // Copy Mode: decrement copy zoom
-      setCopyZoomLevel((z) => {
-        let newZ = z > 1.0 ? z - 0.5 : z - 0.2;
-        if (newZ < 0.1) newZ = 0.1;
-        return Number(newZ.toFixed(1));
-      });
-    }
-  };
+  const handleZoomIn = () => adjustZoom('in');
+  const handleZoomOut = () => adjustZoom('out');
 
   const getDisplayTrackName = useCallback((track: TimelineTrackData, allTracks: TimelineTrackData[]) => {
     if (!track) return '';
@@ -246,28 +353,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   }, []);
 
   // Universal, Free-form Timeline Tracks (Each track holds MULTIPLE independent clips)
-  const [internalTracks, setInternalTracks] = useState<TimelineTrackData[]>([
-    {
-      id: 'track-1',
-      name: 'Track 1',
-      mediaType: 'any',
-      color: 'indigo',
-      clips: [],
-      muted: false,
-      locked: false,
-      hidden: false,
-    },
-    {
-      id: 'track-2',
-      name: 'Track 2',
-      mediaType: 'any',
-      color: 'violet',
-      clips: [],
-      muted: false,
-      locked: false,
-      hidden: false,
-    },
-  ]);
+  const [internalTracks, setInternalTracks] = useState<TimelineTrackData[]>(createInitialTimelineTracks);
 
   const tracks = propsTracks ?? internalTracks;
   const setTracks = (onTracksChange as unknown as React.Dispatch<React.SetStateAction<TimelineTrackData[]>>) ?? setInternalTracks;
@@ -472,7 +558,7 @@ export const Timeline: React.FC<TimelineProps> = ({
     audioSignature?: string;
   } | null>(null);
 
-  const getFileKey = (file: File): string => `${file.name}_${file.size}_${file.lastModified}`;
+  // getFileKey imported from mediaHelpers.ts
 
   // Helper to extract thumbnails and exact duration for a specific video file
   const extractThumbnailsForFile = async (file: File) => {
@@ -676,16 +762,76 @@ export const Timeline: React.FC<TimelineProps> = ({
     });
   }, [duration, setTracks]);
 
-  const detectMediaType = (file: File): MediaType => {
-    if (file.type.startsWith('video/')) return 'video';
-    if (file.type.startsWith('audio/')) return 'audio';
-    if (file.type.startsWith('image/')) return 'image';
-    const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    if (['mp4', 'mkv', 'mov', 'webm', 'avi', 'flv'].includes(ext)) return 'video';
-    if (['mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg', 'opus'].includes(ext)) return 'audio';
-    if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'svg', 'bmp'].includes(ext)) return 'image';
-    return 'any';
-  };
+  // Shared helper to construct default tracks from selectedFiles
+  const buildTracksFromFiles = useCallback(
+    (files: File[], existingClipMap?: Map<string, TimelineClip>): TimelineTrackData[] => {
+      const builtTracks: TimelineTrackData[] = files.map((file, idx) => {
+        const key = getFileKey(file);
+        const detectedType = detectMediaType(file);
+        const knownDuration =
+          fileDurations[key] && fileDurations[key] > 0
+            ? fileDurations[key]
+            : detectedType === 'image'
+            ? 5
+            : files.length === 1 && duration > 0
+            ? duration
+            : 0;
+        const trackColor = COLOR_ORDER[idx % COLOR_ORDER.length];
+        const existingClip = existingClipMap?.get(key);
+
+        const clip: TimelineClip = existingClip
+          ? {
+              ...existingClip,
+              startTime: 0,
+              endTime: existingClip.sourceEndTime - existingClip.sourceStartTime,
+              color: trackColor,
+            }
+          : {
+              id: `clip-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+              name: file.name,
+              mediaType: detectedType,
+              startTime: 0,
+              endTime: knownDuration,
+              sourceStartTime: 0,
+              sourceEndTime: knownDuration,
+              fileDuration: knownDuration,
+              file: file,
+              fileName: file.name,
+              previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+              color: trackColor,
+              isTrimmed: false,
+            };
+
+        return {
+          id: `track-${idx + 1}`,
+          name: files.length > 1 ? `Track ${idx + 1}` : 'Track 1',
+          mediaType: 'any' as MediaType,
+          color: trackColor,
+          clips: [clip],
+          muted: false,
+          locked: false,
+          hidden: false,
+        };
+      });
+
+      while (builtTracks.length < 2) {
+        const nextIdx = builtTracks.length + 1;
+        builtTracks.push({
+          id: `track-${nextIdx}`,
+          name: `Track ${nextIdx}`,
+          mediaType: 'any' as MediaType,
+          color: COLOR_ORDER[(nextIdx - 1) % COLOR_ORDER.length],
+          clips: [],
+          muted: false,
+          locked: false,
+          hidden: false,
+        });
+      }
+
+      return builtTracks;
+    },
+    [fileDurations, duration]
+  );
 
   const prevIsEncodeModeRef = useRef<boolean>(isEncodeMode);
 
@@ -696,7 +842,6 @@ export const Timeline: React.FC<TimelineProps> = ({
 
     if (wasEncodeMode && !isEncodeMode && selectedFiles && selectedFiles.length > 0) {
       setTracks((prev) => {
-        // Collect latest clip data for each file to preserve trims if possible
         const clipMap = new Map<string, TimelineClip>();
         prev.forEach((t) => {
           t.clips.forEach((c) => {
@@ -705,77 +850,17 @@ export const Timeline: React.FC<TimelineProps> = ({
             }
           });
         });
-
-        const colorOrder: TrackColor[] = ['indigo', 'violet', 'emerald', 'amber', 'rose', 'cyan', 'fuchsia'];
-        const restoredTracks: TimelineTrackData[] = selectedFiles.map((file, idx) => {
-          const key = getFileKey(file);
-          const detectedType = detectMediaType(file);
-          const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
-          const trackColor = colorOrder[idx % colorOrder.length];
-          const existingClip = clipMap.get(key);
-
-          const clip: TimelineClip = existingClip ? {
-            ...existingClip,
-            startTime: 0,
-            endTime: existingClip.sourceEndTime - existingClip.sourceStartTime, // Reset position to start
-            color: trackColor
-          } : {
-            id: `clip-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
-            name: file.name,
-            mediaType: detectedType,
-            startTime: 0,
-            endTime: knownDuration,
-            sourceStartTime: 0,
-            sourceEndTime: knownDuration,
-            fileDuration: knownDuration,
-            file: file,
-            fileName: file.name,
-            previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
-            color: trackColor,
-            isTrimmed: false,
-          };
-
-          return {
-            id: `track-${idx + 1}`,
-            name: selectedFiles.length > 1 ? `Track ${idx + 1}` : 'Track 1',
-            mediaType: 'any' as MediaType,
-            color: trackColor,
-            clips: [clip],
-            muted: false,
-            locked: false,
-            hidden: false,
-          };
-        });
-
-        // Ensure at least 2 tracks if only 1 file is selected
-        while (restoredTracks.length < 2) {
-          const nextIdx = restoredTracks.length + 1;
-          restoredTracks.push({
-            id: `track-${nextIdx}`,
-            name: `Track ${nextIdx}`,
-            mediaType: 'any' as MediaType,
-            color: colorOrder[(nextIdx - 1) % colorOrder.length],
-            clips: [],
-            muted: false,
-            locked: false,
-            hidden: false,
-          });
-        }
-        
-        return restoredTracks;
+        return buildTracksFromFiles(selectedFiles, clipMap);
       });
       setActiveTrackId('track-1');
     }
-  }, [isEncodeMode, selectedFiles, fileDurations, setTracks]);
+  }, [isEncodeMode, selectedFiles, buildTracksFromFiles, setTracks]);
 
   // Sync timeline tracks and multi-clips dynamically according to selectedFiles
   useEffect(() => {
     if (!selectedFiles || selectedFiles.length === 0) return;
 
     setTracks((prev) => {
-      const colorOrder: TrackColor[] = ['indigo', 'violet', 'emerald', 'amber', 'rose', 'cyan', 'fuchsia'];
-
-      // Check existing files already present across any track
       const existingFilesSet = new Set<string>();
       prev.forEach((t) => {
         t.clips.forEach((c) => {
@@ -791,63 +876,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       // If tracks are empty or user replaced the selected file(s) with a brand new file, build fresh tracks
       const totalClipsCount = prev.reduce((acc, t) => acc + t.clips.length, 0);
       if (totalClipsCount === 0 || (!isEncodeMode && !anyExistingStillSelected)) {
-        const newTracks: TimelineTrackData[] = selectedFiles.map((file, idx) => {
-          const key = getFileKey(file);
-          const detectedType = detectMediaType(file);
-          const knownDuration =
-            fileDurations[key] && fileDurations[key] > 0
-              ? fileDurations[key]
-              : detectedType === 'image'
-              ? 5
-              : selectedFiles.length === 1 && duration > 0
-              ? duration
-              : 0;
-          const trackColor = colorOrder[idx % colorOrder.length];
-
-          const clip: TimelineClip = {
-            id: `clip-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
-            name: file.name,
-            mediaType: detectedType,
-            startTime: 0,
-            endTime: knownDuration,
-            sourceStartTime: 0,
-            sourceEndTime: knownDuration,
-            fileDuration: knownDuration,
-            file: file,
-            fileName: file.name,
-            previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
-            color: trackColor,
-            isTrimmed: false,
-          };
-
-          return {
-            id: `track-${idx + 1}`,
-            name: selectedFiles.length > 1 ? `Track ${idx + 1}` : 'Track 1',
-            mediaType: 'any' as MediaType,
-            color: trackColor,
-            clips: [clip],
-            muted: false,
-            locked: false,
-            hidden: false,
-          };
-        });
-
-        // Ensure at least 2 tracks if only 1 file is selected
-        while (newTracks.length < 2) {
-          const nextIdx = newTracks.length + 1;
-          newTracks.push({
-            id: `track-${nextIdx}`,
-            name: `Track ${nextIdx}`,
-            mediaType: 'any' as MediaType,
-            color: colorOrder[(nextIdx - 1) % colorOrder.length],
-            clips: [],
-            muted: false,
-            locked: false,
-            hidden: false,
-          });
-        }
-
-        return newTracks;
+        return buildTracksFromFiles(selectedFiles);
       }
 
       // If tracks already exist and have clips, check if any newly selected files need their own track
@@ -861,7 +890,7 @@ export const Timeline: React.FC<TimelineProps> = ({
         const key = getFileKey(file);
         const detectedType = detectMediaType(file);
         const knownDuration = fileDurations[key] || (detectedType === 'image' ? 5 : 0);
-        const trackColor = colorOrder[updatedTracks.length % colorOrder.length];
+        const trackColor = COLOR_ORDER[updatedTracks.length % COLOR_ORDER.length];
 
         const newClip: TimelineClip = {
           id: `clip-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
@@ -1329,13 +1358,19 @@ export const Timeline: React.FC<TimelineProps> = ({
     const activeAudioClips: { id: string; file: File; startTime: number; sourceStartTime: number }[] = [];
 
     if (!isEncodeMode) {
-      const activeTrack = tracks.find((t) => t.id === activeTrackId);
+      const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks.find((t) => !t.hidden && t.clips.some((c) => c.file));
       if (activeTrack && !activeTrack.hidden) {
-        targetClip = activeTrack.clips.find((c) => c.file && c.startTime <= currentTime && currentTime <= c.endTime);
+        targetClip = activeTrack.clips.find((c) => c.file && (c.startTime - 0.20) <= currentTime && currentTime <= (c.endTime + 0.10));
+        // Fallback to first clip if playhead is at the very beginning of the track (e.g. 0.0s)
+        if (!targetClip && activeTrack.clips.length > 0 && activeTrack.clips[0].file) {
+          if (currentTime <= (activeTrack.clips[0].startTime + 0.25)) {
+            targetClip = activeTrack.clips[0];
+          }
+        }
       }
     } else {
       for (const t of tracks) {
-        const match = t.clips.find((c) => c.file && c.startTime <= currentTime && currentTime <= c.endTime);
+        const match = t.clips.find((c) => c.file && (c.startTime - 0.20) <= currentTime && currentTime <= (c.endTime + 0.10));
         if (match) {
           if (!t.hidden && !targetClip) {
             targetClip = match; // Topmost visible track provides video
@@ -1400,8 +1435,7 @@ export const Timeline: React.FC<TimelineProps> = ({
         const snapPoints: number[] = [];
         tracks.forEach((t) => {
           t.clips.forEach((c) => {
-            snapPoints.push(c.startTime);
-            snapPoints.push(c.endTime);
+            snapPoints.push(c.startTime, c.endTime);
           });
         });
 
@@ -1441,6 +1475,23 @@ export const Timeline: React.FC<TimelineProps> = ({
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
   };
+
+  // Shared helper to collect candidate magnetic snap points across tracks
+  const collectSnapPoints = useCallback(
+    (excludeClipId?: string): number[] => {
+      const pts: number[] = [];
+      if (excludeClipId && currentTime >= 0) pts.push(currentTime);
+      tracks.forEach((t) => {
+        t.clips.forEach((c) => {
+          if (c.id !== excludeClipId) {
+            pts.push(c.startTime, c.endTime);
+          }
+        });
+      });
+      return pts;
+    },
+    [tracks, currentTime]
+  );
 
   // Universal Clip Dragging (Supports multi-clip horizontal trimming & moving + vertical inter-track drop into same track)
   const startTrimDrag = (
@@ -1492,6 +1543,7 @@ export const Timeline: React.FC<TimelineProps> = ({
 
       // Snap if enabled and in encode mode (disabled in copy mode)
       const shouldSnap = snapEnabled && isEncodeMode;
+      const snapPoints = shouldSnap ? collectSnapPoints(clipId) : [];
 
       if (type === 'middle') {
         const span = startEndTime - startStartTime;
@@ -1504,26 +1556,12 @@ export const Timeline: React.FC<TimelineProps> = ({
         }
 
         if (shouldSnap) {
-          // Candidate snap points only across other clips
-          const snapPoints: number[] = [];
-          if (currentTime >= 0) snapPoints.push(currentTime);
-
-          tracks.forEach((t) => {
-            t.clips.forEach((c) => {
-              if (c.id !== clipId) {
-                snapPoints.push(c.startTime);
-                snapPoints.push(c.endTime);
-              }
-            });
-          });
-
           let bestDist = Infinity;
           let snappedStart: number | null = null;
           let snappedEnd: number | null = null;
           let snappedPoint: number | null = null;
 
           for (const pt of snapPoints) {
-            // Check start edge snap
             const distStart = Math.abs(rawStart - pt);
             if (distStart <= snapThresholdTime && distStart < bestDist) {
               bestDist = distStart;
@@ -1532,7 +1570,6 @@ export const Timeline: React.FC<TimelineProps> = ({
               snappedPoint = pt;
             }
 
-            // Check end edge snap
             const distEnd = Math.abs(rawEnd - pt);
             if (distEnd <= snapThresholdTime && distEnd < bestDist) {
               bestDist = distEnd;
@@ -1599,24 +1636,11 @@ export const Timeline: React.FC<TimelineProps> = ({
         }
       } else if (type === 'left') {
         let rawStart = startStartTime + deltaTime;
-        // In Copy Mode / Single track, cannot expand left beyond 0 or past duration
-        // Also cannot expand left past the original source start if source is at 0
         const isImage = currentClip.mediaType === 'image' || currentClip.file?.type.startsWith('image/');
         const minPossibleStart = (!isEncodeMode || isImage) ? 0 : Math.max(0, startStartTime - startSourceStartTime);
         rawStart = Math.max(minPossibleStart, Math.min(rawStart, startEndTime - minSpan));
 
         if (shouldSnap) {
-          const snapPoints: number[] = [];
-          if (currentTime >= 0) snapPoints.push(currentTime);
-          tracks.forEach((t) => {
-            t.clips.forEach((c) => {
-              if (c.id !== clipId) {
-                snapPoints.push(c.startTime);
-                snapPoints.push(c.endTime);
-              }
-            });
-          });
-
           let bestDist = Infinity;
           let snappedVal: number | null = null;
           for (const pt of snapPoints) {
@@ -1628,13 +1652,8 @@ export const Timeline: React.FC<TimelineProps> = ({
               }
             }
           }
-
-          if (snappedVal !== null) {
-            newStart = snappedVal;
-            activeSnapPoint = snappedVal;
-          } else {
-            newStart = rawStart;
-          }
+          newStart = snappedVal !== null ? snappedVal : rawStart;
+          activeSnapPoint = snappedVal;
         } else {
           newStart = rawStart;
         }
@@ -1644,7 +1663,6 @@ export const Timeline: React.FC<TimelineProps> = ({
         setDragTooltip(`${snapPrefix}[${currentClip.name}] In: ${formatTime(newStart)}`);
       } else if (type === 'right') {
         let rawEnd = startEndTime + deltaTime;
-        // Limit rawEnd to not exceed original video/media duration
         const isImage = currentClip.mediaType === 'image' || currentClip.file?.type.startsWith('image/');
         const maxPossibleEnd = isImage 
           ? Infinity 
@@ -1655,17 +1673,6 @@ export const Timeline: React.FC<TimelineProps> = ({
         rawEnd = Math.max(startStartTime + minSpan, Math.min(rawEnd, maxPossibleEnd));
 
         if (shouldSnap) {
-          const snapPoints: number[] = [];
-          if (currentTime >= 0) snapPoints.push(currentTime);
-          tracks.forEach((t) => {
-            t.clips.forEach((c) => {
-              if (c.id !== clipId) {
-                snapPoints.push(c.startTime);
-                snapPoints.push(c.endTime);
-              }
-            });
-          });
-
           let bestDist = Infinity;
           let snappedVal: number | null = null;
           for (const pt of snapPoints) {
@@ -1677,13 +1684,8 @@ export const Timeline: React.FC<TimelineProps> = ({
               }
             }
           }
-
-          if (snappedVal !== null) {
-            newEnd = snappedVal;
-            activeSnapPoint = snappedVal;
-          } else {
-            newEnd = rawEnd;
-          }
+          newEnd = snappedVal !== null ? snappedVal : rawEnd;
+          activeSnapPoint = snappedVal;
         } else {
           newEnd = rawEnd;
         }
@@ -1883,175 +1885,103 @@ export const Timeline: React.FC<TimelineProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
-  // Split at playhead: cuts the clip under playhead into TWO clips inside the track
+  // Split at playhead: cuts the clip under playhead into TWO clips inside the track (unified for both modes)
   const handleSplitAtPlayhead = () => {
     if (computedTimelineDuration <= 0) return;
     const pos = currentTime;
 
-    if (isEncodeMode) {
-      // =========================================================================
-      // 🔴 ENCODE MODE: Split Logic & Track State Update
-      // =========================================================================
-      const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
-      if (!activeTrack) return;
-
-      const targetClip =
-        activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
-        tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
-
-      if (!targetClip) return;
-
-      const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id)) || activeTrack;
-
-      commitToHistory();
-
-      const offset = pos - targetClip.startTime;
-      const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
-
-      const clipA: TimelineClip = {
-        ...targetClip,
-        id: `${targetClip.id}-a-${Date.now()}`,
-        startTime: targetClip.startTime,
-        endTime: pos,
-        sourceStartTime: targetClip.sourceStartTime || 0,
-        sourceEndTime: splitSourcePos,
-        isTrimmed: true,
-      };
-
-      const clipB: TimelineClip = {
-        ...targetClip,
-        id: `${targetClip.id}-b-${Date.now()}`,
-        startTime: pos,
-        endTime: targetClip.endTime,
-        sourceStartTime: splitSourcePos,
-        sourceEndTime:
-          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
-        isTrimmed: true,
-      };
-
-      setTracks((prev) =>
-        prev.map((t) => {
-          if (t.id === parentTrack.id) {
-            const newClips: TimelineClip[] = [];
-            t.clips.forEach((c) => {
-              if (c.id === targetClip.id) {
-                newClips.push(clipA, clipB);
-              } else {
-                newClips.push(c);
-              }
-            });
-            return { ...t, clips: newClips };
-          }
-          return t;
-        })
-      );
-
-      setActiveClipId(clipB.id);
-    } else {
-      // =========================================================================
-      // 🔵 COPY MODE: Split Logic & Track State Update (Split into 2 parts for user selection)
-      // =========================================================================
-      const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
-      if (!activeTrack) return;
-
-      const targetClip =
-        activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
-        tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
-
-      if (!targetClip) return;
-
-      const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id)) || activeTrack;
-
-      commitToHistory();
-
-      const offset = pos - targetClip.startTime;
-      const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
-
-      const clipA: TimelineClip = {
-        ...targetClip,
-        id: `${targetClip.id}-a-${Date.now()}`,
-        startTime: targetClip.startTime,
-        endTime: pos,
-        sourceStartTime: targetClip.sourceStartTime || 0,
-        sourceEndTime: splitSourcePos,
-        isTrimmed: true,
-      };
-
-      const clipB: TimelineClip = {
-        ...targetClip,
-        id: `${targetClip.id}-b-${Date.now()}`,
-        startTime: pos,
-        endTime: targetClip.endTime,
-        sourceStartTime: splitSourcePos,
-        sourceEndTime:
-          targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
-        isTrimmed: true,
-      };
-
-      setTracks((prev) =>
-        prev.map((t) => {
-          if (t.id === parentTrack.id) {
-            const newClips: TimelineClip[] = [];
-            t.clips.forEach((c) => {
-              if (c.id === targetClip.id) {
-                newClips.push(clipA, clipB);
-              } else {
-                newClips.push(c);
-              }
-            });
-            return { ...t, clips: newClips };
-          }
-          return t;
-        })
-      );
-
-      setActiveClipId(clipB.id);
-    }
-  };
-
-  // Mark In
-  const handleMarkIn = () => {
     const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+    if (!activeTrack) return;
+
+    const targetClip =
+      activeTrack.clips.find((c) => pos > c.startTime && pos < c.endTime) ||
+      tracks.flatMap((t) => t.clips).find((c) => pos > c.startTime && pos < c.endTime);
+
+    if (!targetClip) return;
+
+    const parentTrack = tracks.find((t) => t.clips.some((c) => c.id === targetClip.id)) || activeTrack;
+
+    commitToHistory();
+
+    const offset = pos - targetClip.startTime;
+    const splitSourcePos = (targetClip.sourceStartTime || 0) + offset;
+
+    const clipA: TimelineClip = {
+      ...targetClip,
+      id: `${targetClip.id}-a-${Date.now()}`,
+      startTime: targetClip.startTime,
+      endTime: pos,
+      sourceStartTime: targetClip.sourceStartTime || 0,
+      sourceEndTime: splitSourcePos,
+      isTrimmed: true,
+    };
+
+    const clipB: TimelineClip = {
+      ...targetClip,
+      id: `${targetClip.id}-b-${Date.now()}`,
+      startTime: pos,
+      endTime: targetClip.endTime,
+      sourceStartTime: splitSourcePos,
+      sourceEndTime:
+        targetClip.sourceEndTime || targetClip.fileDuration || (targetClip.endTime - targetClip.startTime),
+      isTrimmed: true,
+    };
+
+    setTracks((prev) =>
+      prev.map((t) => {
+        if (t.id === parentTrack.id) {
+          const newClips: TimelineClip[] = [];
+          t.clips.forEach((c) => {
+            if (c.id === targetClip.id) {
+              newClips.push(clipA, clipB);
+            } else {
+              newClips.push(c);
+            }
+          });
+          return { ...t, clips: newClips };
+        }
+        return t;
+      })
+    );
+
+    setActiveClipId(clipB.id);
+  };
+
+  // Unified Mark In / Mark Out boundary handler
+  const handleMarkBoundary = (boundary: 'in' | 'out') => {
+    const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
+    if (!activeTrack) return;
     const targetClip = activeTrack.clips.find((c) => c.id === activeClipId) || activeTrack.clips[0];
-    if (targetClip && currentTime < targetClip.endTime) {
-      commitToHistory();
-      setTracks((prev) =>
-        prev.map((t) =>
-          t.id === activeTrack.id
-            ? {
-                ...t,
-                clips: t.clips.map((c) => (c.id === targetClip.id ? { ...c, startTime: currentTime } : c)),
-              }
-            : t
-        )
-      );
-      if (activeTrack.id === 'track-1') {
-        onStartTimeChange(currentTime);
-      }
+    if (!targetClip) return;
+
+    const isValid = boundary === 'in' ? currentTime < targetClip.endTime : currentTime > targetClip.startTime;
+    if (!isValid) return;
+
+    commitToHistory();
+    setTracks((prev) =>
+      prev.map((t) =>
+        t.id === activeTrack.id
+          ? {
+              ...t,
+              clips: t.clips.map((c) =>
+                c.id === targetClip.id
+                  ? boundary === 'in'
+                    ? { ...c, startTime: currentTime }
+                    : { ...c, endTime: currentTime }
+                  : c
+              ),
+            }
+          : t
+      )
+    );
+    if (activeTrack.id === 'track-1') {
+      if (boundary === 'in') onStartTimeChange(currentTime);
+      else onEndTimeChange(currentTime);
     }
   };
 
-  // Mark Out
-  const handleMarkOut = () => {
-    const activeTrack = tracks.find((t) => t.id === activeTrackId) || tracks[0];
-    const targetClip = activeTrack.clips.find((c) => c.id === activeClipId) || activeTrack.clips[0];
-    if (targetClip && currentTime > targetClip.startTime) {
-      commitToHistory();
-      setTracks((prev) =>
-        prev.map((t) =>
-          t.id === activeTrack.id
-            ? {
-                ...t,
-                clips: t.clips.map((c) => (c.id === targetClip.id ? { ...c, endTime: currentTime } : c)),
-              }
-            : t
-        )
-      );
-      if (activeTrack.id === 'track-1') {
-        onEndTimeChange(currentTime);
-      }
-    }
-  };
+  const handleMarkIn = () => handleMarkBoundary('in');
+  const handleMarkOut = () => handleMarkBoundary('out');
 
   const progressPercent =
     computedTimelineDuration > 0 ? (currentTime / computedTimelineDuration) * 100 : 0;
@@ -2266,12 +2196,40 @@ export const Timeline: React.FC<TimelineProps> = ({
         {/* Playback Controls & Time Display & Auto-Expanding File Bar */}
         <div className="flex-1 min-w-0 flex items-center space-x-3">
           <div className="flex items-center space-x-1.5 shrink-0">
-            <button
-              onClick={onFullscreenClick}
-              className="h-8 w-8 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white flex items-center justify-center shadow-sm border border-white/10 transition shrink-0 cursor-pointer"
+            {/* Theme Toggle Button (Left of Fullscreen - Hold to Activate) */}
+            {onToggleTheme && (
+              <HoldActionButton
+                onActivate={onToggleTheme}
+                holdHintText={
+                  uiTheme === 'light'
+                    ? 'กดค้างเพื่อสลับธีมสีเทาดำ'
+                    : 'กดค้างเพื่อสลับธีมสีขาว'
+                }
+              >
+                {uiTheme === 'light' ? (
+                  <Moon className="w-3.5 h-3.5 text-slate-200" />
+                ) : (
+                  <Sun className="w-3.5 h-3.5 text-slate-200" />
+                )}
+              </HoldActionButton>
+            )}
+
+            {/* Fullscreen Button (Hold to Activate) */}
+            <HoldActionButton
+              onActivate={() => {
+                wasFullscreenBeforeHoldRef.current = Boolean(document.fullscreenElement);
+                onFullscreenClick();
+              }}
+              onReleaseAfterHold={() => {
+                if (Boolean(document.fullscreenElement) === wasFullscreenBeforeHoldRef.current) {
+                  onFullscreenClick();
+                }
+              }}
+              holdHintText="กดค้างเพื่อขยายเต็มจอ"
             >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
+              <Maximize2 className="w-3.5 h-3.5 text-slate-200" />
+            </HoldActionButton>
+
             <button
               onClick={onTogglePlay}
               className={`h-8 w-8 rounded-lg flex items-center justify-center text-white shadow-md transition shrink-0 cursor-pointer ${

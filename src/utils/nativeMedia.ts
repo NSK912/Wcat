@@ -1427,11 +1427,11 @@ export class EBMLDemuxer {
   }
 
   /**
-   * Creates an independent EBMLDemuxer instance for NativeAudioSink that shares
-   * parsed track metadata, firstClusterOffset, and clusterIndex (Cues) without
-   * racing with NativeCanvasSink on lastScannedEndOffset or sample buffers.
+   * Creates an independent EBMLDemuxer instance that shares parsed track metadata,
+   * clusterIndex (Cues), and header offsets without racing on lastScannedEndOffset
+   * or mutating sample buffers across concurrent visual layer players or audio sinks.
    */
-  public cloneForAudio(): EBMLDemuxer {
+  public clone(): EBMLDemuxer {
     const clone = new EBMLDemuxer(this.file);
     clone.duration = this.duration;
     clone.hasHeaderDuration = this.hasHeaderDuration;
@@ -1440,17 +1440,22 @@ export class EBMLDemuxer {
     clone.audioTracks = this.audioTracks;
     clone.segmentPayloadOffset = this.segmentPayloadOffset;
     clone.firstClusterOffset = this.firstClusterOffset;
-    clone.clusterIndex = this.clusterIndex;
+    clone.clusterIndex = this.clusterIndex.slice();
     clone.hasCuesIndex = this.hasCuesIndex;
     clone.cuesFileOffset = this.cuesFileOffset;
     clone.infoFileOffset = this.infoFileOffset;
     clone.tracksFileOffset = this.tracksFileOffset;
     clone.headerStripMap = this.headerStripMap;
     clone.parsed = this.parsed;
-    clone.audioSamples = this.audioSamples.slice();
-    clone.lastScannedAudioSamples = this.lastScannedAudioSamples.slice();
+    clone.videoSamples = this.videoSamples.map((s) => ({ ...s }));
+    clone.audioSamples = this.audioSamples.map((s) => ({ ...s }));
+    clone.lastScannedAudioSamples = this.lastScannedAudioSamples.map((s) => ({ ...s }));
     clone.lastScannedEndOffset = this.lastScannedEndOffset;
     return clone;
+  }
+
+  public cloneForAudio(): EBMLDemuxer {
+    return this.clone();
   }
 
   private recordClusterPoint(timeSec: number, offset: number): void {
@@ -3641,8 +3646,8 @@ export class NativeCanvasSink {
   constructor(file: File | Blob, options: CanvasSinkOptions = {}) {
     this.file = file;
     this.options = options;
-    const targetW = options.width || 1280;
-    const targetH = options.height || 720;
+    const targetW = options.width || 1;
+    const targetH = options.height || 1;
     this.offscreenCanvas = new OffscreenCanvas(targetW, targetH);
     this.ctx = this.offscreenCanvas.getContext('2d', { willReadFrequently: true });
   }
@@ -3686,21 +3691,17 @@ export class NativeCanvasSink {
         description: vTrack.decoderConfig?.description,
         optimizeForLatency: true,
       };
-      if (!this.options.width && this.width > 0 && this.height > 0) {
-        this.offscreenCanvas.width = this.width;
-        this.offscreenCanvas.height = this.height;
-      }
-      this.samples = this.mp4.getVideoSamples();
+      this.samples = this.mp4.getVideoSamples().slice();
       this.setupDecoder();
       this.initialized = true;
       return true;
     }
 
     if (cached?.ebml && cached.ebml.videoTracks.length > 0) {
-      this.ebml = cached.ebml;
+      this.ebml = cached.ebml.clone();
       const vTrack = this.ebml.videoTracks[0];
       const existing = this.ebml.getVideoSamples();
-      this.samples = existing.length > 0 ? existing : await this.ebml.scanClusters(25, undefined, 2 * 1024 * 1024);
+      this.samples = existing.length > 0 ? existing.slice() : await this.ebml.scanClusters(25, undefined, 2 * 1024 * 1024);
       this.duration = this.ebml.duration || vTrack.duration;
       this.width = vTrack.width;
       this.height = vTrack.height;
@@ -3712,10 +3713,6 @@ export class NativeCanvasSink {
         }),
         optimizeForLatency: true,
       };
-      if (!this.options.width && this.width > 0 && this.height > 0) {
-        this.offscreenCanvas.width = this.width;
-        this.offscreenCanvas.height = this.height;
-      }
       this.setupDecoder();
       this.initialized = true;
       return true;
@@ -3763,11 +3760,7 @@ export class NativeCanvasSink {
             description: vTrack.decoderConfig?.description,
             optimizeForLatency: true,
           };
-          if (!this.options.width && this.width > 0 && this.height > 0) {
-            this.offscreenCanvas.width = this.width;
-            this.offscreenCanvas.height = this.height;
-          }
-          this.samples = this.mp4.getVideoSamples();
+          this.samples = this.mp4.getVideoSamples().slice();
           this.setupDecoder();
           this.initialized = true;
           return true;
@@ -3781,9 +3774,9 @@ export class NativeCanvasSink {
       this.ebml = new EBMLDemuxer(this.file);
       const ebmlOk = await this.ebml.parse();
       if (ebmlOk && this.ebml.videoTracks.length > 0) {
-        parsedDemuxerCache.set(this.file, { ebml: this.ebml });
-        const vTrack = this.ebml.videoTracks[0];
         this.samples = await this.ebml.scanClusters(25, undefined, 2 * 1024 * 1024);
+        parsedDemuxerCache.set(this.file, { ebml: this.ebml.clone() });
+        const vTrack = this.ebml.videoTracks[0];
         this.duration = this.ebml.duration || vTrack.duration;
         this.width = vTrack.width;
         this.height = vTrack.height;
@@ -3795,10 +3788,6 @@ export class NativeCanvasSink {
           }),
           optimizeForLatency: true,
         };
-        if (!this.options.width && this.width > 0 && this.height > 0) {
-          this.offscreenCanvas.width = this.width;
-          this.offscreenCanvas.height = this.height;
-        }
         this.setupDecoder();
         this.initialized = true;
         return true;
@@ -3884,8 +3873,10 @@ export class NativeCanvasSink {
               return;
             }
 
-            // Cap queue to 8 frames max so GPU surface pool never blocks
-            while (this.decodedFramesQueue.length >= 8) {
+            // Cap queue based on frame resolution so 4K/8K GPU surface pools never bloat VRAM
+            const framePixels = (frame.displayWidth || this.width || 1280) * (frame.displayHeight || this.height || 720);
+            const maxDecodedQueue = framePixels >= 16_000_000 ? 2 : framePixels >= 6_000_000 ? 3 : 8;
+            while (this.decodedFramesQueue.length >= maxDecodedQueue) {
               const oldest = this.decodedFramesQueue.shift();
               if (oldest) {
                 try {
@@ -4332,6 +4323,12 @@ export class NativeCanvasSink {
   private drawFrameToCanvas(frame: VideoFrame): void {
     if (!this.ctx) return;
     try {
+      const targetW = this.options.width || this.width || frame.displayWidth || 1280;
+      const targetH = this.options.height || this.height || frame.displayHeight || 720;
+      if (this.offscreenCanvas.width !== targetW || this.offscreenCanvas.height !== targetH) {
+        this.offscreenCanvas.width = targetW;
+        this.offscreenCanvas.height = targetH;
+      }
       const cw = this.offscreenCanvas.width || 1280;
       const ch = this.offscreenCanvas.height || 720;
 
@@ -4499,17 +4496,21 @@ export class NativeCanvasSink {
         }
       }
 
-      // Fast pre-roll up to targetSampleIdx (up to 48 chunks per batch), then steady 12-frame read-ahead streaming
+      // Fast pre-roll up to targetSampleIdx, then resolution-aware read-ahead streaming so 4K/8K never bloats GPU VRAM
       const isPreRoll = sampleIdx <= targetSampleIdx && sampleIdx < this.samples.length;
-      const maxQueue = isPreRoll ? 48 : 10;
+      const srcPixels = (this.width || 1280) * (this.height || 720);
+      const steadyMaxQueue = srcPixels >= 16_000_000 ? 3 : srcPixels >= 6_000_000 ? 4 : 10;
+      const steadyRefillThreshold = srcPixels >= 16_000_000 ? 1 : srcPixels >= 6_000_000 ? 2 : 6;
+      const steadyBatchLimit = srcPixels >= 16_000_000 ? 2 : srcPixels >= 6_000_000 ? 4 : 12;
+      const maxQueue = isPreRoll ? 48 : steadyMaxQueue;
       const availSlots = Math.min(
         maxQueue - (this.decodedFramesQueue.length + this.inFlightChunks),
         maxQueue - (this.decoder.decodeQueueSize || 0)
       );
-      if (sampleIdx < this.samples.length && this.decodedFramesQueue.length < 6 && availSlots > 0) {
+      if (sampleIdx < this.samples.length && this.decodedFramesQueue.length <= steadyRefillThreshold && availSlots > 0) {
         const batchCount = isPreRoll
           ? Math.min(availSlots, Math.max(1, targetSampleIdx - sampleIdx + 2), 48)
-          : Math.min(availSlots, this.samples.length - sampleIdx, 12);
+          : Math.min(availSlots, this.samples.length - sampleIdx, steadyBatchLimit);
         const batchEndIdx = sampleIdx + batchCount - 1;
         const payloads = await this.readSampleRangeBytes(sampleIdx, batchEndIdx);
         if (this.activeOperationId !== opId) return;
@@ -4632,6 +4633,10 @@ export class NativeCanvasSink {
     this.readAheadStart = -1;
     this.readAheadEnd = -1;
     this.initialized = false;
+    try {
+      this.offscreenCanvas.width = 1;
+      this.offscreenCanvas.height = 1;
+    } catch {}
     if (this.decoder) {
       try {
         if (this.decoder.state !== 'closed') {
@@ -5380,7 +5385,7 @@ export class NativeAudioSink {
       this.flacBitsPerSample = aTrack.bitsPerSample || 16;
       this.duration = this.mp4.duration || aTrack.duration;
       this.decoderCandidates = await this.buildAudioCandidates(aTrack);
-      const samples = this.mp4.getAudioSamples();
+      const samples = this.mp4.getAudioSamples().slice();
       const verified = await this.verifyDecoderWithFirstSample(samples);
       if (!verified && aTrack.codec === 'flac') {
         this.useSoftwareFlac = true;
@@ -5404,7 +5409,7 @@ export class NativeAudioSink {
           await this.ebml.scanClusters(40, undefined, 4 * 1024 * 1024);
         } catch {}
       }
-      const samples = this.ebml.getAudioSamples();
+      const samples = this.ebml.getAudioSamples().slice();
       const verified = await this.verifyDecoderWithFirstSample(samples);
       if (!verified && aTrack.codec === 'flac') {
         this.useSoftwareFlac = true;
@@ -6231,7 +6236,7 @@ export function extractAv1ConfigRecord(sampleData: Uint8Array): Uint8Array | nul
   let offset = 0;
   let seqHeaderObu: Uint8Array | null = null;
   let seqProfile = 0;
-  let seqLevelIdx = 8; // Level 4.0
+  let seqLevelIdx = 8; // Default Level 4.0 (supports up to 8192x4352, 8.9M px)
   let seqTier = 0;
   let highBitdepth = 0;
   let twelveBit = 0;
@@ -6274,14 +6279,109 @@ export function extractAv1ConfigRecord(sampleData: Uint8Array): Uint8Array | nul
     if (obuType === 1) { // OBU_SEQUENCE_HEADER
       seqHeaderObu = sampleData.subarray(offset, offset + totalObuSize);
 
-      const payloadStart = offset + headerSize;
-      if (payloadStart + 2 <= sampleData.length) {
-        const b0 = sampleData[payloadStart];
-        seqProfile = (b0 >> 5) & 0x07;
-        if (payloadStart + 3 <= sampleData.length) {
-          const b1 = sampleData[payloadStart + 1];
-          seqLevelIdx = (b1 >> 1) & 0x1f;
-          seqTier = b1 & 0x01;
+      const payload = sampleData.subarray(offset + headerSize, offset + totalObuSize);
+      if (payload.length >= 2) {
+        let bitPos = 0;
+        const totalBits = payload.length * 8;
+        const readBits = (n: number): number => {
+          let v = 0;
+          for (let i = 0; i < n; i++) {
+            if (bitPos >= totalBits) return 0;
+            const byteIdx = bitPos >> 3;
+            const bitIdx = 7 - (bitPos & 7);
+            v = (v << 1) | ((payload[byteIdx] >> bitIdx) & 1);
+            bitPos++;
+          }
+          return v;
+        };
+        const readUvlc = (): number => {
+          let leadingZeros = 0;
+          while (bitPos < totalBits && readBits(1) === 0) {
+            leadingZeros++;
+            if (leadingZeros >= 32) return 0;
+          }
+          if (leadingZeros === 0) return 0;
+          const value = readBits(leadingZeros);
+          return value + ((1 << leadingZeros) - 1);
+        };
+
+        seqProfile = readBits(3);
+        readBits(1); // still_picture
+        const reducedStillPictureHeader = readBits(1);
+
+        if (reducedStillPictureHeader) {
+          seqLevelIdx = readBits(5);
+          seqTier = 0;
+        } else {
+          const timingInfoPresentFlag = readBits(1);
+          let decoderModelInfoPresentFlag = 0;
+          let bufferDelayLengthMinus1 = 0;
+          if (timingInfoPresentFlag) {
+            readBits(32); // num_units_in_display_tick
+            readBits(32); // time_scale
+            const equalPictureInterval = readBits(1);
+            if (equalPictureInterval) {
+              readUvlc(); // num_ticks_per_picture_minus_1
+            }
+            decoderModelInfoPresentFlag = readBits(1);
+            if (decoderModelInfoPresentFlag) {
+              bufferDelayLengthMinus1 = readBits(5);
+              readBits(32); // num_units_in_decoding_tick
+              readBits(5);  // buffer_removal_time_length_minus_1
+              readBits(5);  // frame_presentation_time_length_minus_1
+            }
+          }
+          const initialDisplayDelayPresentFlag = readBits(1);
+          const operatingPointsCntMinus1 = readBits(5);
+          for (let i = 0; i <= operatingPointsCntMinus1; i++) {
+            readBits(12); // operating_point_idc[i]
+            const lvl = readBits(5);
+            let tier = 0;
+            if (lvl > 7) {
+              tier = readBits(1);
+            }
+            if (i === 0) {
+              seqLevelIdx = lvl;
+              seqTier = tier;
+            }
+            if (decoderModelInfoPresentFlag) {
+              const decoderModelPresent = readBits(1);
+              if (decoderModelPresent) {
+                const n = bufferDelayLengthMinus1 + 1;
+                readBits(n);
+                readBits(n);
+                readBits(1);
+              }
+            }
+            if (initialDisplayDelayPresentFlag) {
+              const initDisplayDelayPresent = readBits(1);
+              if (initDisplayDelayPresent) {
+                readBits(4);
+              }
+            }
+          }
+        }
+
+        const fwBits = readBits(4) + 1;
+        const fhBits = readBits(4) + 1;
+        const maxW = readBits(fwBits) + 1;
+        const maxH = readBits(fhBits) + 1;
+        const pixels = maxW * maxH;
+
+        // Enforce AV1 Annex A.3 Table A.1 minimum level for maxW x maxH
+        // Level 2.0 (0) has MaxVSize = 1152 which fails on 1080x1920 (9:16) and 1080x1350 (4:5)!
+        let minRequiredLevel = 8; // Level 4.0 (MaxHSize=8192, MaxVSize=4352, MaxPicSize=8,912,896)
+        if (maxW > 8192 || maxH > 4352 || pixels > 8912896) {
+          minRequiredLevel = 16; // Level 6.0
+        } else if (maxW > 6144 || maxH > 3456 || pixels > 2359296) {
+          minRequiredLevel = 12; // Level 5.0
+        } else if (maxW > 2048 || maxH > 1152 || pixels > 921600) {
+          minRequiredLevel = 8; // Level 4.0
+        } else {
+          minRequiredLevel = 5; // Level 3.1 (MaxHSize=6144, MaxVSize=3456)
+        }
+        if (seqLevelIdx < minRequiredLevel || seqLevelIdx === 31) {
+          seqLevelIdx = minRequiredLevel;
         }
       }
       break;
@@ -6306,16 +6406,98 @@ export function extractAv1ConfigRecord(sampleData: Uint8Array): Uint8Array | nul
 }
 
 /**
- * Builds a compliant default AV1CodecConfigurationRecord with Sequence Header OBU.
+ * Builds a compliant default AV1CodecConfigurationRecord with a bit-accurate Sequence Header OBU
+ * matching the exact target width and height (supporting vertical 9:16, 4:5, 1:1, and 16:9).
  */
-export function buildDefaultAv1ConfigRecord(w: number = 1920, h: number = 1080, fps: number = 30): Uint8Array {
-  // Standard compliant AV1 Sequence Header OBU for Profile 0, Level 4.0, 8-bit YUV 4:2:0
-  const seqHeaderObu = new Uint8Array([
-    0x0a, 0x0b, 0x00, 0x00, 0x00, 0x24, 0xa0, 0x3c, 0x23, 0x80, 0x10, 0x00, 0x00
-  ]);
+export function buildDefaultAv1ConfigRecord(w: number = 1920, h: number = 1080, _fps: number = 30): Uint8Array {
+  const safeW = Math.max(16, Math.round(w));
+  const safeH = Math.max(16, Math.round(h));
+  const pixels = safeW * safeH;
+  const seqLevelIdx = (safeW > 8192 || safeH > 4352 || pixels > 8912896)
+    ? 16
+    : (safeW > 6144 || safeH > 3456 || pixels > 2359296)
+    ? 12
+    : 8; // Level 4.0 (MaxHSize=8192, MaxVSize=4352)
+
+  const bits: number[] = [];
+  const writeBits = (val: number, n: number) => {
+    for (let i = n - 1; i >= 0; i--) {
+      bits.push((val >> i) & 1);
+    }
+  };
+
+  writeBits(0, 3); // seq_profile = 0
+  writeBits(0, 1); // still_picture = 0
+  writeBits(0, 1); // reduced_still_picture_header = 0
+  writeBits(0, 1); // timing_info_present_flag = 0
+  writeBits(0, 1); // initial_display_delay_present_flag = 0
+  writeBits(0, 5); // operating_points_cnt_minus_1 = 0
+  writeBits(0, 12); // operating_point_idc[0] = 0
+  writeBits(seqLevelIdx, 5); // seq_level_idx[0]
+  if (seqLevelIdx > 7) {
+    writeBits(0, 1); // seq_tier[0] = 0
+  }
+
+  const wMinus1 = safeW - 1;
+  const hMinus1 = safeH - 1;
+  const wBits = Math.max(1, Math.floor(Math.log2(Math.max(1, wMinus1))) + 1);
+  const hBits = Math.max(1, Math.floor(Math.log2(Math.max(1, hMinus1))) + 1);
+
+  writeBits(wBits - 1, 4); // frame_width_bits_minus_1
+  writeBits(hBits - 1, 4); // frame_height_bits_minus_1
+  writeBits(wMinus1, wBits); // max_frame_width_minus_1
+  writeBits(hMinus1, hBits); // max_frame_height_minus_1
+
+  writeBits(0, 1); // frame_id_numbers_present_flag = 0
+  writeBits(0, 1); // use_128x128_superblock = 0 (64x64)
+  writeBits(1, 1); // enable_filter_intra = 1
+  writeBits(1, 1); // enable_intra_edge_filter = 1
+  writeBits(1, 1); // enable_interintra_compound = 1
+  writeBits(1, 1); // enable_masked_compound = 1
+  writeBits(1, 1); // enable_warped_motion = 1
+  writeBits(1, 1); // enable_dual_filter = 1
+  writeBits(0, 1); // enable_order_hint = 0
+  writeBits(1, 1); // seq_choose_screen_content_tools = 1
+  writeBits(1, 1); // seq_choose_integer_mv = 1
+  writeBits(0, 1); // enable_superres = 0
+  writeBits(1, 1); // enable_cdef = 1
+  writeBits(1, 1); // enable_restoration = 1
+
+  // color_config (8-bit YUV 4:2:0 BT.709)
+  writeBits(0, 1); // high_bitdepth = 0
+  writeBits(0, 1); // mono_chrome = 0
+  writeBits(1, 1); // color_description_present_flag = 1
+  writeBits(1, 8); // color_primaries = 1 (BT.709)
+  writeBits(1, 8); // transfer_characteristics = 1 (BT.709)
+  writeBits(1, 8); // matrix_coefficients = 1 (BT.709)
+  writeBits(0, 1); // color_range = 0 (studio/limited)
+  writeBits(0, 2); // chroma_sample_position = 0
+  writeBits(0, 1); // separate_uv_delta_q = 0
+  writeBits(0, 1); // film_grain_params_present = 0
+
+  // trailing_bits
+  writeBits(1, 1);
+  while (bits.length % 8 !== 0) {
+    writeBits(0, 1);
+  }
+
+  const payload = new Uint8Array(bits.length / 8);
+  for (let i = 0; i < payload.length; i++) {
+    let b = 0;
+    for (let j = 0; j < 8; j++) {
+      b = (b << 1) | bits[i * 8 + j];
+    }
+    payload[i] = b;
+  }
+
+  const seqHeaderObu = new Uint8Array(2 + payload.length);
+  seqHeaderObu[0] = 0x0a; // obu_type = 1 (OBU_SEQUENCE_HEADER), obu_has_size_field = 1
+  seqHeaderObu[1] = payload.length;
+  seqHeaderObu.set(payload, 2);
+
   const record = new Uint8Array(4 + seqHeaderObu.length);
   record[0] = 0x81; // marker=1, version=1
-  record[1] = (0 << 5) | 8; // Profile 0, Level 4.0
+  record[1] = (0 << 5) | (seqLevelIdx & 0x1f);
   record[2] = 0x0c; // Tier 0, 8-bit, 4:2:0
   record[3] = 0x00;
   record.set(seqHeaderObu, 4);
@@ -6363,6 +6545,7 @@ export class WebMMuxer {
   private maxEndMs = 0;
   private durationPatchOffset = -1;
   private isHeaderSent = false;
+  private pendingAudioBlocks: { timeMs: number; data: Uint8Array }[] = [];
 
   constructor(options: WebMMuxerOptions) {
     this.options = options;
@@ -6439,7 +6622,7 @@ export class WebMMuxer {
       const pixelH = encodeElement('ba', encodeUint(this.options.height));
       const displayW = encodeElement('54b0', encodeUint(this.options.width));
       const displayH = encodeElement('54ba', encodeUint(this.options.height));
-      const frameRateEl = encodeElement('2383e3', encodeFloat32(fps));
+      const displayUnit = encodeElement('54b2', encodeUint(0)); // 0 = pixels
 
       // Colour element (0x55b0) for accurate color rendering in AV1 / VP9
       const matrixEl = encodeElement('55b1', encodeUint(1)); // BT.709
@@ -6454,7 +6637,7 @@ export class WebMMuxer {
       ]));
 
       const videoSettings = encodeElement('e0', new Uint8Array([
-        ...pixelW, ...pixelH, ...displayW, ...displayH, ...frameRateEl, ...colourEl
+        ...pixelW, ...pixelH, ...displayW, ...displayH, ...displayUnit, ...colourEl
       ]));
 
       const vEntry = encodeElement('ae', new Uint8Array([
@@ -6554,6 +6737,7 @@ export class WebMMuxer {
       }
     }
 
+    const wasHeaderSent = this.isHeaderSent;
     await this.ensureStarted();
 
     const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
@@ -6561,6 +6745,13 @@ export class WebMMuxer {
     this.maxEndMs = Math.max(this.maxEndMs, timeMs + durMs);
 
     await this.addBlock(1, timeMs, chunk.type === 'key', data);
+
+    if (!wasHeaderSent && this.pendingAudioBlocks.length > 0) {
+      const queued = this.pendingAudioBlocks.splice(0, this.pendingAudioBlocks.length);
+      for (const ab of queued) {
+        await this.addBlock(2, ab.timeMs, true, ab.data);
+      }
+    }
   }
 
   public async addAudioChunk(chunk: EncodedAudioChunk, meta?: any): Promise<void> {
@@ -6578,7 +6769,6 @@ export class WebMMuxer {
       if (meta.decoderConfig.numberOfChannels) this.options.channels = meta.decoderConfig.numberOfChannels;
     }
     if (!this.options.audioCodec) this.options.audioCodec = 'opus';
-    await this.ensureStarted();
 
     const timeMs = Math.max(0, Math.round(chunk.timestamp / 1000));
     const durMs = Math.max(1, Math.round((chunk.duration || 21333) / 1000));
@@ -6587,6 +6777,14 @@ export class WebMMuxer {
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
 
+    // If a video track is configured, wait for the first video chunk so CodecPrivate (av1C)
+    // is extracted from the actual video keyframe before emitting the Matroska/WebM header.
+    if (!this.isHeaderSent && this.options.width && this.options.height) {
+      this.pendingAudioBlocks.push({ timeMs, data });
+      return;
+    }
+
+    await this.ensureStarted();
     await this.addBlock(2, timeMs, true, data);
   }
 
@@ -6647,6 +6845,12 @@ export class WebMMuxer {
 
   public async finalize(): Promise<void> {
     await this.ensureStarted();
+    if (this.pendingAudioBlocks.length > 0) {
+      const queued = this.pendingAudioBlocks.splice(0, this.pendingAudioBlocks.length);
+      for (const ab of queued) {
+        await this.addBlock(2, ab.timeMs, true, ab.data);
+      }
+    }
     await this.flushCluster();
     if (this.durationPatchOffset >= 0 && this.maxEndMs > 0) {
       await this.options.onChunk({
@@ -7447,31 +7651,41 @@ export class Quality {
 
 function resolveWebCodecsVideoCodecString(codec: string, width: number = 1920, height: number = 1080, fps: number = 30): string {
   const pixels = width * height;
+  const maxDim = Math.max(width, height);
   const sampleRate = pixels * Math.max(1, fps || 30);
   if (codec === 'avc') {
-    if (pixels > 2097152 || sampleRate > 125829120) return 'avc1.640034'; // Level 5.2 (4K/8K)
-    if (pixels > 921600 || sampleRate > 27648000) {
+    if (pixels > 8912896 || maxDim > 4096) return 'avc1.64003c'; // Level 6.0 (8K)
+    if (pixels > 2097152 || maxDim > 2048 || height > 1152 || sampleRate > 125829120) return 'avc1.640034'; // Level 5.2 (supports vertical 1080x1920 & 4K)
+    if (pixels > 921600 || maxDim > 1280 || sampleRate > 27648000) {
       return sampleRate > 62914560 ? 'avc1.64002a' : 'avc1.640028'; // Level 4.2 (1080p60) / Level 4.0 (1080p30)
     }
     return 'avc1.64001f'; // Level 3.1 (720p30)
   }
   if (codec === 'hevc') {
-    if (pixels > 2228224 || sampleRate > 133693440) return 'hvc1.1.6.L153.B0'; // Level 5.1 (4K)
+    if (pixels > 8912896 || maxDim > 4096 || height > 2176 || sampleRate > 534773760) {
+      return sampleRate > 1069547520 ? 'hvc1.1.6.L183.B0' : 'hvc1.1.6.L180.B0'; // Level 6.1 / 6.0 (8K)
+    }
+    if (pixels > 2228224 || maxDim > 2048 || height > 1152 || sampleRate > 133693440) return 'hvc1.1.6.L153.B0'; // Level 5.1 (4K / vertical 1080x1920)
     return 'hvc1.1.6.L123.B0'; // Level 4.1 (1080p)
   }
   if (codec === 'vp9') {
-    if (pixels > 8912896 || sampleRate > 534773760) return 'vp09.00.60.08'; // Level 6.0 (8K)
-    if (pixels > 2228224 || sampleRate > 133693440) return 'vp09.00.51.08'; // Level 5.1 (4K60)
+    if (pixels > 8912896 || maxDim > 4096 || height > 2176 || sampleRate > 534773760) {
+      return sampleRate > 1069547520 ? 'vp09.00.61.08' : 'vp09.00.60.08'; // Level 6.1 / 6.0 (8K)
+    }
+    // VP9 Level 4.0/4.1 has MaxVSize=1152; vertical 1080x1920 / 1080x1350 requires Level 5.0/5.1 (MaxVSize=2176)
+    if (pixels > 2228224 || maxDim > 2048 || height > 1152 || sampleRate > 133693440) return 'vp09.00.51.08'; // Level 5.1
     if (sampleRate > 62914560) return 'vp09.00.41.08'; // Level 4.1 (1080p60 / 2K)
-    if (pixels > 921600 || sampleRate > 27648000) return 'vp09.00.40.08'; // Level 4.0 (1080p30 / 720p60)
+    if (pixels > 921600 || maxDim > 1280 || sampleRate > 27648000) return 'vp09.00.40.08'; // Level 4.0 (1080p30 / 720p60)
     return 'vp09.00.31.08'; // Level 3.1 (720p30)
   }
   if (codec === 'av1') {
-    if (pixels > 8912896 || sampleRate > 534773760) return 'av01.0.17M.08'; // Level 6.1 (8K)
-    if (pixels > 2228224 || sampleRate > 133693440) return 'av01.0.13M.08'; // Level 5.1 (4K60)
-    if (sampleRate > 62914560) return 'av01.0.09M.08'; // Level 4.1 (1080p60 / 2K)
-    if (pixels > 921600 || sampleRate > 27648000) return 'av01.0.08M.08'; // Level 4.0 (1080p30 / 720p60)
-    return 'av01.0.05M.08'; // Level 3.1 (720p30)
+    if (pixels > 8912896 || width > 8192 || height > 4352 || sampleRate > 534773760) {
+      return sampleRate > 1069547520 ? 'av01.0.17M.08' : 'av01.0.16M.08'; // Level 6.1 (8K60) / Level 6.0 (8K30)
+    }
+    if (pixels > 2228224 || width > 6144 || height > 3456 || sampleRate > 133693440) return 'av01.0.13M.08'; // Level 5.1 (4K60)
+    if (sampleRate > 62914560) return 'av01.0.09M.08'; // Level 4.1 (1080p60)
+    // AV1 Level 4.0 (08M) supports MaxHSize=8192, MaxVSize=4352, MaxPicSize=2,359,296
+    return 'av01.0.08M.08';
   }
   if (codec === 'vp8') return 'vp8';
   return codec || 'avc1.640028';
@@ -7479,7 +7693,31 @@ function resolveWebCodecsVideoCodecString(codec: string, width: number = 1920, h
 
 function getWebCodecsVideoCandidatesForFamily(codec: string, width: number, height: number, fps: number = 30): { wc: string; family: string }[] {
   const c = (codec || 'av1').toLowerCase();
+  const pixels = width * height;
+  const is8K = pixels > 8912896 || width > 4096 || height > 4096;
+  const is4KOr2K = !is8K && (pixels > 2359296 || width > 2048 || height > 2048);
+
   if (c === 'av1' || c.startsWith('av01')) {
+    if (is8K) {
+      return [
+        { wc: resolveWebCodecsVideoCodecString('av1', width, height, fps), family: 'av1' },
+        { wc: 'av01.0.16M.08', family: 'av1' },
+        { wc: 'av01.0.17M.08', family: 'av1' },
+        { wc: 'av01.0.18M.08', family: 'av1' },
+        { wc: 'av01.0.19M.08', family: 'av1' },
+        { wc: 'av01.0.13M.08', family: 'av1' },
+      ];
+    }
+    if (is4KOr2K) {
+      return [
+        { wc: resolveWebCodecsVideoCodecString('av1', width, height, fps), family: 'av1' },
+        { wc: 'av01.0.13M.08', family: 'av1' },
+        { wc: 'av01.0.12M.08', family: 'av1' },
+        { wc: 'av01.0.16M.08', family: 'av1' },
+        { wc: 'av01.0.09M.08', family: 'av1' },
+        { wc: 'av01.0.08M.08', family: 'av1' },
+      ];
+    }
     return [
       { wc: resolveWebCodecsVideoCodecString('av1', width, height, fps), family: 'av1' },
       { wc: 'av01.0.13M.08', family: 'av1' },
@@ -7491,10 +7729,20 @@ function getWebCodecsVideoCandidatesForFamily(codec: string, width: number, heig
     ];
   }
   if (c === 'vp9' || c.startsWith('vp09')) {
+    if (is8K) {
+      return [
+        { wc: resolveWebCodecsVideoCodecString('vp9', width, height, fps), family: 'vp9' },
+        { wc: 'vp09.00.60.08', family: 'vp9' },
+        { wc: 'vp09.00.61.08', family: 'vp9' },
+        { wc: 'vp09.00.62.08', family: 'vp9' },
+        { wc: 'vp09.00.51.08', family: 'vp9' },
+      ];
+    }
     return [
       { wc: resolveWebCodecsVideoCodecString('vp9', width, height, fps), family: 'vp9' },
       { wc: 'vp09.00.51.08', family: 'vp9' },
       { wc: 'vp09.00.50.08', family: 'vp9' },
+      { wc: 'vp09.00.60.08', family: 'vp9' },
       { wc: 'vp09.00.41.08', family: 'vp9' },
       { wc: 'vp09.00.40.08', family: 'vp9' },
       { wc: 'vp09.00.31.08', family: 'vp9' },
@@ -7502,6 +7750,14 @@ function getWebCodecsVideoCandidatesForFamily(codec: string, width: number, heig
     ];
   }
   if (c === 'hevc' || c.startsWith('hvc1') || c.startsWith('hev1')) {
+    if (is8K) {
+      return [
+        { wc: resolveWebCodecsVideoCodecString('hevc', width, height, fps), family: 'hevc' },
+        { wc: 'hvc1.1.6.L180.B0', family: 'hevc' },
+        { wc: 'hvc1.1.6.L183.B0', family: 'hevc' },
+        { wc: 'hvc1.1.6.L153.B0', family: 'hevc' },
+      ];
+    }
     return [
       { wc: resolveWebCodecsVideoCodecString('hevc', width, height, fps), family: 'hevc' },
       { wc: 'hvc1.1.6.L153.B0', family: 'hevc' },
@@ -7510,6 +7766,13 @@ function getWebCodecsVideoCandidatesForFamily(codec: string, width: number, heig
   }
   if (c === 'vp8') {
     return [{ wc: 'vp8', family: 'vp8' }];
+  }
+  if (is8K) {
+    return [
+      { wc: 'avc1.64003c', family: 'avc' },
+      { wc: 'avc1.64003d', family: 'avc' },
+      { wc: 'avc1.640034', family: 'avc' },
+    ];
   }
   return [
     { wc: resolveWebCodecsVideoCodecString('avc', width, height, fps), family: 'avc' },
@@ -7692,7 +7955,6 @@ export class VideoSample {
   public squarePixelHeight: number = 720;
   public displayWidth: number = 1280;
   public displayHeight: number = 720;
-  public transform?: any;
 
   constructor(source: CanvasImageSource | VideoFrame, init: { timestamp: number; duration?: number }) {
     this.source = source;
@@ -7717,6 +7979,36 @@ export class VideoSample {
 
   public toCanvasImageSource(): CanvasImageSource {
     return this.source as CanvasImageSource;
+  }
+
+  public async transform(opts: { width: number; height: number; fit?: string }): Promise<VideoSample> {
+    const targetW = Math.max(16, opts.width - (opts.width % 2));
+    const targetH = Math.max(16, opts.height - (opts.height % 2));
+    const canvas = new OffscreenCanvas(targetW, targetH);
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      const sw = this.squarePixelWidth || targetW;
+      const sh = this.squarePixelHeight || targetH;
+      if (opts.fit === 'cover' && Math.abs(sw / sh - targetW / targetH) > 0.01) {
+        const srcRatio = sw / sh;
+        const dstRatio = targetW / targetH;
+        let sx = 0, sy = 0, sWidth = sw, sHeight = sh;
+        if (srcRatio > dstRatio) {
+          sWidth = sh * dstRatio;
+          sx = (sw - sWidth) / 2;
+        } else {
+          sHeight = sw / dstRatio;
+          sy = (sh - sHeight) / 2;
+        }
+        ctx.drawImage(this.source as CanvasImageSource, sx, sy, sWidth, sHeight, 0, 0, targetW, targetH);
+      } else {
+        ctx.drawImage(this.source as CanvasImageSource, 0, 0, targetW, targetH);
+      }
+    }
+    const bmp = await createImageBitmap(canvas);
+    canvas.width = 1;
+    canvas.height = 1;
+    return new VideoSample(bmp, { timestamp: this.timestamp, duration: this.duration });
   }
 
   public close(): void {
@@ -7794,20 +8086,24 @@ function calculateVideoBitrate(
     case 'very-low': bpp = 0.03; break;
     case 'low': bpp = 0.05; break;
     case 'medium': bpp = 0.09; break;
-    case 'high': bpp = 0.15; break;
-    case 'very-high': bpp = 0.25; break;
+    case 'high': bpp = 0.14; break;
+    case 'very-high': bpp = 0.20; break;
     default:
       if (typeof qLevel === 'number' && qLevel > 0) return qLevel;
-      bpp = 0.15;
+      bpp = 0.14;
       break;
   }
   const c = (codec || 'avc').toLowerCase();
   const codecEff = (c.includes('av1') || c.includes('av01') || c.includes('vp9') || c.includes('vp09') || c.includes('hevc') || c.includes('hvc1'))
-    ? 0.75
+    ? 0.70
     : 1.0;
   const safeFps = Math.min(120, Math.max(15, fps || 30));
-  const rawBitrate = Math.round(width * height * safeFps * bpp * codecEff);
-  return Math.max(250_000, Math.min(120_000_000, rawBitrate));
+  const pixels = width * height;
+  // Scale bpp slightly at ultra-high 4K/8K resolutions to respect Main Tier Annex A MaxBitrate limits
+  const resScale = pixels >= 16_000_000 ? 0.55 : pixels >= 6_000_000 ? 0.75 : 1.0;
+  const maxAllowedBitrate = pixels >= 16_000_000 ? 58_000_000 : pixels >= 6_000_000 ? 38_000_000 : 50_000_000;
+  const rawBitrate = Math.round(pixels * safeFps * bpp * codecEff * resScale);
+  return Math.max(250_000, Math.min(maxAllowedBitrate, rawBitrate));
 }
 
 export class VideoSampleSource {
@@ -7908,15 +8204,12 @@ export class VideoSampleSource {
     );
 
     for (const cand of candidateEntries) {
-      const isSoftwarePreferredFamily = cand.family === 'av1' || cand.family === 'vp9' || cand.family === 'vp8';
-      const hwModes: HardwareAcceleration[] = isSoftwarePreferredFamily
-        ? ['no-preference', 'prefer-software', 'prefer-hardware']
-        : Array.from(new Set([
-            (this.options.hardwareAcceleration as HardwareAcceleration) || 'no-preference',
-            'no-preference',
-            'prefer-software',
-            'prefer-hardware',
-          ]));
+      const hwModes: HardwareAcceleration[] = Array.from(new Set([
+        (this.options.hardwareAcceleration as HardwareAcceleration) || 'prefer-hardware',
+        'no-preference',
+        'prefer-software',
+        'prefer-hardware',
+      ]));
 
       for (const testFps of fpsVariants) {
         const bitrate = this.options.bitrate || calculateVideoBitrate(safeW, safeH, testFps, this.options.quality, cand.family);
@@ -7973,6 +8266,55 @@ export class VideoSampleSource {
     }
 
     return false;
+  }
+
+  private async waitForEncoderQueue(maxQueueSize: number): Promise<void> {
+    let stalledTicks = 0;
+    let lastQueueSize = this.encoder ? this.encoder.encodeQueueSize : 0;
+
+    while (
+      this.encoder &&
+      this.encoder.state === 'configured' &&
+      !this.lastEncoderError &&
+      this.encoder.encodeQueueSize > maxQueueSize
+    ) {
+      await new Promise<void>((resolve) => {
+        const enc = this.encoder;
+        if (!enc || enc.state !== 'configured' || enc.encodeQueueSize <= maxQueueSize) {
+          resolve();
+          return;
+        }
+        let timer: any = null;
+        const onDeq = () => {
+          if (timer !== null) clearTimeout(timer);
+          enc.removeEventListener('dequeue', onDeq);
+          resolve();
+        };
+        enc.addEventListener('dequeue', onDeq, { once: true });
+        timer = setTimeout(() => {
+          enc.removeEventListener('dequeue', onDeq);
+          resolve();
+        }, 40);
+      });
+
+      if (!this.encoder || this.encoder.state !== 'configured' || this.lastEncoderError) break;
+      const curQ = this.encoder.encodeQueueSize;
+      if (curQ <= maxQueueSize) break;
+      if (curQ >= lastQueueSize) {
+        stalledTicks++;
+        // If encoder hasn't dequeued a single frame after ~4 seconds on a heavy 4K/8K keyframe, flush once to drain GPU surfaces
+        if (stalledTicks >= 100) {
+          stalledTicks = 0;
+          try {
+            await this.encoder.flush();
+          } catch {}
+          break;
+        }
+      } else {
+        stalledTicks = 0;
+      }
+      lastQueueSize = curQ;
+    }
   }
 
   public async add(sample: VideoSample): Promise<void> {
@@ -8048,6 +8390,19 @@ export class VideoSampleSource {
       return;
     }
 
+    // Strict resolution-aware backpressure:
+    // 8K (~133MB RGBA/frame) -> max 1 queued frame
+    // 4K (~33MB RGBA/frame)  -> max 2 queued frames
+    // 2K (~15MB RGBA/frame)  -> max 3 queued frames
+    // <=1080p                -> max 5 queued frames
+    const pixels = w * h;
+    const maxQueueSize = pixels >= 16_000_000 ? 1 : pixels >= 6_000_000 ? 2 : pixels >= 2_500_000 ? 3 : 5;
+
+    // Wait BEFORE allocating a new 4K/8K GPU VideoFrame if encoder queue is full
+    if (this.encoder && this.encoder.encodeQueueSize > maxQueueSize) {
+      await this.waitForEncoderQueue(maxQueueSize);
+    }
+
     let frame: VideoFrame;
     if (sample.source instanceof VideoFrame) {
       frame = sample.source;
@@ -8065,25 +8420,16 @@ export class VideoSampleSource {
       this.encoder.encode(frame, { keyFrame: isKeyFrame });
     } finally {
       if (frame !== sample.source) {
-        frame.close();
+        try {
+          frame.close();
+        } catch {}
       }
     }
 
-    if (this.encoder && this.encoder.encodeQueueSize > 8) {
-      await new Promise<void>((resolve) => {
-        const enc = this.encoder;
-        if (!enc) return resolve();
-        const onDeq = () => {
-          enc.removeEventListener('dequeue', onDeq);
-          resolve();
-        };
-        enc.addEventListener('dequeue', onDeq, { once: true });
-        setTimeout(() => {
-          enc.removeEventListener('dequeue', onDeq);
-          resolve();
-        }, 12);
-      });
-    } else if (this.frameCounter % 4 === 0) {
+    if (this.encoder && this.encoder.encodeQueueSize > maxQueueSize) {
+      await this.waitForEncoderQueue(maxQueueSize);
+    } else if (pixels >= 6_000_000 || this.frameCounter % 4 === 0) {
+      // Yield macrotask on every 4K/8K frame so GPU SharedImage pool reclaims freed textures immediately
       await new Promise<void>((r) => setTimeout(r, 0));
     }
     await this.pendingOutput;
@@ -8300,7 +8646,12 @@ export class VideoSampleSink {
     await sink.init();
     try {
       for await (const wrapped of sink.canvases(_startTime)) {
-        if (_endTime !== undefined && wrapped.timestamp > _endTime) break;
+        if (_endTime !== undefined && wrapped.timestamp > _endTime) {
+          if (wrapped.bitmap && typeof wrapped.bitmap.close === 'function') {
+            try { wrapped.bitmap.close(); } catch {}
+          }
+          break;
+        }
         const source = wrapped.canvas || wrapped.bitmap;
         if (!source) continue;
         yield new VideoSample(source, {
@@ -8967,51 +9318,71 @@ export class Conversion {
           const targetFrameDur = 1 / fps;
 
           for await (const wrapped of sink.canvases(startTime)) {
-            if (endTime !== undefined && wrapped.timestamp > endTime + 0.05) {
-              break;
-            }
-            const outTs = Math.max(0, wrapped.timestamp - startTime);
-            const dur = wrapped.duration > 0 ? wrapped.duration : targetFrameDur;
-
-            const frameSource = wrapped.canvas || wrapped.bitmap;
-            if (!frameSource) continue;
-
-            if (explicitFps) {
-              // Resample frames to match explicit user-selected FPS
-              if (outTs + dur < nextTargetOutTs - 0.002) {
-                continue;
+            try {
+              if (endTime !== undefined && wrapped.timestamp > endTime + 0.05) {
+                break;
               }
-              let sample = new VideoSample(frameSource, { timestamp: nextTargetOutTs, duration: targetFrameDur });
-              if (typeof videoOpts.process === 'function') {
-                const processedCanvas = await videoOpts.process(sample);
-                if (processedCanvas) {
-                  sample = new VideoSample(processedCanvas, { timestamp: nextTargetOutTs, duration: targetFrameDur });
+              const outTs = Math.max(0, wrapped.timestamp - startTime);
+              const dur = wrapped.duration > 0 ? wrapped.duration : targetFrameDur;
+
+              const frameSource = wrapped.canvas || wrapped.bitmap;
+              if (!frameSource) continue;
+
+              if (explicitFps) {
+                // Resample frames to match explicit user-selected FPS
+                if (outTs + dur < nextTargetOutTs - 0.002) {
+                  continue;
                 }
-              }
-              // Emit 1 or more frames if source frame spans multiple target frame intervals
-              while (nextTargetOutTs <= outTs + dur - targetFrameDur * 0.5 || nextTargetOutTs <= outTs + 0.001) {
-                const frameSample = new VideoSample(sample.source, { timestamp: nextTargetOutTs, duration: targetFrameDur });
-                await vSource.add(frameSample);
-                nextTargetOutTs += targetFrameDur;
-                if (nextTargetOutTs > totalDur) break;
-              }
-              sample.close();
-              await encodeAudioUpTo(nextTargetOutTs);
-            } else {
-              let sample = new VideoSample(frameSource, { timestamp: outTs, duration: dur });
-              if (typeof videoOpts.process === 'function') {
-                const processedCanvas = await videoOpts.process(sample);
-                if (processedCanvas) {
-                  sample = new VideoSample(processedCanvas, { timestamp: outTs, duration: dur });
+                const rawSample = new VideoSample(frameSource, { timestamp: nextTargetOutTs, duration: targetFrameDur });
+                let sample = rawSample;
+                try {
+                  if (typeof videoOpts.process === 'function') {
+                    const processedCanvas = await videoOpts.process(rawSample);
+                    if (processedCanvas) {
+                      sample = new VideoSample(processedCanvas, { timestamp: nextTargetOutTs, duration: targetFrameDur });
+                      // Immediately release decoded ImageBitmap from GPU VRAM before encoding
+                      rawSample.close();
+                    }
+                  }
+                  // Emit 1 or more frames if source frame spans multiple target frame intervals
+                  while (nextTargetOutTs <= outTs + dur - targetFrameDur * 0.5 || nextTargetOutTs <= outTs + 0.001) {
+                    const frameSample = new VideoSample(sample.source, { timestamp: nextTargetOutTs, duration: targetFrameDur });
+                    await vSource.add(frameSample);
+                    nextTargetOutTs += targetFrameDur;
+                    if (nextTargetOutTs > totalDur) break;
+                  }
+                } finally {
+                  sample.close();
+                  rawSample.close();
                 }
+                await encodeAudioUpTo(nextTargetOutTs);
+              } else {
+                const rawSample = new VideoSample(frameSource, { timestamp: outTs, duration: dur });
+                let sample = rawSample;
+                try {
+                  if (typeof videoOpts.process === 'function') {
+                    const processedCanvas = await videoOpts.process(rawSample);
+                    if (processedCanvas) {
+                      sample = new VideoSample(processedCanvas, { timestamp: outTs, duration: dur });
+                      // Immediately release decoded ImageBitmap from GPU VRAM before encoding
+                      rawSample.close();
+                    }
+                  }
+                  await vSource.add(sample);
+                } finally {
+                  sample.close();
+                  rawSample.close();
+                }
+                await encodeAudioUpTo(outTs + dur);
               }
-              await vSource.add(sample);
-              sample.close();
-              await encodeAudioUpTo(outTs + dur);
-            }
 
-            const prog = Math.min(0.98, Math.max(0.02, outTs / totalDur));
-            this.onProgress(prog);
+              const prog = Math.min(0.98, Math.max(0.02, outTs / totalDur));
+              this.onProgress(prog);
+            } finally {
+              if (wrapped.bitmap && typeof wrapped.bitmap.close === 'function') {
+                try { wrapped.bitmap.close(); } catch {}
+              }
+            }
           }
         } finally {
           sink.close();

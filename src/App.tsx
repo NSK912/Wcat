@@ -1,14 +1,20 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { EditSettings, ActiveTab, SampleVideo, TimelineTrackData, TimelineClip, ClipTransform } from './types';
+import { EditSettings, ActiveTab, SampleVideo, TimelineTrackData, ClipTransform } from './types';
 import { SAMPLE_VIDEOS } from './utils/sampleVideos';
 import { probeMediaMetadata } from './utils/nativeMedia';
+import {
+  createInitialTimelineTracks,
+  getFileKey,
+  isImageFileOrName,
+  getCoverScaleForAspect,
+  resolveVisualLayers,
+} from './utils/mediaHelpers';
 import {
   processNativeConcatStream,
   processNativeTrimStream,
   processNativeRemuxStream,
   processWebCodecsEncodeStream,
   processWebCodecsConcatStream,
-  isWebCodecsSupported,
 } from './utils/engineWorker';
 import { probeVideoSafe, generateThumbnailsSafe } from './utils/webcodecsPlayerClient';
 import { VideoPlayer } from './components/VideoPlayer';
@@ -16,10 +22,6 @@ import { Timeline } from './components/Timeline';
 import { ProcessingModal, SampleModal } from './components/Modals';
 import { Dropdown } from './components/Dropdown';
 import {
-  Zap,
-  Cpu,
-  Sparkles,
-  Info,
   ChevronUp,
   ChevronDown,
   ChevronLeft,
@@ -31,7 +33,6 @@ import {
   Square,
   Tv,
   Film,
-  RotateCcw,
   RotateCw,
   ZoomIn,
   ZoomOut,
@@ -138,26 +139,123 @@ const getFileDuration = async (file: File): Promise<number> => {
   return 0;
 };
 
-const INITIAL_TIMELINE_TRACKS: TimelineTrackData[] = [
+const INITIAL_TIMELINE_TRACKS: TimelineTrackData[] = createInitialTimelineTracks();
+
+type AlignPosition = 'tl' | 'tc' | 'tr' | 'lc' | 'center' | 'rc' | 'bl' | 'bc' | 'br';
+
+const CANVAS_ASPECT_OPTIONS: { id: EditSettings['cropAspect']; label: string; icon: React.ReactNode }[] = [
+  { id: '16:9', label: '16:9 (Landscape)', icon: <Monitor className="w-3.5 h-3.5" /> },
+  { id: '9:16', label: '9:16 (Reels/TikTok)', icon: <Smartphone className="w-3.5 h-3.5 rotate-90" /> },
+  { id: '1:1', label: '1:1 (Square)', icon: <Square className="w-3.5 h-3.5" /> },
+  { id: '4:5', label: '4:5 (Instagram)', icon: <Smartphone className="w-3.5 h-3.5" /> },
+  { id: '4:3', label: '4:3 (Classic TV)', icon: <Tv className="w-3.5 h-3.5" /> },
+  { id: '21:9', label: '21:9 (Ultrawide)', icon: <Film className="w-3.5 h-3.5" /> },
+];
+
+const ALIGN_GRID_OPTIONS: { id: AlignPosition; label: string; icon: React.ReactNode; isCenter?: boolean }[] = [
+  { id: 'tl', label: 'TL', icon: <ArrowUpLeft className="w-3.5 h-3.5 mr-0.5" /> },
+  { id: 'tc', label: 'TC', icon: <ArrowUp className="w-3.5 h-3.5 mr-0.5" /> },
+  { id: 'tr', label: 'TR', icon: <ArrowUpRight className="w-3.5 h-3.5 mr-0.5" /> },
+  { id: 'lc', label: 'LC', icon: <ArrowLeft className="w-3.5 h-3.5 mr-0.5" /> },
+  { id: 'center', label: 'Center', icon: <Target className="w-3.5 h-3.5 mr-0.5 text-violet-400" />, isCenter: true },
+  { id: 'rc', label: 'RC', icon: <ArrowRight className="w-3.5 h-3.5 mr-0.5" /> },
+  { id: 'bl', label: 'BL', icon: <ArrowDownLeft className="w-3.5 h-3.5 mr-0.5" /> },
+  { id: 'bc', label: 'BC', icon: <ArrowDown className="w-3.5 h-3.5 mr-0.5" /> },
+  { id: 'br', label: 'BR', icon: <ArrowDownRight className="w-3.5 h-3.5 mr-0.5" /> },
+];
+
+const ENCODE_DROPDOWN_FIELDS: {
+  id: string;
+  label: string;
+  settingKey: keyof EditSettings;
+  defaultValue: string;
+  isNumeric?: boolean;
+  options: { value: string; label: string }[];
+}[] = [
   {
-    id: 'track-1',
-    name: 'Track 1',
-    mediaType: 'any',
-    color: 'indigo',
-    clips: [],
-    muted: false,
-    locked: false,
-    hidden: false,
+    id: 'select-codec',
+    label: 'Video Codec:',
+    settingKey: 'videoCodec',
+    defaultValue: 'av1',
+    options: [
+      { value: 'av1', label: 'AV1' },
+      { value: 'vp9', label: 'VP9' },
+    ],
   },
   {
-    id: 'track-2',
-    name: 'Track 2',
-    mediaType: 'any',
-    color: 'violet',
-    clips: [],
-    muted: false,
-    locked: false,
-    hidden: false,
+    id: 'select-resolution',
+    label: 'Resolution:',
+    settingKey: 'resolution',
+    defaultValue: '1080',
+    options: [
+      { value: '480', label: '480p' },
+      { value: '720', label: '720p' },
+      { value: '1080', label: '1080p (FHD)' },
+      { value: '2k', label: '2K (1440p)' },
+      { value: '4k', label: '4K (2160p)' },
+      { value: '8k', label: '8K (4320p)' },
+    ],
+  },
+  {
+    id: 'select-quality',
+    label: 'Video Quality:',
+    settingKey: 'videoQuality',
+    defaultValue: 'high',
+    options: [
+      { value: 'very-high', label: 'Very High' },
+      { value: 'high', label: 'High' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'low', label: 'Low' },
+    ],
+  },
+  {
+    id: 'select-speed',
+    label: 'Speed:',
+    settingKey: 'encodeSpeed',
+    defaultValue: 'ultra-fast',
+    options: [
+      { value: 'ultra-fast', label: 'Ultra Fast (Hardware)' },
+      { value: 'fast', label: 'Fast' },
+      { value: 'medium', label: 'Medium (Balanced)' },
+      { value: 'slow', label: 'Slow (High Efficiency)' },
+    ],
+  },
+];
+
+const AUDIO_DROPDOWN_FIELDS: {
+  id: string;
+  label: string;
+  settingKey: keyof EditSettings;
+  defaultValue: string;
+  isNumeric?: boolean;
+  options: { value: string; label: string }[];
+}[] = [
+  {
+    id: 'select-audio-codec',
+    label: 'Audio Codec:',
+    settingKey: 'audioCodec',
+    defaultValue: 'opus',
+    options: [
+      { value: 'opus', label: 'Opus (WebM / Modern)' },
+      { value: 'aac', label: 'AAC-LC (MP4 / Universal Standard)' },
+      { value: 'flac', label: 'FLAC (Lossless Audio)' },
+      { value: 'pcm-s16', label: 'PCM 16-bit (Uncompressed)' },
+    ],
+  },
+  {
+    id: 'select-audio-bitrate',
+    label: 'Audio Bitrate:',
+    settingKey: 'audioBitrate',
+    defaultValue: '192',
+    isNumeric: true,
+    options: [
+      { value: '320', label: '320 kbps (Maximum / Studio)' },
+      { value: '256', label: '256 kbps (Very High)' },
+      { value: '192', label: '192 kbps (High Quality - Recommended)' },
+      { value: '128', label: '128 kbps (Standard)' },
+      { value: '96', label: '96 kbps (Voice / Compact)' },
+      { value: '64', label: '64 kbps (Low)' },
+    ],
   },
 ];
 
@@ -176,6 +274,13 @@ export default function App() {
   const [isRightPanelExpanded, setIsRightPanelExpanded] = useState<boolean>(window.innerWidth >= 1200);
   const [isCustomFpsMode, setIsCustomFpsMode] = useState<boolean>(false);
   const [show916SafeZone, setShow916SafeZone] = useState<boolean>(false);
+  const [uiTheme, setUiTheme] = useState<'dark' | 'light'>(() => {
+    try {
+      return localStorage.getItem('nsk_ui_theme') === 'light' ? 'light' : 'dark';
+    } catch {
+      return 'dark';
+    }
+  });
   const [holdProgress, setHoldProgress] = useState<number>(0);
   const [holdHint, setHoldHint] = useState<boolean>(false);
   const holdRafRef = useRef<number | null>(null);
@@ -321,7 +426,7 @@ export default function App() {
   const fileUrlCache = useRef<Map<string, string>>(new Map());
 
   const getOrCreateFileUrl = useCallback((file: File): string => {
-    const key = `${file.name}_${file.size}_${file.lastModified}`;
+    const key = getFileKey(file);
     let url = fileUrlCache.current.get(key);
     if (!url) {
       url = URL.createObjectURL(file);
@@ -387,73 +492,11 @@ export default function App() {
   // Selected clip/layer in Encode Mode
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
-  // All sub-layers across all tracks for layertool sub-layer selector
+  // All sub-layers across all tracks (shared resolver with VideoPlayer)
   const allSubLayers = useMemo(() => {
-    if (!isEncodeMode || !tracks || tracks.length === 0) return [];
-    const list: {
-      trackId: string;
-      trackName: string;
-      subLayerName: string;
-      trackColor: string;
-      trackIndex: number;
-      clipIndex: number;
-      clip: TimelineClip;
-      isActive: boolean;
-      transform: ClipTransform;
-    }[] = [];
-
-    tracks.forEach((track, trackIdx) => {
-      if (track.hidden) return;
-      const clips = track.clips || [];
-
-      // Sort visual clips chronologically by startTime
-      const visualClips = clips
-        .filter((c) => {
-          const isVid =
-            c.mediaType === 'video' ||
-            (c.file && (c.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(c.file.name)));
-          const isImg =
-            c.mediaType === 'image' ||
-            (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)));
-          return isVid || isImg;
-        })
-        .slice()
-        .sort((a, b) => a.startTime - b.startTime);
-
-      visualClips.forEach((clip, seqIdx) => {
-        const rawClipIdx = clips.findIndex((c) => c.id === clip.id);
-        const isActive = currentTime >= clip.startTime && currentTime <= clip.endTime;
-        const defaultTransform: ClipTransform = {
-          x: 50,
-          y: 50,
-          scale: trackIdx === 0 ? 1.0 : 0.45,
-          rotation: 0,
-          opacity: 1,
-        };
-
-        list.push({
-          trackId: track.id,
-          trackName: track.name,
-          subLayerName: `Layer ${trackIdx + 1}-${seqIdx + 1}`,
-          trackColor: track.color,
-          trackIndex: trackIdx,
-          clipIndex: rawClipIdx,
-          clip,
-          isActive,
-          transform: clip.transform ? { ...defaultTransform, ...clip.transform } : defaultTransform,
-        });
-      });
-    });
-
-    // Sort by Track 1, 2, 3, 4 ascending (Track 1 top -> Track 2 -> Track 3 -> Track 4)
-    // For same track, sort chronologically by startTime
-    return list.sort((a, b) => {
-      if (a.trackIndex !== b.trackIndex) {
-        return a.trackIndex - b.trackIndex;
-      }
-      return a.clip.startTime - b.clip.startTime;
-    });
-  }, [isEncodeMode, tracks, currentTime]);
+    if (!isEncodeMode) return [];
+    return resolveVisualLayers(tracks, currentTime, settings.muteAudio);
+  }, [isEncodeMode, tracks, currentTime, settings.muteAudio]);
 
   // Active layers currently visible on preview screen
   const activeLayers = useMemo(() => {
@@ -653,65 +696,18 @@ export default function App() {
     };
   }, [videoUrl, selectedFiles]);
 
-  const handleSingleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (files && files.length > 0) {
-      const file = files[0];
-      const isAddingToExisting = selectedFiles.length > 0 || tracks.some((t) => t.clips.length > 0);
-      const dur = await getFileDuration(file);
-
-      if (isAddingToExisting) {
-        const key = `${file.name}_${file.size}_${file.lastModified}`;
-        const exists = selectedFiles.some((f) => `${f.name}_${f.size}_${f.lastModified}` === key);
-        const mergedFiles = exists ? selectedFiles : [...selectedFiles, file];
-        setSelectedFiles(mergedFiles);
-
-        const existingMaxClipEnd = Math.max(0, ...tracks.flatMap((t) => t.clips).map((c) => c.endTime || 0));
-        const updatedTotalDuration = Math.max(duration, existingMaxClipEnd, dur);
-        setDuration(updatedTotalDuration);
-        setVideoName(`${mergedFiles.length} files selected`);
-        setSettings((prev) => ({
-          ...prev,
-          duration: updatedTotalDuration,
-          endTime: Math.max(prev.endTime, updatedTotalDuration),
-        }));
-      } else {
-        setSelectedFiles([file]);
-        setActiveClipFile(file);
-        const url = getOrCreateFileUrl(file);
-        setVideoUrl(url);
-        setVideoName(file.name);
-        setDuration(dur);
-        if (outputUrl) {
-          try { URL.revokeObjectURL(outputUrl); } catch {}
-        }
-        setOutputUrl(null);
-        setIsPlaying(false);
-        setCurrentTime(0);
-        setSettings((prev) => ({
-          ...prev,
-          duration: dur,
-          startTime: 0,
-          endTime: dur,
-        }));
-      }
-    }
-    e.target.value = '';
-  };
-
-  const handleMultiFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
       const fileArr: File[] = Array.from(files);
       const isAddingToExisting = selectedFiles.length > 0 || tracks.some((t) => t.clips.length > 0);
 
-      // Probe all files in parallel to get their true durations
       const durations = await Promise.all(fileArr.map((f) => getFileDuration(f)));
       const newTotalDur = durations.reduce((acc, d) => acc + d, 0);
 
       if (isAddingToExisting) {
-        const existingKeys = new Set(selectedFiles.map((f) => `${f.name}_${f.size}_${f.lastModified}`));
-        const genuinelyNewFiles = fileArr.filter((f) => !existingKeys.has(`${f.name}_${f.size}_${f.lastModified}`));
+        const existingKeys = new Set(selectedFiles.map(getFileKey));
+        const genuinelyNewFiles = fileArr.filter((f) => !existingKeys.has(getFileKey(f)));
         const mergedFiles = [...selectedFiles, ...genuinelyNewFiles];
         setSelectedFiles(mergedFiles);
 
@@ -772,14 +768,22 @@ export default function App() {
       audioClips: { id: string; file: File; startTime: number; sourceStartTime: number }[] = []
     ) => {
       if (!file && audioClips.length === 0) {
-        setHasActiveClip((prev) => (prev ? false : prev));
-        setActiveClipFile((prev) => (prev !== undefined ? undefined : prev));
-        setVideoUrl((prev) => (prev !== null ? null : prev));
-        setMediaOffset((prev) => (prev !== 0 ? 0 : prev));
-        setSourceStartTime((prev) => (prev !== 0 ? 0 : prev));
-        setClipEndTime((prev) => (prev !== 0 ? 0 : prev));
-        setActiveAudioClips((prev) => (prev.length === 0 ? prev : []));
-        return;
+        const fallbackClip = tracks.flatMap((t) => t.clips).find((c) => c.file);
+        if (fallbackClip && fallbackClip.file) {
+          file = fallbackClip.file;
+          clipStartTime = fallbackClip.startTime;
+          clipSourceStart = fallbackClip.sourceStartTime || 0;
+          clipEnd = fallbackClip.endTime;
+        } else {
+          setHasActiveClip((prev) => (prev ? false : prev));
+          setActiveClipFile((prev) => (prev !== undefined ? undefined : prev));
+          setVideoUrl((prev) => (prev !== null ? null : prev));
+          setMediaOffset((prev) => (prev !== 0 ? 0 : prev));
+          setSourceStartTime((prev) => (prev !== 0 ? 0 : prev));
+          setClipEndTime((prev) => (prev !== 0 ? 0 : prev));
+          setActiveAudioClips((prev) => (prev.length === 0 ? prev : []));
+          return;
+        }
       }
       const url = file ? getOrCreateFileUrl(file) : null;
       setHasActiveClip((prev) => (!prev ? true : prev));
@@ -892,6 +896,24 @@ export default function App() {
     setCurrentTime(0);
     setIsPlaying(false);
   };
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (uiTheme === 'light') {
+      root.classList.add('theme-light');
+      root.classList.remove('theme-dark');
+    } else {
+      root.classList.add('theme-dark');
+      root.classList.remove('theme-light');
+    }
+    try {
+      localStorage.setItem('nsk_ui_theme', uiTheme);
+    } catch {}
+  }, [uiTheme]);
+
+  const handleToggleTheme = useCallback(() => {
+    setUiTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  }, []);
 
   const handleFullscreen = () => {
     if (!document.fullscreenElement) {
@@ -1051,10 +1073,37 @@ export default function App() {
             ? (hasTimelineClips || selectedFiles.length > 1)
             : (allVisibleClips.length > 1 || selectedFiles.length > 1));
       const hasImageClips =
-        allVisibleClips.some(c => c.mediaType === 'image' || (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)))) ||
-        selectedFiles.some(f => f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(f.name));
+        allVisibleClips.some(c => c.mediaType === 'image' || isImageFileOrName(c.file)) ||
+        selectedFiles.some(f => isImageFileOrName(f));
+
+      const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
+      const currentSettings = settingsRef.current;
+
+      const handleEngineProgress = (prog: { percentage: number; statusText: string; speedMBs: number; log?: string }) => {
+        setProcessingProgress(prog.percentage / 100);
+        setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
+        if (prog.log) addLog(prog.log);
+      };
+
+      const buildEffectiveEncodeSettings = (modeLabel: string): EditSettings => {
+        const targetExt = (targetFilename.split('.').pop()?.toLowerCase() || sourceExt) as EditSettings['outputFormat'];
+        const effectiveSettings: EditSettings = {
+          ...currentSettings,
+          outputFormat: ['mkv', 'webm', 'mp4'].includes(targetExt) ? targetExt : currentSettings.outputFormat,
+        };
+        const scaleInfo = (effectiveSettings.cropAspect && effectiveSettings.cropAspect !== 'original') ? `Scale: ${effectiveSettings.cropAspect}, ` : '';
+        addLog(
+          `[WebCodecs API] ${modeLabel}\n` +
+          `[Encode Config] ${scaleInfo}Video: ${(effectiveSettings.videoCodec || 'av1').toUpperCase()} | Res: ${effectiveSettings.resolution || '1080'}p | Quality: ${effectiveSettings.videoQuality || 'high'} | Speed: ${effectiveSettings.encodeSpeed || 'ultra-fast'} | FPS: ${effectiveSettings.fps ? `${effectiveSettings.fps} fps` : 'Auto'} | Audio: ${(effectiveSettings.audioCodec || 'opus').toUpperCase()} (${effectiveSettings.audioBitrate || 192} kbps)`
+        );
+        return effectiveSettings;
+      };
+
+      let result: { success: boolean; totalBytesWritten?: number; blobUrl?: string };
+      let completionLabel = exportMode === 'remux' ? 'Remux' : 'Processing';
 
       if (hasMultipleClips) {
+        completionLabel = 'Concatenation';
         setProcessingMessage(`Streaming & merging ${allVisibleClips.length || selectedFiles.length} clips...`);
         addLog(`Initiating multi-clip concatenation (${allVisibleClips.length || selectedFiles.length} clips):`);
         if (allVisibleClips.length > 0) {
@@ -1068,120 +1117,26 @@ export default function App() {
           selectedFiles.forEach((f, idx) => addLog(`  [${idx + 1}] ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`));
         }
 
-        const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
-
-        const currentSettings = settingsRef.current;
-        const hasVisualModifications =
-          Boolean(currentSettings.cropAspect && currentSettings.cropAspect !== 'original') ||
-          currentSettings.filter !== 'none' ||
-          currentSettings.brightness !== 1.0 ||
-          currentSettings.contrast !== 1.0 ||
-          currentSettings.rotation !== 0 ||
-          currentSettings.flipH ||
-          currentSettings.flipV ||
-          Boolean(currentSettings.watermarkText?.trim()) ||
-          currentSettings.muteAudio;
-
-        // When Encode Panel is closed (isEncodeMode is false), strictly use Lossless Fast Stream Copy
         const shouldUseEncodeMode = isEncodeMode ? true : hasImageClips;
-
-        let result;
-        // =====================================================================
-        // 🔴 ENCODE MODE: MULTI-TRACK CONCATENATION (WITH RE-ENCODING)
-        // =====================================================================
         if (shouldUseEncodeMode) {
-          addLog(
-            `[WebCodecs API] Hardware Accelerated Concatenation & Encoding Mode Initialized\n` +
-            `[Encode Config] Video: ${(currentSettings.videoCodec || 'av1').toUpperCase()} | Res: ${currentSettings.resolution || '1080'}p | Quality: ${currentSettings.videoQuality || 'high'} | Speed: ${currentSettings.encodeSpeed || 'ultra-fast'} | FPS: ${currentSettings.fps ? `${currentSettings.fps} fps` : 'Auto'} | Audio: ${(currentSettings.audioCodec || 'opus').toUpperCase()} (${currentSettings.audioBitrate || 192} kbps)`
+          const effectiveSettings = buildEffectiveEncodeSettings('Hardware Accelerated Concatenation & Encoding Mode Initialized');
+          result = await processWebCodecsConcatStream(
+            tracks && tracks.length > 0 ? tracks : selectedFiles,
+            effectiveSettings,
+            writable,
+            handleEngineProgress,
+            signal
           );
-          result = await processWebCodecsConcatStream(tracks && tracks.length > 0 ? tracks : selectedFiles, currentSettings, writable, (prog) => {
-            setProcessingProgress(prog.percentage / 100);
-            setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
-            if (prog.log) addLog(prog.log);
-          }, signal);
-        } 
-        // =====================================================================
-        // 🔵 COPY MODE: MULTI-TRACK CONCATENATION (FAST STREAM COPY)
-        // =====================================================================
-        else {
-          result = await processNativeConcatStream(selectedFiles, writable, (prog) => {
-            setProcessingProgress(prog.percentage / 100);
-            setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
-            if (prog.log) addLog(prog.log);
-          }, signal);
+        } else {
+          result = await processNativeConcatStream(selectedFiles, writable, handleEngineProgress, signal);
         }
-
-        if (writable) {
-          const writtenMB = ((result?.totalBytesWritten || 0) / (1024 * 1024)).toFixed(1);
-          addLog(`[STAGE 4/4] Finalizing file and synchronizing ${writtenMB} MB buffer to disk...`);
-          addLog(`[NOTICE] For large files, flushing and committing to disk may take some time. Please keep this tab open.`);
-          setProcessingProgress(0.95);
-          setProcessingMessage(`Flushing data buffer to disk (${writtenMB} MB)... Please wait`);
-
-          let elapsedSec = 0;
-          const flushTimer = setInterval(() => {
-            elapsedSec += 1;
-            setProcessingMessage(`Writing and committing ${writtenMB} MB to disk (${elapsedSec}s elapsed)... Please wait`);
-          }, 1000);
-
-          try {
-            // Truly wait for disk synchronization and stream closure without arbitrary timeout
-            await writable.close();
-            clearInterval(flushTimer);
-            setProcessingProgress(0.99);
-            addLog(`[FINALIZE] Disk write & buffer sync fully completed (${elapsedSec}s elapsed).`);
-          } catch (closeErr: any) {
-            clearInterval(flushTimer);
-            console.warn('Writable close error:', closeErr);
-            addLog(`[ERROR] Stream close error: ${closeErr?.message || closeErr}`);
-            throw closeErr;
-          }
-        }
-
-        if (!result.success || result.totalBytesWritten === 0) {
-          throw new Error('Failed to concatenate video files');
-        }
-
-        if (opfsFileHandle) {
-          try {
-            const diskFile = await opfsFileHandle.getFile();
-            const url = URL.createObjectURL(diskFile);
-            setOutputUrl(url);
-            setProcessingMessage('Video concatenation completed successfully!');
-            addLog(`[READY] Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
-          } catch (opfsErr: any) {
-            console.warn('OPFS getFile error:', opfsErr);
-            addLog(`[WARNING] OPFS file access: ${opfsErr?.message || opfsErr}`);
-          }
-        } else if (result.blobUrl) {
-          setOutputUrl(result.blobUrl);
-          setProcessingMessage('Video concatenation completed successfully!');
-          addLog(`[READY] Result generated in memory buffer, ready for download.`);
-        } else if (fileHandle) {
-          try {
-            const finalDiskFile = await fileHandle.getFile();
-            addLog(`[CONFIRMED] File finalized on disk: ${fileHandle.name} (${(finalDiskFile.size / (1024 * 1024)).toFixed(2)} MB)`);
-          } catch (fhErr) {
-            console.warn('fileHandle getFile verify:', fhErr);
-          }
-          setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
-          addLog(`[SAVED] Result saved directly to target file: ${fileHandle.name}`);
-        }
-
-        setProcessingProgress(1.0);
-        addLog(`[DONE] Concatenation finished successfully! All data written to disk (${((result.totalBytesWritten || 0) / (1024 * 1024)).toFixed(2)} MB).`);
-        setIsProcessingComplete(true);
       } else {
-        // Trim mode or Single file
         setProcessingMessage('Streaming video processing...');
-        const { writable, opfsFileHandle } = await createPipelineStream(fileHandle, targetFilename);
-        const currentSettings = settingsRef.current;
 
         let inputFile: File;
         if (selectedFiles.length > 0) {
           inputFile = selectedFiles[0];
         } else {
-          // Sample video fallback
           const sample = SAMPLE_VIDEOS.find(v => v.name === videoName) || SAMPLE_VIDEOS[0];
           const response = await fetch(sample.url);
           const blob = await response.blob();
@@ -1208,8 +1163,7 @@ export default function App() {
             ? singleTimelineClip.sourceEndTime
             : (clipTimelineDur > 0 ? clipTrimStart + clipTimelineDur : 0);
 
-        let currentStart = clipTrimStart > 0 ? clipTrimStart : (currentSettings.startTime || 0);
-        // Check if the user explicitly trimmed the video (either via timeline split/trim or settings)
+        const currentStart = clipTrimStart > 0 ? clipTrimStart : (currentSettings.startTime || 0);
         const isTimelineExplicitTrim =
           clipTrimStart > 0.05 ||
           (clipEndFromTimeline > 0 && currentFileDuration > 0 && clipEndFromTimeline < currentFileDuration - 0.1);
@@ -1224,136 +1178,85 @@ export default function App() {
           ? (clipEndFromTimeline > currentStart ? clipEndFromTimeline : (currentFileDuration > 0 ? currentFileDuration : 0))
           : (isSettingsExplicitTrim ? currentSettings.endTime : (currentFileDuration > 0 ? currentFileDuration : 0));
         const isFullLengthRemux = currentStart === 0 && (!isUserExplicitTrim || finalEndTime === 0 || (currentFileDuration > 0 && finalEndTime >= currentFileDuration - 0.1));
-        const hasVisualModifications =
-          Boolean(currentSettings.cropAspect && currentSettings.cropAspect !== 'original') ||
-          currentSettings.filter !== 'none' ||
-          currentSettings.brightness !== 1.0 ||
-          currentSettings.contrast !== 1.0 ||
-          currentSettings.rotation !== 0 ||
-          currentSettings.flipH ||
-          currentSettings.flipV ||
-          Boolean(currentSettings.watermarkText?.trim()) ||
-          currentSettings.muteAudio;
 
-        const isInputImage = inputFile.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(inputFile.name);
-        // When Remux is requested, strictly force Remux Stream Copy (no re-encode)
+        const isInputImage = isImageFileOrName(inputFile);
         const shouldUseEncodeMode = exportMode === 'remux' ? false : (isEncodeMode ? true : isInputImage);
-        let result;
 
-        // =====================================================================
-        // 🔴 ENCODE MODE: SINGLE-TRACK / TRIM (WITH RE-ENCODING)
-        // =====================================================================
         if (shouldUseEncodeMode) {
-          const scaleInfo = (currentSettings.cropAspect && currentSettings.cropAspect !== 'original') ? `Scale: ${currentSettings.cropAspect}, ` : '';
-          addLog(
-            `[WebCodecs API] Hardware Accelerated Re-Encoding Mode Activated\n` +
-            `[Encode Config] ${scaleInfo}Video: ${(currentSettings.videoCodec || 'av1').toUpperCase()} | Res: ${currentSettings.resolution || '1080'}p | Quality: ${currentSettings.videoQuality || 'high'} | Speed: ${currentSettings.encodeSpeed || 'ultra-fast'} | FPS: ${currentSettings.fps ? `${currentSettings.fps} fps` : 'Auto'} | Audio: ${(currentSettings.audioCodec || 'opus').toUpperCase()} (${currentSettings.audioBitrate || 192} kbps)`
-          );
-          result = await processWebCodecsEncodeStream(
-            inputFile,
-            currentSettings,
-            writable,
-            (prog) => {
-              setProcessingProgress(prog.percentage / 100);
-              setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
-              if (prog.log) addLog(prog.log);
-            }
-          );
-        } 
-        // =====================================================================
-        // 🔵 REMUX MODE OR COPY MODE FULL LENGTH (FAST NATIVE REMUX)
-        // =====================================================================
-        else if (exportMode === 'remux' || isFullLengthRemux) {
+          const effectiveSettings = buildEffectiveEncodeSettings('Hardware Accelerated Re-Encoding Mode Activated');
+          result = await processWebCodecsEncodeStream(inputFile, effectiveSettings, writable, handleEngineProgress);
+        } else if (exportMode === 'remux' || isFullLengthRemux) {
           addLog(`Mode: Full length container repair / fast-start remux for ${inputFile.name}`);
-          result = await processNativeRemuxStream(
-            inputFile,
-            writable,
-            (prog) => {
-              setProcessingProgress(prog.percentage / 100);
-              setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
-              if (prog.log) addLog(prog.log);
-            }
-          );
-        } 
-        // =====================================================================
-        // 🔵 COPY MODE: SINGLE-TRACK TRIM (FAST STREAM COPY)
-        // =====================================================================
-        else {
+          result = await processNativeRemuxStream(inputFile, writable, handleEngineProgress);
+        } else {
           addLog(`Mode: Precision Trim from ${currentStart.toFixed(2)}s to ${finalEndTime.toFixed(2)}s for ${inputFile.name}`);
-          result = await processNativeTrimStream(
-            inputFile,
-            currentStart,
-            finalEndTime,
-            writable,
-            (prog) => {
-              setProcessingProgress(prog.percentage / 100);
-              setProcessingMessage(`${prog.statusText} - Speed: ${prog.speedMBs.toFixed(1)} MB/s`);
-              if (prog.log) addLog(prog.log);
-            }
-          );
+          result = await processNativeTrimStream(inputFile, currentStart, finalEndTime, writable, handleEngineProgress);
         }
-
-        if (writable) {
-          const writtenMB = ((result?.totalBytesWritten || 0) / (1024 * 1024)).toFixed(1);
-          addLog(`[STAGE 4/4] Finalizing file and synchronizing ${writtenMB} MB buffer to disk...`);
-          addLog(`[NOTICE] For large files, flushing and committing to disk may take some time. Please keep this tab open.`);
-          setProcessingProgress(0.95);
-          setProcessingMessage(`Flushing data buffer to disk (${writtenMB} MB)... Please wait`);
-
-          let elapsedSec = 0;
-          const flushTimer = setInterval(() => {
-            elapsedSec += 1;
-            setProcessingMessage(`Writing and committing ${writtenMB} MB to disk (${elapsedSec}s elapsed)... Please wait`);
-          }, 1000);
-
-          try {
-            // Truly wait for disk synchronization and stream closure without arbitrary timeout
-            await writable.close();
-            clearInterval(flushTimer);
-            setProcessingProgress(0.99);
-            addLog(`[FINALIZE] Disk write & buffer sync fully completed (${elapsedSec}s elapsed).`);
-          } catch (closeErr: any) {
-            clearInterval(flushTimer);
-            console.warn('Writable close error:', closeErr);
-            addLog(`[ERROR] Stream close error: ${closeErr?.message || closeErr}`);
-            throw closeErr;
-          }
-        }
-
-        if (!result.success || result.totalBytesWritten === 0) {
-          throw new Error('Failed to process video file');
-        }
-
-        if (opfsFileHandle) {
-          try {
-            const diskFile = await opfsFileHandle.getFile();
-            const url = URL.createObjectURL(diskFile);
-            setOutputUrl(url);
-            setProcessingMessage('Video processing completed successfully!');
-            addLog(`[READY] Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
-          } catch (opfsErr: any) {
-            console.warn('OPFS getFile error:', opfsErr);
-            addLog(`[WARNING] OPFS file access: ${opfsErr?.message || opfsErr}`);
-          }
-        } else if (result.blobUrl) {
-          setOutputUrl(result.blobUrl);
-          setProcessingMessage('Video processing completed successfully!');
-          addLog(`[READY] Result generated in memory buffer, ready for download.`);
-        } else if (fileHandle) {
-          try {
-            const finalDiskFile = await fileHandle.getFile();
-            addLog(`[CONFIRMED] File finalized on disk: ${fileHandle.name} (${(finalDiskFile.size / (1024 * 1024)).toFixed(2)} MB)`);
-          } catch (fhErr) {
-            console.warn('fileHandle getFile verify:', fhErr);
-          }
-          setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
-          addLog(`[SAVED] Result saved directly to target file: ${fileHandle.name}`);
-        }
-
-        setProcessingProgress(1.0);
-        addLog(`[DONE] ${exportMode === 'remux' ? 'Remux' : 'Processing'} finished successfully! All data written to disk (${((result.totalBytesWritten || 0) / (1024 * 1024)).toFixed(2)} MB).`);
-        setIsProcessingComplete(true);
       }
+
+      if (writable) {
+        const writtenMB = ((result?.totalBytesWritten || 0) / (1024 * 1024)).toFixed(1);
+        addLog(`[STAGE 4/4] Finalizing file and synchronizing ${writtenMB} MB buffer to disk...`);
+        addLog(`[NOTICE] For large files, flushing and committing to disk may take some time. Please keep this tab open.`);
+        setProcessingProgress(0.95);
+        setProcessingMessage(`Flushing data buffer to disk (${writtenMB} MB)... Please wait`);
+
+        let elapsedSec = 0;
+        const flushTimer = setInterval(() => {
+          elapsedSec += 1;
+          setProcessingMessage(`Writing and committing ${writtenMB} MB to disk (${elapsedSec}s elapsed)... Please wait`);
+        }, 1000);
+
+        try {
+          await writable.close();
+          clearInterval(flushTimer);
+          setProcessingProgress(0.99);
+          addLog(`[FINALIZE] Disk write & buffer sync fully completed (${elapsedSec}s elapsed).`);
+        } catch (closeErr: any) {
+          clearInterval(flushTimer);
+          console.warn('Writable close error:', closeErr);
+          addLog(`[ERROR] Stream close error: ${closeErr?.message || closeErr}`);
+          throw closeErr;
+        }
+      }
+
+      if (!result.success || result.totalBytesWritten === 0) {
+        throw new Error(`Failed to ${hasMultipleClips ? 'concatenate video files' : 'process video file'}`);
+      }
+
+      const successBannerMsg = hasMultipleClips
+        ? 'Video concatenation completed successfully!'
+        : 'Video processing completed successfully!';
+
+      if (opfsFileHandle) {
+        try {
+          const diskFile = await opfsFileHandle.getFile();
+          const url = URL.createObjectURL(diskFile);
+          setOutputUrl(url);
+          setProcessingMessage(successBannerMsg);
+          addLog(`[READY] Result saved to OPFS (${(diskFile.size / (1024 * 1024)).toFixed(2)} MB), ready for download.`);
+        } catch (opfsErr: any) {
+          console.warn('OPFS getFile error:', opfsErr);
+          addLog(`[WARNING] OPFS file access: ${opfsErr?.message || opfsErr}`);
+        }
+      } else if (result.blobUrl) {
+        setOutputUrl(result.blobUrl);
+        setProcessingMessage(successBannerMsg);
+        addLog(`[READY] Result generated in memory buffer, ready for download.`);
+      } else if (fileHandle) {
+        try {
+          const finalDiskFile = await fileHandle.getFile();
+          addLog(`[CONFIRMED] File finalized on disk: ${fileHandle.name} (${(finalDiskFile.size / (1024 * 1024)).toFixed(2)} MB)`);
+        } catch (fhErr) {
+          console.warn('fileHandle getFile verify:', fhErr);
+        }
+        setProcessingMessage(`Result saved directly to target file: ${fileHandle.name}`);
+        addLog(`[SAVED] Result saved directly to target file: ${fileHandle.name}`);
+      }
+
+      setProcessingProgress(1.0);
+      addLog(`[DONE] ${completionLabel} finished successfully! All data written to disk (${((result.totalBytesWritten || 0) / (1024 * 1024)).toFixed(2)} MB).`);
+      setIsProcessingComplete(true);
     } catch (err: any) {
       if (err?.name === 'AbortError' || err?.message === 'AbortError' || signal?.aborted) {
         addLog(`[CANCELLED] Export process cancelled by user.`);
@@ -1395,27 +1298,29 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-[#030712] text-slate-100 font-sans overflow-hidden relative">
+    <div
+      className={`flex flex-col h-screen bg-[#030712] text-slate-100 font-sans overflow-hidden relative transition-colors duration-200 ${
+        uiTheme === 'light' ? 'theme-light' : 'theme-dark'
+      }`}
+    >
       {/* Background ambient glow */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-0">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-600/20 rounded-full blur-[120px]"></div>
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-600/20 rounded-full blur-[120px]"></div>
       </div>
 
-      {/* Hidden file input for Single File selection (1 file at a time) */}
+      {/* Hidden file inputs sharing unified handleFileUpload */}
       <input
         type="file"
         ref={singleFileInputRef}
-        onChange={handleSingleFileUpload}
+        onChange={handleFileUpload}
         accept="video/*,audio/*,image/*"
         className="hidden"
       />
-
-      {/* Hidden file input for Multiple Files selection */}
       <input
         type="file"
         ref={multiFileInputRef}
-        onChange={handleMultiFileUpload}
+        onChange={handleFileUpload}
         accept="video/*,audio/*,image/*"
         multiple
         className="hidden"
@@ -1493,64 +1398,21 @@ export default function App() {
                   {/* Top / Main area: Codec, Resolution & Quality Controls inside Panel Encode */}
                   <div className="flex-1 flex flex-col gap-2 text-xs animate-fadeIn min-w-0 pr-1 overflow-y-auto">
                     {/* VIDEO SECTION */}
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-slate-400 font-mono">Video Codec:</span>
-                      <Dropdown
-                        id="select-codec"
-                        value={settings.videoCodec || 'av1'}
-                        onChange={(val) => updateSettings({ videoCodec: val as any })}
-                        options={[
-                          { value: 'av1', label: 'AV1' },
-                          { value: 'vp9', label: 'VP9' },
-                        ]}
-                      />
-                    </div>
-
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-slate-400 font-mono">Resolution:</span>
-                      <Dropdown
-                        id="select-resolution"
-                        value={settings.resolution || '1080'}
-                        onChange={(val) => updateSettings({ resolution: val as any })}
-                        options={[
-                          { value: '480', label: '480p' },
-                          { value: '720', label: '720p' },
-                          { value: '1080', label: '1080p (FHD)' },
-                          { value: '2k', label: '2K (1440p)' },
-                          { value: '4k', label: '4K (2160p)' },
-                          { value: '8k', label: '8K (4320p)' },
-                        ]}
-                      />
-                    </div>
-
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-slate-400 font-mono">Video Quality:</span>
-                      <Dropdown
-                        id="select-quality"
-                        value={settings.videoQuality || 'high'}
-                        onChange={(val) => updateSettings({ videoQuality: val as any })}
-                        options={[
-                          { value: 'very-high', label: 'Very High' },
-                          { value: 'high', label: 'High' },
-                          { value: 'medium', label: 'Medium' },
-                          { value: 'low', label: 'Low' },
-                        ]}
-                      />
-                    </div>
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-slate-400 font-mono">Speed:</span>
-                      <Dropdown
-                        id="select-speed"
-                        value={settings.encodeSpeed || 'ultra-fast'}
-                        onChange={(val) => updateSettings({ encodeSpeed: val as any })}
-                        options={[
-                          { value: 'ultra-fast', label: 'Ultra Fast (Hardware)' },
-                          { value: 'fast', label: 'Fast' },
-                          { value: 'medium', label: 'Medium (Balanced)' },
-                          { value: 'slow', label: 'Slow (High Efficiency)' },
-                        ]}
-                      />
-                    </div>
+                    {ENCODE_DROPDOWN_FIELDS.map((field) => (
+                      <div key={field.id} className="flex flex-col gap-1">
+                        <span className="text-[11px] text-slate-400 font-mono">{field.label}</span>
+                        <Dropdown
+                          id={field.id}
+                          value={String(settings[field.settingKey] || field.defaultValue)}
+                          onChange={(val) =>
+                            updateSettings({
+                              [field.settingKey]: field.isNumeric ? Number(val) : (val as any),
+                            })
+                          }
+                          options={field.options}
+                        />
+                      </div>
+                    ))}
 
                     <div className="flex flex-col gap-1">
                       <span className="text-[11px] text-slate-400 font-mono">Frame Rate (FPS):</span>
@@ -1606,7 +1468,6 @@ export default function App() {
                                 className="w-full bg-slate-950 text-white font-mono text-xs pl-2.5 pr-7 py-1.5 rounded border border-slate-700/80 focus:border-violet-500 focus:ring-1 focus:ring-violet-500/50 focus:outline-none transition"
                                 placeholder="e.g. 24, 48, 90, 144"
                               />
-                              {/* Custom Themed Stepper Buttons */}
                               <div className="absolute right-1 flex flex-col items-center justify-center border-l border-slate-800 pl-0.5">
                                 <button
                                   type="button"
@@ -1632,37 +1493,22 @@ export default function App() {
                       ) : null}
                     </div>
 
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-slate-400 font-mono">Audio Codec:</span>
-                      <Dropdown
-                        id="select-audio-codec"
-                        value={settings.audioCodec || 'opus'}
-                        onChange={(val) => updateSettings({ audioCodec: val as any })}
-                        options={[
-                          { value: 'opus', label: 'Opus (WebM / Modern)' },
-                          { value: 'aac', label: 'AAC-LC (MP4 / Universal Standard)' },
-                          { value: 'flac', label: 'FLAC (Lossless Audio)' },
-                          { value: 'pcm-s16', label: 'PCM 16-bit (Uncompressed)' },
-                        ]}
-                      />
-                    </div>
-
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[11px] text-slate-400 font-mono">Audio Bitrate:</span>
-                      <Dropdown
-                        id="select-audio-bitrate"
-                        value={String(settings.audioBitrate || 192)}
-                        onChange={(val) => updateSettings({ audioBitrate: Number(val) })}
-                        options={[
-                          { value: '320', label: '320 kbps (Maximum / Studio)' },
-                          { value: '256', label: '256 kbps (Very High)' },
-                          { value: '192', label: '192 kbps (High Quality - Recommended)' },
-                          { value: '128', label: '128 kbps (Standard)' },
-                          { value: '96', label: '96 kbps (Voice / Compact)' },
-                          { value: '64', label: '64 kbps (Low)' },
-                        ]}
-                      />
-                    </div>
+                    {/* AUDIO SECTION */}
+                    {AUDIO_DROPDOWN_FIELDS.map((field) => (
+                      <div key={field.id} className="flex flex-col gap-1">
+                        <span className="text-[11px] text-slate-400 font-mono">{field.label}</span>
+                        <Dropdown
+                          id={field.id}
+                          value={String(settings[field.settingKey] || field.defaultValue)}
+                          onChange={(val) =>
+                            updateSettings({
+                              [field.settingKey]: field.isNumeric ? Number(val) : (val as any),
+                            })
+                          }
+                          options={field.options}
+                        />
+                      </div>
+                    ))}
 
                     {/* IFRAME DIRECT SAVE MODE TOGGLE */}
                     <div className="flex items-center justify-between p-2 rounded-lg bg-slate-900/80 border border-violet-500/30 mt-1">
@@ -1749,14 +1595,7 @@ export default function App() {
                       </div>
 
                       <div className="grid grid-cols-2 gap-1.5">
-                        {[
-                          { id: '16:9', label: '16:9 (Landscape)', icon: <Monitor className="w-3.5 h-3.5" /> },
-                          { id: '9:16', label: '9:16 (Reels/TikTok)', icon: <Smartphone className="w-3.5 h-3.5 rotate-90" /> },
-                          { id: '1:1', label: '1:1 (Square)', icon: <Square className="w-3.5 h-3.5" /> },
-                          { id: '4:5', label: '4:5 (Instagram)', icon: <Smartphone className="w-3.5 h-3.5" /> },
-                          { id: '4:3', label: '4:3 (Classic TV)', icon: <Tv className="w-3.5 h-3.5" /> },
-                          { id: '21:9', label: '21:9 (Ultrawide)', icon: <Film className="w-3.5 h-3.5" /> },
-                        ].map((option) => {
+                        {CANVAS_ASPECT_OPTIONS.map((option) => {
                           const isSelected = (settings.cropAspect || '16:9') === option.id;
                           return (
                             <button
@@ -1988,78 +1827,21 @@ export default function App() {
                           <div className="flex flex-col gap-1 pt-1">
                             <span className="text-[10px] text-slate-400 font-mono">Corner & Snap:</span>
                             <div className="grid grid-cols-3 gap-1 bg-slate-950/80 p-1.5 rounded-lg border border-white/5">
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('tl')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowUpLeft className="w-3.5 h-3.5 mr-0.5" />
-                                <span>TL</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('tc')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowUp className="w-3.5 h-3.5 mr-0.5" />
-                                <span>TC</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('tr')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowUpRight className="w-3.5 h-3.5 mr-0.5" />
-                                <span>TR</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('lc')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowLeft className="w-3.5 h-3.5 mr-0.5" />
-                                <span>LC</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('center')}
-                                className="flex items-center justify-center p-1.5 rounded bg-violet-600/30 hover:bg-violet-600 text-violet-200 hover:text-white transition text-[10px] border border-violet-500/40 font-medium cursor-pointer"
-                              >
-                                <Target className="w-3.5 h-3.5 mr-0.5 text-violet-400" />
-                                <span>Center</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('rc')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowRight className="w-3.5 h-3.5 mr-0.5" />
-                                <span>RC</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('bl')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowDownLeft className="w-3.5 h-3.5 mr-0.5" />
-                                <span>BL</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('bc')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowDown className="w-3.5 h-3.5 mr-0.5" />
-                                <span>BC</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleAlignLayer('br')}
-                                className="flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer"
-                              >
-                                <ArrowDownRight className="w-3.5 h-3.5 mr-0.5" />
-                                <span>BR</span>
-                              </button>
+                              {ALIGN_GRID_OPTIONS.map((btn) => (
+                                <button
+                                  key={btn.id}
+                                  type="button"
+                                  onClick={() => handleAlignLayer(btn.id)}
+                                  className={
+                                    btn.isCenter
+                                      ? 'flex items-center justify-center p-1.5 rounded bg-violet-600/30 hover:bg-violet-600 text-violet-200 hover:text-white transition text-[10px] border border-violet-500/40 font-medium cursor-pointer'
+                                      : 'flex items-center justify-center p-1.5 rounded bg-slate-800/80 hover:bg-violet-600/30 hover:text-violet-200 text-slate-300 transition text-[10px] border border-white/5 cursor-pointer'
+                                  }
+                                >
+                                  {btn.icon}
+                                  <span>{btn.label}</span>
+                                </button>
+                              ))}
                             </div>
                           </div>
 
@@ -2101,19 +1883,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => {
-                                const aspect = settings.cropAspect || '16:9';
-                                let coverScale = 3.161; // Exact 256/81 scale for 16:9 -> 9:16 vertical fill
-                                if (aspect === '9:16') {
-                                  coverScale = 3.161;
-                                } else if (aspect === '1:1') {
-                                  coverScale = 1.778;
-                                } else if (aspect === '4:5') {
-                                  coverScale = 2.222;
-                                } else if (aspect === '21:9') {
-                                  coverScale = 1.309;
-                                } else {
-                                  coverScale = 1.778;
-                                }
+                                const coverScale = getCoverScaleForAspect(settings.cropAspect);
                                 handleUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
                                   ...activeSelectedLayer.transform,
                                   x: 50,
@@ -2195,6 +1965,8 @@ export default function App() {
             onReset={handleReset}
             onExportClick={handleExport}
             onFullscreenClick={handleFullscreen}
+            uiTheme={uiTheme}
+            onToggleTheme={handleToggleTheme}
             isLoaded={!!videoUrl}
             isProcessing={isProcessingModalOpen}
             isEncodeMode={isEncodeMode}

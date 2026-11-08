@@ -274,6 +274,7 @@ export class HardwareBlurEngine {
         passEncoder.end();
 
         device.queue.submit([commandEncoder.finish()]);
+        srcTexture.destroy();
         
         return this.gpuCanvas;
       } catch (err) {

@@ -7,6 +7,12 @@ import {
   MediaType,
   TrackColor,
 } from '../types';
+import {
+  getPreviewCssFilter,
+  getAspectRatioNumber,
+  resolveVisualLayers,
+  ResolvedVisualLayer,
+} from '../utils/mediaHelpers';
 import { createWebCodecsSession, WebCodecsSession } from '../utils/webcodecsPlayerClient';
 import {
   Play,
@@ -334,17 +340,25 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
     drawFrameAtRef.current = drawFrameAt;
   });
 
+  const sourceKey = file ? `${file.name}_${file.size}_${file.lastModified}` : (url || '');
   const activeSessionSource = file || url;
+  const lastSourceKeyRef = useRef<string>('');
 
-  // Initialize WebCodecs Session ONLY when the underlying source changes
+  // Initialize WebCodecs Session ONLY when the underlying source actually changes
   useEffect(() => {
     let active = true;
     const targetSource = activeSessionSource;
-    if (!targetSource) {
+    if (!targetSource || !sourceKey) {
+      lastSourceKeyRef.current = '';
       setSessionReady(false);
       useFallbackHtmlAudioRef.current = false;
       return;
     }
+
+    if (lastSourceKeyRef.current === sourceKey && sessionRef.current) {
+      return;
+    }
+    lastSourceKeyRef.current = sourceKey;
 
     setSessionReady(false);
     useFallbackHtmlAudioRef.current = false;
@@ -411,9 +425,10 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
       if (sessionRef.current) {
         sessionRef.current.close();
         sessionRef.current = null;
+        lastSourceKeyRef.current = '';
       }
     };
-  }, [activeSessionSource, clearFrameBuffer, stopScheduledAudio]);
+  }, [sourceKey, activeSessionSource, clearFrameBuffer, stopScheduledAudio]);
 
   // Close AudioContext when component unmounts
   useEffect(() => {
@@ -555,7 +570,7 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
           lastRenderedTimeRef.current = timestamp;
 
           if (!hasReceivedFirstAudio && !fallbackAudioStarted) {
-            playheadTimeRef.current = timestamp;
+            playheadTimeRef.current = Math.max(initialTargetTime, timestamp);
           }
           if (!session.hasWebCodecsAudio || useFallbackHtmlAudioRef.current) {
             startFallbackAudioAligned(playheadTimeRef.current, true);
@@ -709,13 +724,19 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
           }
 
           if (scheduledAudioNodesRef.current.size > 0 || outputCtxTime < nextAudioSchedTimeRef.current + 0.05) {
-            const computedAudioTime = anchor.mediaTime + (outputCtxTime - anchor.contextTime) * playbackRate;
+            // Audio output cannot be earlier than anchor.mediaTime because playback only started at anchor.mediaTime
+            const rawAudioTime = anchor.mediaTime + (outputCtxTime - anchor.contextTime) * playbackRate;
+            const computedAudioTime = Math.max(anchor.mediaTime, rawAudioTime);
             const expectedTime = playheadTimeRef.current + delta * playbackRate;
             const drift = computedAudioTime - expectedTime;
 
             if (Math.abs(drift) > 0.20) {
-              // Snap directly on large gap (start / post-seek)
-              nextTime = computedAudioTime;
+              // Snap forward on large lag gap, but NEVER regress backwards below current playhead during startup
+              if (computedAudioTime >= playheadTimeRef.current) {
+                nextTime = computedAudioTime;
+              } else {
+                nextTime = expectedTime;
+              }
             } else {
               // Phase-Locked Loop (PLL): smooth proportional speed adjustment
               const speedCorrection = Math.max(-0.035, Math.min(0.035, drift * 0.45));
@@ -744,9 +765,9 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
             if (now - lastAudioAdvanceRef.current.wallTime < 250) {
               const audioDrift = audioTime - nextTime;
               if (Math.abs(audioDrift) > 0.015 && Math.abs(audioDrift) <= 0.3) {
-                nextTime = nextTime + audioDrift * 0.65;
+                nextTime = Math.max(playheadTimeRef.current, nextTime + audioDrift * 0.65);
               } else if (Math.abs(audioDrift) > 0.3) {
-                nextTime = audioTime;
+                nextTime = Math.max(playheadTimeRef.current, audioTime);
               }
             }
           }
@@ -775,11 +796,12 @@ export const WebCodecsPlayerCanvas: React.FC<WebCodecsPlayerCanvasProps> = ({
             audioRef.current.pause();
           } catch {}
         }
-        if (onTimeUpdateRef.current) onTimeUpdateRef.current(finalTime);
-        if (onEndedRef.current) onEndedRef.current();
+        if (isMaster && onTimeUpdateRef.current) onTimeUpdateRef.current(finalTime);
+        if (isMaster && onEndedRef.current) onEndedRef.current();
         return;
       }
 
+      nextTime = Math.max(playheadTimeRef.current, nextTime);
       playheadTimeRef.current = nextTime;
 
       if (!session.hasVideo) {
@@ -922,68 +944,9 @@ interface VideoPlayerProps {
   onSelectClipId?: (clipId: string | null) => void;
 }
 
-interface AspectOption {
-  id: EditSettings['cropAspect'];
-  label: string;
-  icon: React.ReactNode;
-}
-
-const ASPECT_OPTIONS: AspectOption[] = [
-  {
-    id: 'original',
-    label: 'Original',
-    icon: <RotateCcw className="w-3.5 h-3.5" />,
-  },
-  {
-    id: '16:9',
-    label: '16:9',
-    icon: <Monitor className="w-3.5 h-3.5" />,
-  },
-  {
-    id: '4:3',
-    label: '4:3',
-    icon: <Tv className="w-3.5 h-3.5" />,
-  },
-  {
-    id: '1:1',
-    label: '1:1',
-    icon: <Square className="w-3.5 h-3.5" />,
-  },
-  {
-    id: '4:5',
-    label: '4:5',
-    icon: <Smartphone className="w-3.5 h-3.5" />,
-  },
-  {
-    id: '9:16',
-    label: '9:16',
-    icon: <Smartphone className="w-3.5 h-3.5 rotate-90" />,
-  },
-  {
-    id: '21:9',
-    label: '21:9',
-    icon: <Film className="w-3.5 h-3.5" />,
-  },
-];
-
 type DragHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'e' | 'w';
 
-interface ActiveLayerItem {
-  trackId: string;
-  trackName: string;
-  subLayerName?: string;
-  trackColor: TrackColor;
-  trackIndex: number;
-  clip: TimelineClip;
-  mediaType: 'video' | 'image';
-  url: string;
-  transform: ClipTransform;
-  muted: boolean;
-  locked: boolean;
-  volume: number;
-  transitionOpacity?: number;
-  transitionClipPath?: string;
-}
+type ActiveLayerItem = ResolvedVisualLayer;
 
 const AudioTrack: React.FC<{
   clip: { id: string; url: string; startTime: number; sourceStartTime: number };
@@ -1206,9 +1169,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (!isEncodeMode) return 12;
     return isRightPanelExpanded ? 304 : 28;
   }, [isEncodeMode, isRightPanelExpanded]);
-  const menuRef = useRef<HTMLDivElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [nativeAspect, setNativeAspect] = useState<number>(16 / 9);
 
   // Selected layer for direct manipulation (drag & transform)
@@ -1255,8 +1216,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   // Dragging state for free crop
   const [isDraggingCrop, setIsDraggingCrop] = useState<boolean>(false);
-  const [isAlignMenuOpen, setIsAlignMenuOpen] = useState<boolean>(false);
-  const alignMenuRef = useRef<HTMLDivElement>(null);
   const dragInfoRef = useRef<{
     handle: DragHandle;
     startX: number;
@@ -1266,74 +1225,32 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     containerHeight: number;
   } | null>(null);
 
-  // Reset error state and context menu when video URL or mode changes
+  // Reset error state when video URL or mode changes
   useEffect(() => {
     setLoadError(null);
   }, [videoUrl]);
 
   useEffect(() => {
-    if (!isEncodeMode) {
-      setContextMenu(null);
-      if (selectedClipId !== null) {
-        setSelectedClipId(null);
-      }
-      setIsAlignMenuOpen(false);
+    if (!isEncodeMode && selectedClipId !== null) {
+      setSelectedClipId(null);
     }
   }, [isEncodeMode, selectedClipId, setSelectedClipId]);
 
-  // Handle outside clicks to close context menu and align menu
+  // Handle Escape key to deselect layer
   useEffect(() => {
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setContextMenu(null);
-      }
-      if (alignMenuRef.current && !alignMenuRef.current.contains(e.target as Node)) {
-        setIsAlignMenuOpen(false);
-      }
-    };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        setContextMenu(null);
         setSelectedClipId(null);
-        setIsAlignMenuOpen(false);
       }
     };
-
-    document.addEventListener('mousedown', handleOutsideClick);
     document.addEventListener('keydown', handleKeyDown);
     return () => {
-      document.removeEventListener('mousedown', handleOutsideClick);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
+  }, [setSelectedClipId]);
 
-  // Compute CSS filter string for live preview
-  const getCssFilter = () => {
-    if (settings.brightness === 1.0 && settings.contrast === 1.0 && settings.filter === 'none') {
-      return undefined;
-    }
-    let f = `brightness(${settings.brightness}) contrast(${settings.contrast})`;
-    switch (settings.filter) {
-      case 'grayscale':
-        f += ' grayscale(100%)';
-        break;
-      case 'sepia':
-        f += ' sepia(100%)';
-        break;
-      case 'negative':
-        f += ' invert(100%)';
-        break;
-      case 'blur':
-        f += ' blur(3px)';
-        break;
-      case 'vignette':
-        f += ' contrast(120%) brightness(90%)';
-        break;
-      default:
-        break;
-    }
-    return f;
-  };
+  // Compute CSS filter string for live preview using shared helper
+  const getCssFilter = () => getPreviewCssFilter(settings);
 
   // Compute global transform
   const getGlobalTransform = () => {
@@ -1347,20 +1264,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return transforms.join(' ');
   };
 
-  // Aspect ratio class container
+  // Aspect ratio class container using shared aspect helper
   const getAspectStyle = (): React.CSSProperties => {
-    let ratioNum = nativeAspect || 16 / 9;
-
-    if (effectiveAspect !== 'original' && effectiveAspect !== 'free') {
-      switch (effectiveAspect) {
-        case '16:9': ratioNum = 16 / 9; break;
-        case '4:3': ratioNum = 4 / 3; break;
-        case '1:1': ratioNum = 1 / 1; break;
-        case '4:5': ratioNum = 4 / 5; break;
-        case '9:16': ratioNum = 9 / 16; break;
-        case '21:9': ratioNum = 21 / 9; break;
-      }
-    }
+    const ratioNum = getAspectRatioNumber(effectiveAspect, nativeAspect || 16 / 9);
 
     return {
       aspectRatio: `${ratioNum}`,
@@ -1388,128 +1294,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   };
 
   // =========================================================================
-  // 🎛️ ACTIVE VISUAL LAYERS RESOLUTION (ENCODE MODE)
+  // 🎛️ ACTIVE VISUAL LAYERS RESOLUTION (ENCODE MODE) - SHARED VIA MEDIAHELPERS
   // =========================================================================
   const activeLayers: ActiveLayerItem[] = useMemo(() => {
     if (!isEncodeMode || !tracks || tracks.length === 0) return [];
-
-    const list: ActiveLayerItem[] = [];
-    const TRANSITION_HALF = 0.5; // 0.5s transition window (1s total)
-
-    tracks.forEach((track, trackIdx) => {
-      if (track.hidden) return;
-
-      const clips = track.clips || [];
-
-      // Pre-calculate visual clip sequence numbers (sorted by startTime)
-      const visualClips = clips
-        .filter((c) => {
-          const isVid =
-            c.mediaType === 'video' ||
-            (c.file && (c.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(c.file.name)));
-          const isImg =
-            c.mediaType === 'image' ||
-            (c.file && (c.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(c.file.name)));
-          return isVid || isImg;
-        })
-        .slice()
-        .sort((a, b) => a.startTime - b.startTime);
-
-      const clipSeqMap = new Map<string, number>();
-      visualClips.forEach((c, index) => {
-        clipSeqMap.set(c.id, index + 1);
-      });
-
-      clips.forEach((clip, i) => {
-        const nextClip = i < clips.length - 1 ? clips[i + 1] : null;
-        const prevClip = i > 0 ? clips[i - 1] : null;
-
-        // Check boundary adjacency
-        const hasOutgoing = clip.transition && clip.transition !== 'none' && nextClip && Math.abs(clip.endTime - nextClip.startTime) < 0.15;
-        const hasIncoming = prevClip && prevClip.transition && prevClip.transition !== 'none' && Math.abs(prevClip.endTime - clip.startTime) < 0.15;
-
-        // Check active condition
-        const isNormallyActive = currentTime >= clip.startTime && currentTime <= clip.endTime;
-        const isInOutgoing = hasOutgoing && currentTime >= (clip.endTime - TRANSITION_HALF) && currentTime <= (clip.endTime + TRANSITION_HALF);
-        const isInIncoming = hasIncoming && currentTime >= (prevClip!.endTime - TRANSITION_HALF) && currentTime <= (prevClip!.endTime + TRANSITION_HALF);
-        const isSoloFadeEnd = clip.transition === 'fade' && !hasOutgoing && currentTime >= (clip.endTime - TRANSITION_HALF) && currentTime <= clip.endTime;
-
-        if (!isNormallyActive && !isInOutgoing && !isInIncoming && !isSoloFadeEnd) {
-          return;
-        }
-
-        const isVideo =
-          clip.mediaType === 'video' ||
-          (clip.file && (clip.file.type.startsWith('video/') || /\.(mp4|mkv|mov|webm|avi|flv)$/i.test(clip.file.name)));
-
-        const isImage =
-          clip.mediaType === 'image' ||
-          (clip.file && (clip.file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i.test(clip.file.name)));
-
-        if (!isVideo && !isImage) return;
-
-        const url = clip.previewUrl || (clip.file ? getFileUrl(clip.file) : '');
-        if (!url) return;
-
-        // Calculate transition opacity and clipPath
-        let transitionOpacity = 1.0;
-        let transitionClipPath: string | undefined = undefined;
-
-        if (isInOutgoing) {
-          const transType = clip.transition;
-          const p = Math.max(0, Math.min(1, (currentTime - (clip.endTime - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
-          if (transType === 'fade') {
-            transitionOpacity = p <= 0.5 ? (1.0 - p * 2) : 0.0;
-          } else if (transType === 'crossfade' || transType === 'dissolve') {
-            transitionOpacity = 1.0 - p;
-          } else if (transType === 'wipe') {
-            transitionOpacity = 1.0;
-          }
-        } else if (isInIncoming) {
-          const transType = prevClip!.transition;
-          const p = Math.max(0, Math.min(1, (currentTime - (prevClip!.endTime - TRANSITION_HALF)) / (2 * TRANSITION_HALF)));
-          if (transType === 'fade') {
-            transitionOpacity = p > 0.5 ? ((p - 0.5) * 2) : 0.0;
-          } else if (transType === 'crossfade' || transType === 'dissolve') {
-            transitionOpacity = p;
-          } else if (transType === 'wipe') {
-            transitionOpacity = 1.0;
-            const pct = Math.round(p * 100);
-            transitionClipPath = `polygon(0 0, ${pct}% 0, ${pct}% 100%, 0 100%)`;
-          }
-        } else if (isSoloFadeEnd) {
-          const p = Math.max(0, Math.min(1, (currentTime - (clip.endTime - TRANSITION_HALF)) / TRANSITION_HALF));
-          transitionOpacity = 1.0 - p;
-        }
-
-        const defaultTransform: ClipTransform = {
-          x: 50,
-          y: 50,
-          scale: trackIdx === 0 ? 1.0 : 0.45,
-          rotation: 0,
-          opacity: 1,
-        };
-
-        list.push({
-          trackId: track.id,
-          trackName: track.name,
-          subLayerName: `Layer ${trackIdx + 1}-${clipSeqMap.get(clip.id) || (i + 1)}`,
-          trackColor: track.color,
-          trackIndex: trackIdx,
-          clip,
-          mediaType: isVideo ? 'video' : 'image',
-          url,
-          transform: clip.transform ? { ...defaultTransform, ...clip.transform } : defaultTransform,
-          muted: track.muted || settings.muteAudio,
-          locked: !!track.locked,
-          volume: track.volume ?? 1,
-          transitionOpacity,
-          transitionClipPath,
-        });
-      });
-    });
-
-    return list;
+    return resolveVisualLayers(tracks, currentTime, settings.muteAudio, getFileUrl).filter(
+      (layer) => layer.isActive && Boolean(layer.url)
+    );
   }, [isEncodeMode, tracks, currentTime, settings.muteAudio, getFileUrl]);
 
   // Dynamically resolve master timekeeper clip ID to prevent freezes at clip boundaries during transitions
@@ -1677,137 +1468,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     };
   }, [isDraggingLayer, isResizingLayerCorner, onUpdateClipTransform]);
 
-  // Corner & Position Alignment calculation helper for encode preview box
-  const handleAlignLayer = (
-    position: 'tl' | 'tr' | 'bl' | 'br' | 'tc' | 'bc' | 'lc' | 'rc' | 'center',
-    customScale?: number
-  ) => {
-    if (!activeSelectedLayer || !onUpdateClipTransform) return;
-    const currentScale = customScale ?? activeSelectedLayer.transform.scale;
-
-    const wrapper = videoWrapperRef.current;
-    const layerEl = wrapper?.querySelector(`[data-layer-id="${activeSelectedLayer.clip.id}"]`) as HTMLElement | null;
-
-    let halfWPct = (currentScale * 100) / 2;
-    let halfHPct = (currentScale * 100 * 0.5625) / 2;
-
-    if (wrapper && layerEl) {
-      const wrapperRect = wrapper.getBoundingClientRect();
-      const unscaledW = layerEl.offsetWidth;
-      const unscaledH = layerEl.offsetHeight;
-
-      if (wrapperRect.width > 0 && wrapperRect.height > 0 && unscaledW > 0 && unscaledH > 0) {
-        const visualWPx = unscaledW * currentScale;
-        const visualHPx = unscaledH * currentScale;
-        halfWPct = (visualWPx / 2 / wrapperRect.width) * 100;
-        halfHPct = (visualHPx / 2 / wrapperRect.height) * 100;
-      }
-    }
-
-    // Neat margin from the edge of the preview container (e.g. 1.0%)
-    const margin = 1.0;
-
-    let targetX = 50;
-    let targetY = 50;
-
-    switch (position) {
-      case 'tl': // Top-Left corner 
-        targetX = halfWPct + margin;
-        targetY = halfHPct + margin;
-        break;
-      case 'tr': // Top-Right corner 
-        targetX = 100 - (halfWPct + margin);
-        targetY = halfHPct + margin;
-        break;
-      case 'bl': // Bottom-Left corner 
-        targetX = halfWPct + margin;
-        targetY = 100 - (halfHPct + margin);
-        break;
-      case 'br': // Bottom-Right corner 
-        targetX = 100 - (halfWPct + margin);
-        targetY = 100 - (halfHPct + margin);
-        break;
-      case 'tc': // Top-Center 
-        targetX = 50;
-        targetY = halfHPct + margin;
-        break;
-      case 'bc': // Bottom-Center 
-        targetX = 50;
-        targetY = 100 - (halfHPct + margin);
-        break;
-      case 'lc': // Left-Center 
-        targetX = halfWPct + margin;
-        targetY = 50;
-        break;
-      case 'rc': // Right-Center 
-        targetX = 100 - (halfWPct + margin);
-        targetY = 50;
-        break;
-      case 'center': // Center 
-      default:
-        targetX = 50;
-        targetY = 50;
-        break;
-    }
-
-    // Clamp within container boundaries so layer never overflows
-    if (halfWPct * 2 < 100) {
-      targetX = Math.max(halfWPct + margin, Math.min(100 - (halfWPct + margin), targetX));
-    }
-    if (halfHPct * 2 < 100) {
-      targetY = Math.max(halfHPct + margin, Math.min(100 - (halfHPct + margin), targetY));
-    }
-
-    onUpdateClipTransform(activeSelectedLayer.trackId, activeSelectedLayer.clip.id, {
-      ...activeSelectedLayer.transform,
-      x: Math.round(targetX * 10) / 10,
-      y: Math.round(targetY * 10) / 10,
-      ...(customScale !== undefined ? { scale: customScale } : {}),
-    });
-  };
-
-  // Right-click context menu handler (Aspect ratio picker)
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    if (!isEncodeMode || !videoUrl || loadError) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    const menuWidth = 260;
-    const menuHeight = 390;
-    let posX = e.clientX;
-    let posY = e.clientY;
-
-    if (posX + menuWidth > window.innerWidth - 12) {
-      posX = window.innerWidth - menuWidth - 12;
-    }
-    if (posY + menuHeight > window.innerHeight - 12) {
-      posY = window.innerHeight - menuHeight - 12;
-    }
-
-    setContextMenu({ x: posX, y: posY });
-  }, [isEncodeMode, videoUrl, loadError]);
-
-  const handleSelectAspect = (aspect: EditSettings['cropAspect']) => {
-    const newSettings: Partial<EditSettings> = { cropAspect: aspect };
-
-    if (aspect === 'free') {
-      const initialRect =
-        settings.freeCropRect && settings.freeCropRect.width > 0.05
-          ? settings.freeCropRect
-          : { x: 0.1, y: 0.1, width: 0.8, height: 0.8 };
-      newSettings.freeCropRect = initialRect;
-    }
-
-    if (!isEncodeMode && aspect !== 'original') {
-      if (onToggleEncodeMode) onToggleEncodeMode();
-      newSettings.encodeMode = true;
-    }
-
-    if (onUpdateSettings) onUpdateSettings(newSettings);
-    setContextMenu(null);
-  };
-
   // Free Crop mouse handlers
   const handleMouseDownCrop = (e: React.MouseEvent, handle: DragHandle) => {
     e.preventDefault();
@@ -1947,10 +1607,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </svg>
               <span>Donate</span>
             </a>
+
+            {/* Microsoft Store Icon + Text Link */}
+            <a
+              href="https://apps.microsoft.com/store/detail/9NH7RRKT5LTD?cid=DevShareMCLPCS"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Download from Microsoft Store"
+              className="h-9 px-3 flex items-center space-x-1.5 bg-[#0078D4]/10 hover:bg-[#0078D4]/20 border border-[#0078D4]/30 text-[#0078D4] rounded-lg font-medium text-xs transition shadow-md shrink-0"
+            >
+              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="1" y="1" width="10" height="10" fill="#F25022" rx="1" />
+                <rect x="13" y="1" width="10" height="10" fill="#7FBA00" rx="1" />
+                <rect x="1" y="13" width="10" height="10" fill="#00A4EF" rx="1" />
+                <rect x="13" y="13" width="10" height="10" fill="#FFB900" rx="1" />
+              </svg>
+              <span>Microsoft Store</span>
+            </a>
           </div>
           <div className="text-slate-500 text-xs font-medium font-mono">
             <span className="font-bold mr-2">NSK App</span>
-            ver 3.5.2
+            ver 3.5.3
           </div>
         </div>
       ) : loadError ? (
@@ -2408,69 +2085,6 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </div>
             </div>
           )}
-        </div>
-      )}
-
-      {/* Right-Click Popup Context Menu for Aspect Ratio (Encode Mode) */}
-      {isEncodeMode && contextMenu && (
-        <div
-          ref={menuRef}
-          className="fixed z-50 min-w-[260px] bg-slate-900/95 border border-slate-700/80 rounded-xl shadow-2xl backdrop-blur-xl p-2 text-slate-200 animate-in fade-in zoom-in-95 duration-150"
-          style={{
-            top: `${contextMenu.y}px`,
-            left: `${contextMenu.x}px`,
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex flex-col gap-0.5 max-h-[300px] overflow-y-auto">
-            {ASPECT_OPTIONS.map((option) => {
-              const isOriginal = option.id === 'original';
-              if (isEncodeMode && isOriginal) return null;
-
-              const isSelected = effectiveAspect === option.id;
-              const isActive = isEncodeMode && isSelected;
-
-              return (
-                <button
-                  key={option.id}
-                  onClick={() => handleSelectAspect(option.id)}
-                  className={`w-full px-2.5 py-1.5 rounded-lg text-left flex items-center justify-between text-xs transition cursor-pointer ${
-                    isActive
-                      ? 'bg-violet-500/20 text-violet-200 font-medium border border-violet-500/40 shadow-sm'
-                      : !isEncodeMode && !isOriginal
-                      ? 'hover:bg-slate-800/80 text-slate-400 hover:text-slate-200 border border-transparent'
-                      : 'hover:bg-slate-800/80 text-slate-300 hover:text-white border border-transparent'
-                  }`}
-                >
-                  <div className="flex items-center space-x-2.5">
-                    <span
-                      className={`p-1 rounded ${
-                        isActive
-                          ? 'bg-violet-500/30 text-violet-300'
-                          : !isEncodeMode && !isOriginal
-                          ? 'bg-slate-800/70 text-slate-500'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      {option.icon}
-                    </span>
-                    <div className="flex items-center space-x-1.5">
-                      <span className="font-semibold text-xs text-slate-200">{option.label}</span>
-                      {!isEncodeMode && !isOriginal && (
-                        <span className="text-[9px] text-amber-400/80 font-normal">
-                          (Encode Mode)
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  {isActive && <Check className="w-3.5 h-3.5 text-violet-400 shrink-0 ml-2" />}
-                  {!isEncodeMode && !isOriginal && (
-                    <Lock className="w-3 h-3 text-slate-500 shrink-0 ml-2" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
         </div>
       )}
     </div>

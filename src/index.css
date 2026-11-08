@@ -65,3 +65,168 @@ input[type=number] {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ============================================================================
+   UI THEME SYSTEM: MONOCHROME DARK SLATE-GRAY (Default) & WHITE (theme-light)
+   (No purple buttons — all indigo/violet/purple mapped to neutral monochrome)
+   ============================================================================ */
+:root,
+html.theme-dark,
+.theme-dark {
+  --color-indigo-50: #fafafa;
+  --color-indigo-100: #f4f4f5;
+  --color-indigo-200: #e4e4e7;
+  --color-indigo-300: #d4d4d8;
+  --color-indigo-400: #a1a1aa;
+  --color-indigo-500: #71717a;
+  --color-indigo-600: #3f3f46;
+  --color-indigo-700: #27272a;
+  --color-indigo-800: #1f1f23;
+  --color-indigo-900: #18181b;
+  --color-indigo-950: #121215;
+
+  --color-violet-50: #fafafa;
+  --color-violet-100: #f4f4f5;
+  --color-violet-200: #e4e4e7;
+  --color-violet-300: #d4d4d8;
+  --color-violet-400: #a1a1aa;
+  --color-violet-500: #71717a;
+  --color-violet-600: #3f3f46;
+  --color-violet-700: #27272a;
+  --color-violet-800: #1f1f23;
+  --color-violet-900: #18181b;
+  --color-violet-950: #121215;
+
+  --color-purple-500: #52525b;
+  --color-purple-600: #27272a;
+}
+
+html.theme-light,
+.theme-light {
+  --color-slate-950: #ffffff;
+  --color-slate-900: #f8fafc;
+  --color-slate-800: #e2e8f0;
+  --color-slate-700: #cbd5e1;
+  --color-slate-600: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-400: #475569;
+  --color-slate-300: #334155;
+  --color-slate-200: #1e293b;
+  --color-slate-100: #0f172a;
+  --color-slate-50: #020617;
+
+  --color-indigo-50: #18181b;
+  --color-indigo-100: #27272a;
+  --color-indigo-200: #27272a;
+  --color-indigo-300: #3f3f46;
+  --color-indigo-400: #3f3f46;
+  --color-indigo-500: #52525b;
+  --color-indigo-600: #27272a;
+  --color-indigo-700: #3f3f46;
+  --color-indigo-800: #d4d4d8;
+  --color-indigo-900: #e4e4e7;
+  --color-indigo-950: #f4f4f5;
+
+  --color-violet-50: #18181b;
+  --color-violet-100: #27272a;
+  --color-violet-200: #27272a;
+  --color-violet-300: #3f3f46;
+  --color-violet-400: #3f3f46;
+  --color-violet-500: #52525b;
+  --color-violet-600: #27272a;
+  --color-violet-700: #3f3f46;
+  --color-violet-800: #d4d4d8;
+  --color-violet-900: #e4e4e7;
+  --color-violet-950: #f4f4f5;
+
+  --color-purple-500: #71717a;
+  --color-purple-600: #d4d4d8;
+
+  scrollbar-color: rgba(148, 163, 184, 0.85) rgba(241, 245, 249, 0.9);
+}
+
+html.theme-light ::-webkit-scrollbar-track,
+.theme-light ::-webkit-scrollbar-track {
+  background: rgba(241, 245, 249, 0.95);
+}
+
+html.theme-light ::-webkit-scrollbar-thumb,
+.theme-light ::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.85);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+/* Root and workspace backgrounds in White theme */
+.theme-light.bg-\[\#030712\],
+.theme-light .bg-\[\#030712\] {
+  background-color: #f1f5f9 !important;
+}
+
+.theme-light .bg-black\/20 {
+  background-color: rgba(248, 250, 252, 0.85) !important;
+}
+
+.theme-light .bg-black\/40,
+.theme-light .bg-black\/60,
+.theme-light .bg-black\/70,
+.theme-light .bg-black\/80 {
+  background-color: rgba(241, 245, 249, 0.95) !important;
+}
+
+/* Borders & Subtle Surfaces in White theme */
+.theme-light .border-white\/5,
+.theme-light .border-white\/10,
+.theme-light .border-white\/15,
+.theme-light .border-white\/20 {
+  border-color: rgba(15, 23, 42, 0.12) !important;
+}
+
+.theme-light .divide-white\/5 > :not([hidden]) ~ :not([hidden]),
+.theme-light .divide-white\/10 > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(15, 23, 42, 0.1) !important;
+}
+
+.theme-light .bg-white\/5 {
+  background-color: rgba(15, 23, 42, 0.05) !important;
+}
+
+.theme-light .bg-white\/10,
+.theme-light .hover\:bg-white\/10:hover {
+  background-color: rgba(15, 23, 42, 0.09) !important;
+}
+
+/* Neutralized badges and headers in White theme */
+.theme-light .bg-indigo-950\/40,
+.theme-light .bg-indigo-950\/60,
+.theme-light .bg-indigo-950\/70,
+.theme-light .bg-indigo-950\/80,
+.theme-light .bg-indigo-950\/90,
+.theme-light .bg-violet-950\/40,
+.theme-light .bg-violet-950\/80,
+.theme-light .bg-violet-950\/90 {
+  background-color: rgba(226, 232, 240, 0.85) !important;
+}
+
+.theme-light .text-indigo-200,
+.theme-light .text-indigo-300,
+.theme-light .text-indigo-400,
+.theme-light .text-violet-200,
+.theme-light .text-violet-300,
+.theme-light .text-violet-400 {
+  color: #1e293b !important;
+}
+
+/* Keep the actual video canvas container true black for accurate media preview */
+.theme-light #canvas-container {
+  --color-slate-950: #020617;
+  --color-slate-900: #0f172a;
+  --color-slate-800: #1e293b;
+  --color-slate-700: #334155;
+  --color-slate-400: #94a3b8;
+  --color-slate-300: #cbd5e1;
+  --color-slate-200: #e2e8f0;
+  --color-slate-100: #f1f5f9;
+  background-color: #000000 !important;
+  border-color: rgba(15, 23, 42, 0.2) !important;
+}
+
