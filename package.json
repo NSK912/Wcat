@@ -1,0 +1,104 @@
+{
+  "name": "wcat",
+  "private": true,
+  "version": "3.5.4",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite --port=3000 --host=0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist dist-electron server.js release",
+    "lint": "tsc --noEmit",
+    "generate:icons": "node scripts/generate-icons.js",
+    "electron:build": "npm run generate:icons && vite build && npx tsc electron/main.ts --outDir dist-electron --target esnext --module nodenext --moduleResolution nodenext && electron-builder --linux AppImage",
+    "electron:build:win": "npm run generate:icons && vite build && npx tsc electron/main.ts --outDir dist-electron --target esnext --module nodenext --moduleResolution nodenext && electron-builder --win"
+  },
+  "build": {
+    "appId": "com.wcat.app",
+    "productName": "Wcat",
+    "icon": "build/icon.png",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "public/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "appx",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Wcat",
+      "uninstallDisplayName": "Wcat",
+      "artifactName": "Wcat Setup ${version}-${arch}.${ext}"
+    },
+    "appx": {
+      "applicationId": "Wcat",
+      "identityName": "NSK-Natsuki.Wcat",
+      "publisherDisplayName": "NSK-Natsuki",
+      "publisher": "CN=F2BD52C0-1826-4F4C-953A-B27311D542C3",
+      "backgroundColor": "#0f172a",
+      "showNameOnTiles": true,
+      "artifactName": "Wcat Setup ${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "AudioVideo",
+      "icon": "build/icons",
+      "artifactName": "Wcat-${version}.${ext}"
+    }
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.0.4",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "vite": "^6.2.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@webgpu/types": "^0.1.72",
+    "autoprefixer": "^10.4.21",
+    "electron": "^44.7.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.25.0",
+    "sharp": "^0.35.5",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-win32-x64-msvc": "*",
+    "@rollup/rollup-linux-x64-gnu": "*",
+    "lightningcss-win32-x64-msvc": "*",
+    "lightningcss-linux-x64-gnu": "*"
+  }
+}
